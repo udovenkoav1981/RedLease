@@ -126,28 +126,17 @@ var _ redleasev1.RedLeaseServer = (*Server)(nil)
 
 // New constructs a lock-server and starts its restart quarantine period.
 func New(c Config) (*Server, error) {
-	return newWithDependencies(c, dependencies{
-		now: time.Now,
-	})
-}
-
-func newWithDependencies(c Config, deps dependencies) (*Server, error) {
 	config, err := resolveConfig(c)
 	if err != nil {
 		return nil, err
 	}
-	if deps.now == nil {
-		return nil, errors.New("now function is nil")
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
-		config:       config,
-		now:          deps.now,
-		beforeApply:  deps.beforeApply,
-		afterReceive: deps.afterReceive,
-		ctx:          ctx,
-		cancel:       cancel,
-		shards:       make([]*leaseShard, config.shardCount),
+		config: config,
+		now:    time.Now,
+		ctx:    ctx,
+		cancel: cancel,
+		shards: make([]*leaseShard, config.shardCount),
 	}
 	s.phase.Store(uint32(phaseQuarantine))
 
@@ -161,11 +150,7 @@ func newWithDependencies(c Config, deps dependencies) (*Server, error) {
 		go s.runShard(shard)
 	}
 
-	quarantineDelay := deps.quarantineDelay
-	if quarantineDelay == 0 {
-		quarantineDelay = restartQuarantineTime
-	}
-	s.timer = time.NewTimer(quarantineDelay)
+	s.timer = time.NewTimer(restartQuarantineTime)
 	s.wg.Add(1)
 	go s.runQuarantine()
 

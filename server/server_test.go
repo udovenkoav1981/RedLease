@@ -37,15 +37,16 @@ func (c *fakeClock) Advance(d time.Duration) {
 func newTestServer(t *testing.T, maxTTL time.Duration, shardCount int) (*Server, *fakeClock) {
 	t.Helper()
 	clock := &fakeClock{now: testEpoch}
-	s, err := newWithDependencies(Config{
+	s, err := New(Config{
 		ConfiguredMaxTTL:     maxTTL,
 		ShardCount:           shardCount,
 		ShardQueueDepth:      8,
 		MaxInFlightPerStream: 8,
-	}, dependencies{now: clock.Now, quarantineDelay: time.Hour})
+	})
 	if err != nil {
-		t.Fatalf("newWithDependencies: %v", err)
+		t.Fatalf("New: %v", err)
 	}
+	s.now = clock.Now
 	t.Cleanup(func() {
 		if err := s.Close(); err != nil {
 			t.Errorf("Close: %v", err)
@@ -86,30 +87,6 @@ func TestConfigValidate(t *testing.T) {
 				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
-	}
-}
-
-func TestQuarantineEndsWhenTimerFires(t *testing.T) {
-	s, err := newWithDependencies(Config{
-		ConfiguredMaxTTL:     time.Second,
-		ShardCount:           1,
-		ShardQueueDepth:      1,
-		MaxInFlightPerStream: 1,
-	}, dependencies{
-		now:             (&fakeClock{now: testEpoch}).Now,
-		quarantineDelay: time.Millisecond,
-	})
-	if err != nil {
-		t.Fatalf("newWithDependencies: %v", err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
-
-	deadline := time.Now().Add(time.Second)
-	for !s.active() {
-		if time.Now().After(deadline) {
-			t.Fatal("ordinary quarantine timer did not activate server")
-		}
-		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -308,21 +285,19 @@ func TestLeaseStreamRequestReceivedDuringQuarantineStaysNotReady(t *testing.T) {
 	received := make(chan serverPhase, 1)
 	resumeReceive := make(chan struct{})
 	var resumeOnce sync.Once
-	s, err := newWithDependencies(Config{
+	s, err := New(Config{
 		ConfiguredMaxTTL:     time.Second,
 		ShardCount:           1,
 		ShardQueueDepth:      8,
 		MaxInFlightPerStream: 8,
-	}, dependencies{
-		now:             clock.Now,
-		quarantineDelay: time.Hour,
-		afterReceive: func(phase serverPhase) {
-			received <- phase
-			<-resumeReceive
-		},
 	})
 	if err != nil {
-		t.Fatalf("newWithDependencies: %v", err)
+		t.Fatalf("New: %v", err)
+	}
+	s.now = clock.Now
+	s.afterReceive = func(phase serverPhase) {
+		received <- phase
+		<-resumeReceive
 	}
 	t.Cleanup(func() {
 		resumeOnce.Do(func() { close(resumeReceive) })
@@ -373,26 +348,24 @@ func TestLeaseStreamPreservesSameKeyFIFO(t *testing.T) {
 	var firstOnce sync.Once
 	var secondOnce sync.Once
 	var unblockOnce sync.Once
-	s, err := newWithDependencies(Config{
+	s, err := New(Config{
 		ConfiguredMaxTTL:     time.Second,
 		ShardCount:           2,
 		ShardQueueDepth:      8,
 		MaxInFlightPerStream: 8,
-	}, dependencies{
-		now:             clock.Now,
-		quarantineDelay: time.Hour,
-		beforeApply: func(op operation) {
-			switch op.requestID {
-			case 1:
-				firstOnce.Do(func() { close(firstStarted) })
-				<-unblockFirst
-			case 2:
-				secondOnce.Do(func() { close(secondStarted) })
-			}
-		},
 	})
 	if err != nil {
-		t.Fatalf("newWithDependencies: %v", err)
+		t.Fatalf("New: %v", err)
+	}
+	s.now = clock.Now
+	s.beforeApply = func(op operation) {
+		switch op.requestID {
+		case 1:
+			firstOnce.Do(func() { close(firstStarted) })
+			<-unblockFirst
+		case 2:
+			secondOnce.Do(func() { close(secondStarted) })
+		}
 	}
 	t.Cleanup(func() {
 		unblockOnce.Do(func() { close(unblockFirst) })
@@ -457,23 +430,21 @@ func TestLeaseStreamCanReplyOutOfOrderAcrossShards(t *testing.T) {
 	unblockFirst := make(chan struct{})
 	var blockOnce sync.Once
 	var unblockOnce sync.Once
-	s, err := newWithDependencies(Config{
+	s, err := New(Config{
 		ConfiguredMaxTTL:     time.Second,
 		ShardCount:           2,
 		ShardQueueDepth:      8,
 		MaxInFlightPerStream: 8,
-	}, dependencies{
-		now:             clock.Now,
-		quarantineDelay: time.Hour,
-		beforeApply: func(op operation) {
-			if op.requestID == 1 {
-				blockOnce.Do(func() { close(firstBlocked) })
-				<-unblockFirst
-			}
-		},
 	})
 	if err != nil {
-		t.Fatalf("newWithDependencies: %v", err)
+		t.Fatalf("New: %v", err)
+	}
+	s.now = clock.Now
+	s.beforeApply = func(op operation) {
+		if op.requestID == 1 {
+			blockOnce.Do(func() { close(firstBlocked) })
+			<-unblockFirst
+		}
 	}
 	t.Cleanup(func() {
 		unblockOnce.Do(func() { close(unblockFirst) })
