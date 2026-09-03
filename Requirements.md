@@ -1,5 +1,3 @@
-#### RedLease — a 1-RTT quorum-based distributed lease protocol inspired by Redlock
-
 # RedLease — требования к сервису межнодовых lease-блокировок
 
 Этот документ определяет, **что** должен гарантировать RedLease.
