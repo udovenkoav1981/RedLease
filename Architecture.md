@@ -20,6 +20,7 @@ Storage                    RAM only
 Disk persistence           none
 Server-configured TTL      <= 5 s
 Typical Renew interval     1 s
+Safety margin              100 ms (fixed)
 Leader                     none
 Server-to-server hot path  none
 Client transport           5 persistent ordered gRPC streams
@@ -33,11 +34,13 @@ Global fencing token       none
 - Архитектура не использует leader-based replicated log. 
 - Серверы не обмениваются сообщениями друг с другом, и ни чего друг о друге не знают
 - Membership статический. Все клиенты используют одну и ту же конфигурацию из пяти серверов.
-- клиент независимо и параллельно обращается ко всем пяти lock-server.
+- клиент независимо и параллельно обращается ко всем lock-server с выбранным
+  TTL; в корректной конфигурации — ко всем пяти.
 
 ## 2. Топология общения клиент-сервер
 
-В штатном Acquire или Renew клиент делает параллельный fan-out:
+В штатном Acquire или Renew клиент делает параллельный fan-out на серверы,
+прошедшие проверку TTL:
 
 ```text
              -> S1
@@ -102,7 +105,8 @@ GetTTL()
 ### 5.1. Acquire
 
 Клиент создаёт новый `leaseID`, фиксирует локальное время начала операции и
-одновременно отправляет Acquire всем пяти серверам.
+одновременно отправляет Acquire всем доступным серверам с `selectedTTL`. В
+корректной конфигурации это все пять серверов.
 
 Каждый server локально атомарно выполняет:
 
@@ -111,19 +115,27 @@ if key отсутствует or lease истёк:
     установить leaseID
     deadline = localNow + configuredTTL
     return OK
-else:
-    return BUSY
+if current.leaseID == requested.leaseID:
+    deadline не изменять
+    return ALREADY_OWNED
+return BUSY
 ```
 
-Клиент устанавливает владение после трёх `OK` и сразу возвращает успех
-приложению. Оставшиеся запросы не блокируют этот результат и продолжают
+`OK` и `ALREADY_OWNED` подтверждают наличие запрошенного `leaseID` на сервере и
+учитываются клиентом как успешная реплика. `ALREADY_OWNED` делает повторный
+Acquire идемпотентным, но не продлевает server deadline: продление выполняется
+только через Renew.
+
+Клиент устанавливает владение после трёх успешных реплик и сразу возвращает
+успех приложению. Оставшиеся запросы не блокируют этот результат и продолжают
 обрабатываться для background healing.
 
 ### 5.2. Cleanup после failed Acquire
 
 Результат меньше 3/5 означает, что клиент не получил lease. Даже если lease
 частично установлен на одном или двух серверах, клиент немедленно отправляет
-Release с тем же `leaseID` всем пяти серверам:
+Release с тем же `leaseID` всем серверам, которым был отправлен Acquire. В
+корректной конфигурации это все пять серверов.
 
 Повторная попытка Acquire использует новый `leaseID` и randomized backoff.
 
@@ -154,7 +166,7 @@ server API. Lock-server не знает о понятии `Attach`.
 ### 5.4. Renew
 
 Примерно раз в секунду клиент фиксирует локальное время начала Renew и
-параллельно отправляет запрос всем пяти серверам.
+параллельно отправляет запрос всем серверам с выбранным TTL.
 
 Server локально атомарно выполняет:
 
@@ -169,7 +181,9 @@ return OK
 ```
 
 Истёкший lease не воскрешается. После трёх `OK` Renew успешен и клиент обновляет
-`validUntil`. Если quorum не собран, прежний `validUntil` не меняется, а клиент
+`validUntil`. Если quorum не собран, прежний успешно подтверждённый quorum и
+`validUntil` остаются действительными до этого `validUntil`; потеря соединений
+не отзывает lease досрочно. Неуспешный Renew не продлевает `validUntil`, а клиент
 может повторять Renew в оставшемся окне validity.
 
 ### 5.5. Release
@@ -188,7 +202,8 @@ if current.leaseID == requested.leaseID:
 ### 5.6. GetTTL
 
 `GetTTL()` возвращает TTL, загруженный из конфигурации lock-server при старте.
-Операция не изменяет TTL и не принимает новое значение.
+Операция не изменяет TTL и не принимает новое значение. `GetTTL()` доступен как
+в `QUARANTINE`, так и в `ACTIVE`.
 
 ## 6. Модель времени и validity
 
@@ -209,11 +224,19 @@ TTL задаётся только конфигурацией lock-server и за
 deadline := time.Now().Add(configuredTTL)
 ```
 
-При старте клиент получает настроенное значение через `GetTTL()` от всех пяти
-серверов и проверяет, что значения равны. Разные TTL являются ошибкой
-конфигурации кластера; клиент не должен начинать lease-операции с таким набором
-серверов. Проверенное значение клиент использует только для расчёта локального
-`validUntil` и не передаёт обратно в Acquire или Renew.
+При старте клиент устанавливает соединение минимум с тремя серверами и получает
+их значения через `GetTTL()`. Клиент становится ready только после того, как
+нашёл не менее трёх серверов с одинаковым TTL. Это значение становится
+`selectedTTL` и не меняется до завершения client process.
+
+Серверы с `configuredTTL == selectedTTL` допускаются к Acquire, Renew и
+background healing. Если при startup или последующем reconnect обнаружен server
+с другим TTL, он исключается из lease quorum. Пока клиенту известен хотя бы один
+такой server, при каждом Acquire пишется `ERROR`, а работа продолжается только с
+серверами с `selectedTTL`.
+
+`selectedTTL` используется только для расчёта локального `validUntil` и не
+передаётся обратно в Acquire или Renew.
 
 Клиент измеряет продолжительность Acquire и Renew локально:
 
@@ -236,6 +259,8 @@ validUntil = acquireStart + TTL - safetyMargin
 ```text
 validUntil = renewStart + TTL - safetyMargin
 ```
+
+`safetyMargin` — фиксированная константа протокола, равная 100 ms.
 
 Ожидание quorum входит в TTL и уменьшает доступное приложению время. Failed
 Renew и клиентский background healing не двигают `validUntil` вперёд.
@@ -292,7 +317,10 @@ server start
     v
 QUARANTINE
     |
-    | любой запрос -> NOT_READY
+    | GetTTL  -> configuredTTL
+    | Acquire -> NOT_READY
+    | Renew   -> NOT_READY
+    | Release -> NOT_READY
     |
     | wait > configuredTTL + safetyMargin
     v
@@ -305,9 +333,10 @@ ACTIVE
 REJOIN_DELAY > configuredTTL + safetyMargin
 ```
 
-Это server-side invariant. В `QUARANTINE` server никогда не возвращает `OK` на
-любой запрос, поэтому только что перезапущенный узел нельзя
-использовать в успешном quorum даже при клиенте, не знающем о restart.
+Это server-side invariant. В `QUARANTINE` server отвечает на read-only
+`GetTTL`, но никогда не возвращает `OK` на lease-операции. Поэтому только что
+перезапущенный узел нельзя использовать в успешном lease quorum даже при
+клиенте, не знающем о restart.
 
 После перехода в `ACTIVE` server может снова получить реплики активных leases
 через обычные Acquire, отправленные client-side background healing.
