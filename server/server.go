@@ -113,7 +113,7 @@ type Server struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
-	timer  monotonicTimer
+	timer  *time.Timer
 
 	shards []*leaseShard
 
@@ -127,8 +127,7 @@ var _ redleasev1.RedLeaseServer = (*Server)(nil)
 // New constructs a lock-server and starts its restart quarantine period.
 func New(c Config) (*Server, error) {
 	return newWithDependencies(c, dependencies{
-		wall:   systemWallClock{},
-		timers: systemTimerFactory{},
+		wall: systemWallClock{},
 	})
 }
 
@@ -140,10 +139,6 @@ func newWithDependencies(c Config, deps dependencies) (*Server, error) {
 	if deps.wall == nil {
 		return nil, errors.New("wall clock is nil")
 	}
-	if deps.timers == nil {
-		return nil, errors.New("timer factory is nil")
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
 		config:       config,
@@ -166,11 +161,11 @@ func newWithDependencies(c Config, deps dependencies) (*Server, error) {
 		go s.runShard(shard)
 	}
 
-	s.timer = deps.timers.NewTimer(restartQuarantineTime)
-	if s.timer == nil {
-		s.Close()
-		return nil, errors.New("timer factory returned nil timer")
+	quarantineDelay := deps.quarantineDelay
+	if quarantineDelay == 0 {
+		quarantineDelay = restartQuarantineTime
 	}
+	s.timer = time.NewTimer(quarantineDelay)
 	s.wg.Add(1)
 	go s.runQuarantine()
 
@@ -210,7 +205,7 @@ func (s *Server) runQuarantine() {
 	defer s.timer.Stop()
 
 	select {
-	case <-s.timer.Chan():
+	case <-s.timer.C:
 		s.phase.CompareAndSwap(uint32(phaseQuarantine), uint32(phaseActive))
 	case <-s.ctx.Done():
 	}

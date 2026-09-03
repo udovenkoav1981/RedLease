@@ -394,7 +394,7 @@ QUARANTINE
 ACTIVE
 ```
 
-Переход в `ACTIVE` выполняется по локальному monotonic timer только после:
+Переход в `ACTIVE` выполняется по обычному локальному timer только после:
 
 ```text
 REJOIN_DELAY > protocolMaxTTL + safetyMargin

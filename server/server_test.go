@@ -34,44 +34,15 @@ func (c *fakeWallClock) Advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
-type manualTimer struct {
-	ch       chan time.Time
-	stopOnce sync.Once
-}
-
-func newManualTimer() *manualTimer {
-	return &manualTimer{ch: make(chan time.Time, 1)}
-}
-
-func (t *manualTimer) Chan() <-chan time.Time { return t.ch }
-func (t *manualTimer) Stop() bool {
-	stopped := false
-	t.stopOnce.Do(func() { stopped = true })
-	return stopped
-}
-func (t *manualTimer) Fire() { t.ch <- testEpoch }
-
-type manualTimerFactory struct {
-	timer    *manualTimer
-	duration time.Duration
-}
-
-func (f *manualTimerFactory) NewTimer(d time.Duration) monotonicTimer {
-	f.duration = d
-	return f.timer
-}
-
-func newTestServer(t *testing.T, maxTTL time.Duration, shardCount int) (*Server, *fakeWallClock, *manualTimer) {
+func newTestServer(t *testing.T, maxTTL time.Duration, shardCount int) (*Server, *fakeWallClock) {
 	t.Helper()
 	clock := &fakeWallClock{now: testEpoch}
-	timer := newManualTimer()
-	factory := &manualTimerFactory{timer: timer}
 	s, err := newWithDependencies(Config{
 		ConfiguredMaxTTL:     maxTTL,
 		ShardCount:           shardCount,
 		ShardQueueDepth:      8,
 		MaxInFlightPerStream: 8,
-	}, dependencies{wall: clock, timers: factory})
+	}, dependencies{wall: clock, quarantineDelay: time.Hour})
 	if err != nil {
 		t.Fatalf("newWithDependencies: %v", err)
 	}
@@ -80,21 +51,13 @@ func newTestServer(t *testing.T, maxTTL time.Duration, shardCount int) (*Server,
 			t.Errorf("Close: %v", err)
 		}
 	})
-	if factory.duration != restartQuarantineTime {
-		t.Fatalf("quarantine duration = %s, want %s", factory.duration, restartQuarantineTime)
-	}
-	return s, clock, timer
+	return s, clock
 }
 
-func activateServer(t *testing.T, s *Server, timer *manualTimer) {
+func activateServer(t *testing.T, s *Server) {
 	t.Helper()
-	timer.Fire()
-	deadline := time.Now().Add(time.Second)
-	for !s.active() {
-		if time.Now().After(deadline) {
-			t.Fatal("server did not leave quarantine")
-		}
-		time.Sleep(time.Millisecond)
+	if !s.phase.CompareAndSwap(uint32(phaseQuarantine), uint32(phaseActive)) && !s.active() {
+		t.Fatal("server did not leave quarantine")
 	}
 }
 
@@ -126,8 +89,32 @@ func TestConfigValidate(t *testing.T) {
 	}
 }
 
+func TestQuarantineEndsWhenTimerFires(t *testing.T) {
+	s, err := newWithDependencies(Config{
+		ConfiguredMaxTTL:     time.Second,
+		ShardCount:           1,
+		ShardQueueDepth:      1,
+		MaxInFlightPerStream: 1,
+	}, dependencies{
+		wall:            &fakeWallClock{now: testEpoch},
+		quarantineDelay: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("newWithDependencies: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	deadline := time.Now().Add(time.Second)
+	for !s.active() {
+		if time.Now().After(deadline) {
+			t.Fatal("ordinary quarantine timer did not activate server")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestQuarantineAndGetTTL(t *testing.T) {
-	s, _, timer := newTestServer(t, 2*time.Second, 1)
+	s, _ := newTestServer(t, 2*time.Second, 1)
 	shard := s.shards[0]
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
 
@@ -152,7 +139,7 @@ func TestQuarantineAndGetTTL(t *testing.T) {
 		t.Fatalf("GetTTL during quarantine = %d, want 2000", got)
 	}
 
-	activateServer(t, s, timer)
+	activateServer(t, s)
 	acquire = s.apply(shard, operation{requestID: 14, kind: operationAcquire, key: "key", leaseID: id, requestedTTLMS: 1000})
 	if got := acquire.GetAcquire().GetStatus(); got != redleasev1.LeaseStatus_LEASE_STATUS_OK {
 		t.Fatalf("Acquire after quarantine = %s", got)
@@ -160,8 +147,8 @@ func TestQuarantineAndGetTTL(t *testing.T) {
 }
 
 func TestAcquireClampsMaxUint64BeforeDurationConversion(t *testing.T) {
-	s, clock, timer := newTestServer(t, 2*time.Second, 1)
-	activateServer(t, s, timer)
+	s, clock := newTestServer(t, 2*time.Second, 1)
+	activateServer(t, s)
 
 	op := operation{
 		requestID:      1,
@@ -181,8 +168,8 @@ func TestAcquireClampsMaxUint64BeforeDurationConversion(t *testing.T) {
 }
 
 func TestAcquireZeroTTLHasNoPositiveValidity(t *testing.T) {
-	s, _, timer := newTestServer(t, 2*time.Second, 1)
-	activateServer(t, s, timer)
+	s, _ := newTestServer(t, 2*time.Second, 1)
+	activateServer(t, s)
 	first := leaseID{clientID: 1, bootID: 1, leaseSeq: 1}
 	second := leaseID{clientID: 2, bootID: 2, leaseSeq: 2}
 
@@ -197,8 +184,8 @@ func TestAcquireZeroTTLHasNoPositiveValidity(t *testing.T) {
 }
 
 func TestAcquireAlreadyOwnedDoesNotExtendDeadline(t *testing.T) {
-	s, clock, timer := newTestServer(t, 2*time.Second, 1)
-	activateServer(t, s, timer)
+	s, clock := newTestServer(t, 2*time.Second, 1)
+	activateServer(t, s)
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
 
 	s.apply(s.shards[0], operation{kind: operationAcquire, key: "key", leaseID: id, requestedTTLMS: 1000})
@@ -220,8 +207,8 @@ func TestAcquireAlreadyOwnedDoesNotExtendDeadline(t *testing.T) {
 }
 
 func TestRenewExtendsToConfiguredMaximumAndNeverShortens(t *testing.T) {
-	s, clock, timer := newTestServer(t, 2*time.Second, 1)
-	activateServer(t, s, timer)
+	s, clock := newTestServer(t, 2*time.Second, 1)
+	activateServer(t, s)
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
 	shard := s.shards[0]
 
@@ -243,8 +230,8 @@ func TestRenewExtendsToConfiguredMaximumAndNeverShortens(t *testing.T) {
 }
 
 func TestRenewStaleAndExpiry(t *testing.T) {
-	s, clock, timer := newTestServer(t, time.Second, 1)
-	activateServer(t, s, timer)
+	s, clock := newTestServer(t, time.Second, 1)
+	activateServer(t, s)
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
 	other := leaseID{clientID: 4, bootID: 5, leaseSeq: 6}
 	shard := s.shards[0]
@@ -274,8 +261,8 @@ func TestRenewStaleAndExpiry(t *testing.T) {
 }
 
 func TestReleaseIsIdempotentAndDeletesOnlyMatchingLease(t *testing.T) {
-	s, _, timer := newTestServer(t, time.Second, 1)
-	activateServer(t, s, timer)
+	s, _ := newTestServer(t, time.Second, 1)
+	activateServer(t, s)
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
 	other := leaseID{clientID: 4, bootID: 5, leaseSeq: 6}
 	shard := s.shards[0]
@@ -318,7 +305,6 @@ func TestRemainingTTLFloorsAndClamps(t *testing.T) {
 
 func TestLeaseStreamRequestReceivedDuringQuarantineStaysNotReady(t *testing.T) {
 	clock := &fakeWallClock{now: testEpoch}
-	timer := newManualTimer()
 	received := make(chan serverPhase, 1)
 	resumeReceive := make(chan struct{})
 	var resumeOnce sync.Once
@@ -328,8 +314,8 @@ func TestLeaseStreamRequestReceivedDuringQuarantineStaysNotReady(t *testing.T) {
 		ShardQueueDepth:      8,
 		MaxInFlightPerStream: 8,
 	}, dependencies{
-		wall:   clock,
-		timers: &manualTimerFactory{timer: timer},
+		wall:            clock,
+		quarantineDelay: time.Hour,
 		afterReceive: func(phase serverPhase) {
 			received <- phase
 			<-resumeReceive
@@ -358,7 +344,7 @@ func TestLeaseStreamRequestReceivedDuringQuarantineStaysNotReady(t *testing.T) {
 
 	// Activate before the receive path is allowed to dispatch the request. A
 	// worker-only phase check would incorrectly turn this response into OK.
-	activateServer(t, s, timer)
+	activateServer(t, s)
 	resumeOnce.Do(func() { close(resumeReceive) })
 
 	select {
@@ -381,7 +367,6 @@ func TestLeaseStreamRequestReceivedDuringQuarantineStaysNotReady(t *testing.T) {
 
 func TestLeaseStreamPreservesSameKeyFIFO(t *testing.T) {
 	clock := &fakeWallClock{now: testEpoch}
-	timer := newManualTimer()
 	firstStarted := make(chan struct{})
 	secondStarted := make(chan struct{})
 	unblockFirst := make(chan struct{})
@@ -394,8 +379,8 @@ func TestLeaseStreamPreservesSameKeyFIFO(t *testing.T) {
 		ShardQueueDepth:      8,
 		MaxInFlightPerStream: 8,
 	}, dependencies{
-		wall:   clock,
-		timers: &manualTimerFactory{timer: timer},
+		wall:            clock,
+		quarantineDelay: time.Hour,
 		beforeApply: func(op operation) {
 			switch op.requestID {
 			case 1:
@@ -413,7 +398,7 @@ func TestLeaseStreamPreservesSameKeyFIFO(t *testing.T) {
 		unblockOnce.Do(func() { close(unblockFirst) })
 		_ = s.Close()
 	})
-	activateServer(t, s, timer)
+	activateServer(t, s)
 
 	key := []byte("same-key")
 	stream := newFakeLeaseStream(
@@ -468,7 +453,6 @@ func TestLeaseStreamPreservesSameKeyFIFO(t *testing.T) {
 
 func TestLeaseStreamCanReplyOutOfOrderAcrossShards(t *testing.T) {
 	clock := &fakeWallClock{now: testEpoch}
-	timer := newManualTimer()
 	firstBlocked := make(chan struct{})
 	unblockFirst := make(chan struct{})
 	var blockOnce sync.Once
@@ -479,8 +463,8 @@ func TestLeaseStreamCanReplyOutOfOrderAcrossShards(t *testing.T) {
 		ShardQueueDepth:      8,
 		MaxInFlightPerStream: 8,
 	}, dependencies{
-		wall:   clock,
-		timers: &manualTimerFactory{timer: timer},
+		wall:            clock,
+		quarantineDelay: time.Hour,
 		beforeApply: func(op operation) {
 			if op.requestID == 1 {
 				blockOnce.Do(func() { close(firstBlocked) })
@@ -495,7 +479,7 @@ func TestLeaseStreamCanReplyOutOfOrderAcrossShards(t *testing.T) {
 		unblockOnce.Do(func() { close(unblockFirst) })
 		_ = s.Close()
 	})
-	activateServer(t, s, timer)
+	activateServer(t, s)
 
 	firstKey, secondKey := keysForDifferentShards(t, s)
 	stream := newFakeLeaseStream(
@@ -613,7 +597,7 @@ func getTTLRequest(requestID uint64) *redleasev1.ClientRequest {
 }
 
 func TestDecodeInvalidRequest(t *testing.T) {
-	s, _, _ := newTestServer(t, time.Second, 1)
+	s, _ := newTestServer(t, time.Second, 1)
 	for _, request := range []*redleasev1.ClientRequest{nil, {}, {Operation: &redleasev1.ClientRequest_Acquire{}}} {
 		_, _, err := s.decodeRequest(request)
 		if status.Code(err) != codes.InvalidArgument {
