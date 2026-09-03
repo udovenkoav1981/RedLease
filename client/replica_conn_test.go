@@ -66,6 +66,43 @@ func TestReplicaConnReconnectsAfterGenerationFailure(t *testing.T) {
 	}
 }
 
+func TestReplicaConnReconnectsWhenRequestDeadlineBreaksBlockedSend(t *testing.T) {
+	factory := newScriptedStreamFactory()
+	firstStream := newReplicaFakeStream()
+	factory.results <- streamFactoryResult{stream: firstStream}
+	timer := newControlledBackoffTimer()
+	connection := newTestReplicaConn(t, factory, timer)
+	waitForReplicaState(t, connection, true, false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	result := make(chan streamCallResult, 1)
+	go func() {
+		response, err := connection.call(ctx, acquireStreamRequest("blocked-send"))
+		result <- streamCallResult{response: response, err: err}
+	}()
+	firstStream.waitForSendAttempt(t)
+	if err := receiveCallResult(t, result).err; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("blocked call error = %v, want deadline exceeded", err)
+	}
+	waitForReplicaState(t, connection, false, false)
+
+	wait := timer.nextWait(t)
+	secondStream := newReplicaFakeStream()
+	factory.results <- streamFactoryResult{stream: secondStream}
+	close(wait.proceed)
+	waitForReplicaState(t, connection, true, false)
+
+	secondResult := startReplicaCall(connection, acquireStreamRequest("after blocked send"))
+	request := receiveSentRequest(t, secondStream)
+	secondStream.receive <- fakeReceive{
+		response: streamResponse(request.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
+	}
+	if received := receiveCallResult(t, secondResult); received.err != nil {
+		t.Fatalf("call after reconnect failed: %v", received.err)
+	}
+}
+
 func TestReplicaConnCallWhenUnavailable(t *testing.T) {
 	factory := newScriptedStreamFactory()
 	timer := newControlledBackoffTimer()

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"time"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
@@ -53,6 +54,7 @@ type streamFuture struct {
 	generation *streamGeneration
 	requestID  uint64
 	pending    *pendingStreamCall
+	outbound   *outboundStreamRequest
 }
 
 func (f *streamFuture) await(ctx context.Context) (*redleasev1.ServerResponse, error) {
@@ -60,6 +62,12 @@ func (f *streamFuture) await(ctx context.Context) (*redleasev1.ServerResponse, e
 	case result := <-f.pending.result:
 		return result.response, result.err
 	case <-ctx.Done():
+		// A response deadline may be earlier than the submission deadline. An
+		// ordinary cancellation only abandons this response; the independent
+		// submission-deadline watchdog still breaks a genuinely stuck Send.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) && !f.outbound.sendComplete() {
+			f.generation.terminate(fmt.Errorf("send deadline: %w", ctx.Err()))
+		}
 		f.generation.complete(f.requestID, streamCallResult{err: ctx.Err()})
 		result := <-f.pending.result
 		return result.response, result.err
@@ -80,13 +88,33 @@ type outboundStreamRequest struct {
 	mu       sync.Mutex
 	state    outboundRequestState
 	accepted chan struct{}
+	sent     chan struct{}
+	deadline time.Time
 }
 
-func newOutboundStreamRequest(request *redleasev1.ClientRequest) *outboundStreamRequest {
+func newOutboundStreamRequest(
+	request *redleasev1.ClientRequest,
+	deadline time.Time,
+) *outboundStreamRequest {
 	return &outboundStreamRequest{
 		request:  request,
 		state:    outboundRequestQueued,
 		accepted: make(chan struct{}),
+		sent:     make(chan struct{}),
+		deadline: deadline,
+	}
+}
+
+func (r *outboundStreamRequest) finishSend() {
+	close(r.sent)
+}
+
+func (r *outboundStreamRequest) sendComplete() bool {
+	select {
+	case <-r.sent:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -136,15 +164,32 @@ type streamGeneration struct {
 	terminateOnce sync.Once
 	workers       sync.WaitGroup
 	closeSendErr  error
+
+	// beforeSendAcceptance is a test-only scheduling seam. Production
+	// generations leave it nil.
+	beforeSendAcceptance func()
 }
 
 func newStreamGeneration(stream leaseClientStream, cancel context.CancelFunc) *streamGeneration {
+	return newStreamGenerationWithConfig(stream, cancel, streamGenerationConfig{})
+}
+
+type streamGenerationConfig struct {
+	beforeSendAcceptance func()
+}
+
+func newStreamGenerationWithConfig(
+	stream leaseClientStream,
+	cancel context.CancelFunc,
+	config streamGenerationConfig,
+) *streamGeneration {
 	generation := &streamGeneration{
-		stream:    stream,
-		cancel:    cancel,
-		sendQueue: make(chan *outboundStreamRequest),
-		done:      make(chan struct{}),
-		pending:   make(map[uint64]*pendingStreamCall),
+		stream:               stream,
+		cancel:               cancel,
+		sendQueue:            make(chan *outboundStreamRequest),
+		done:                 make(chan struct{}),
+		pending:              make(map[uint64]*pendingStreamCall),
+		beforeSendAcceptance: config.beforeSendAcceptance,
 	}
 
 	generation.workers.Add(2)
@@ -183,17 +228,18 @@ func (g *streamGeneration) submit(
 	if err := g.register(requestID, call); err != nil {
 		return nil, err
 	}
-	future := &streamFuture{
-		generation: g,
-		requestID:  requestID,
-		pending:    call,
-	}
-
 	requestCopy := &redleasev1.ClientRequest{
 		RequestId: requestID,
 		Operation: request.Operation,
 	}
-	outbound := newOutboundStreamRequest(requestCopy)
+	deadline, _ := ctx.Deadline()
+	outbound := newOutboundStreamRequest(requestCopy, deadline)
+	future := &streamFuture{
+		generation: g,
+		requestID:  requestID,
+		pending:    call,
+		outbound:   outbound,
+	}
 
 	if err := ctx.Err(); err != nil {
 		g.complete(requestID, streamCallResult{err: err})
@@ -215,10 +261,7 @@ func (g *streamGeneration) submit(
 	case <-ctx.Done():
 		return g.cancelSubmission(ctx.Err(), future, outbound)
 	case <-g.done:
-		if outbound.currentState() == outboundRequestAccepted {
-			return future, nil
-		}
-		return nil, g.err()
+		return g.cancelSubmission(g.err(), future, outbound)
 	}
 }
 
@@ -312,13 +355,39 @@ func (g *streamGeneration) sendLoop() {
 		case <-g.done:
 			return
 		case outbound := <-g.sendQueue:
+			if g.beforeSendAcceptance != nil {
+				g.beforeSendAcceptance()
+			}
 			if !outbound.beginSend() {
 				continue
 			}
-			if err := g.stream.Send(outbound.request); err != nil {
+			if !outbound.deadline.IsZero() {
+				go g.watchSendDeadline(outbound)
+			}
+			err := g.stream.Send(outbound.request)
+			outbound.finishSend()
+			if err != nil {
 				g.terminate(fmt.Errorf("send: %w", err))
 				return
 			}
+		}
+	}
+}
+
+func (g *streamGeneration) watchSendDeadline(outbound *outboundStreamRequest) {
+	delay := time.Until(outbound.deadline)
+	if delay < 0 {
+		delay = 0
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-outbound.sent:
+	case <-g.done:
+	case <-timer.C:
+		if !outbound.sendComplete() {
+			g.terminate(fmt.Errorf("send deadline: %w", context.DeadlineExceeded))
 		}
 	}
 }

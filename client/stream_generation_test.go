@@ -197,6 +197,63 @@ func TestStreamSubmitCancellationAfterWriterAcceptanceReturnsFuture(t *testing.T
 	}
 }
 
+func TestStreamTerminationBetweenDequeueAndAcceptanceCancelsRequest(t *testing.T) {
+	dequeued := make(chan struct{})
+	resume := make(chan struct{})
+	var dequeuedOnce sync.Once
+	generation, stream := newTestStreamGenerationWithOptions(t, fakeStreamOptions{
+		beforeSendAcceptance: func() {
+			dequeuedOnce.Do(func() { close(dequeued) })
+			<-resume
+		},
+	})
+
+	submission := startStreamSubmit(
+		generation,
+		context.Background(),
+		acquireStreamRequest("termination-race"),
+	)
+	select {
+	case <-dequeued:
+	case <-time.After(time.Second):
+		t.Fatal("writer did not dequeue request")
+	}
+
+	failure := errors.New("terminated before acceptance")
+	generation.terminate(failure)
+	submitted := receiveSubmitResult(t, submission)
+	assertTransportCause(t, submitted.err, failure)
+	if submitted.future != nil {
+		t.Fatal("request canceled before acceptance returned a future")
+	}
+
+	close(resume)
+	select {
+	case <-stream.sendAttempt:
+		t.Fatal("request reached Send after submit reported definite failure")
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestStreamResponseTimeoutTerminatesBlockedSend(t *testing.T) {
+	generation, stream := newTestStreamGeneration(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	result := startStreamCallWithContext(generation, ctx, acquireStreamRequest("blocked-send"))
+	stream.waitForSendAttempt(t)
+	received := receiveCallResult(t, result)
+	if !errors.Is(received.err, context.DeadlineExceeded) {
+		t.Fatalf("blocked Send error = %v, want deadline exceeded", received.err)
+	}
+
+	select {
+	case <-generation.done:
+	case <-time.After(time.Second):
+		t.Fatal("response timeout did not terminate blocked generation")
+	}
+}
+
 func TestStreamGenerationTimeoutAndLateResponseDoNotBlockAnotherCall(t *testing.T) {
 	generation, stream := newTestStreamGeneration(t)
 
@@ -322,8 +379,9 @@ type streamSubmitResult struct {
 }
 
 type fakeStreamOptions struct {
-	sendErr  error
-	closeErr error
+	sendErr              error
+	closeErr             error
+	beforeSendAcceptance func()
 }
 
 type fakeLeaseClientStream struct {
@@ -401,7 +459,9 @@ func newTestStreamGenerationWithOptions(
 		sendErr:     options.sendErr,
 		closeErr:    options.closeErr,
 	}
-	generation := newStreamGeneration(stream, cancel)
+	generation := newStreamGenerationWithConfig(stream, cancel, streamGenerationConfig{
+		beforeSendAcceptance: options.beforeSendAcceptance,
+	})
 	t.Cleanup(func() { _ = generation.Close() })
 	return generation, stream
 }
