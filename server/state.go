@@ -67,7 +67,7 @@ func (s *Server) apply(shard *leaseShard, op operation) *redleasev1.ServerRespon
 		s.beforeApply(op)
 	}
 
-	now := s.wall.Now().Round(0)
+	now := s.now().Round(0)
 	switch op.kind {
 	case operationAcquire:
 		return s.acquire(shard, op, now)

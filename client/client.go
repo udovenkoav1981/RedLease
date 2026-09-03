@@ -21,7 +21,7 @@ type Client struct {
 
 	idGenerator     *leaseIDGenerator
 	responseTimeout time.Duration
-	wall            wallClock
+	now             func() time.Time
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -47,7 +47,7 @@ func New(config Config) (*Client, error) {
 	client := &Client{
 		idGenerator:     idGenerator,
 		responseTimeout: resolved.responseTimeout,
-		wall:            systemWallClock{},
+		now:             wallNow,
 		ctx:             ctx,
 		cancel:          cancel,
 	}

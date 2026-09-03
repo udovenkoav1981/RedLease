@@ -17,32 +17,32 @@ import (
 
 var testEpoch = time.Date(2026, time.January, 2, 3, 4, 5, 123456789, time.UTC)
 
-type fakeWallClock struct {
+type fakeClock struct {
 	mu  sync.Mutex
 	now time.Time
 }
 
-func (c *fakeWallClock) Now() time.Time {
+func (c *fakeClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.now
 }
 
-func (c *fakeWallClock) Advance(d time.Duration) {
+func (c *fakeClock) Advance(d time.Duration) {
 	c.mu.Lock()
 	c.now = c.now.Add(d)
 	c.mu.Unlock()
 }
 
-func newTestServer(t *testing.T, maxTTL time.Duration, shardCount int) (*Server, *fakeWallClock) {
+func newTestServer(t *testing.T, maxTTL time.Duration, shardCount int) (*Server, *fakeClock) {
 	t.Helper()
-	clock := &fakeWallClock{now: testEpoch}
+	clock := &fakeClock{now: testEpoch}
 	s, err := newWithDependencies(Config{
 		ConfiguredMaxTTL:     maxTTL,
 		ShardCount:           shardCount,
 		ShardQueueDepth:      8,
 		MaxInFlightPerStream: 8,
-	}, dependencies{wall: clock, quarantineDelay: time.Hour})
+	}, dependencies{now: clock.Now, quarantineDelay: time.Hour})
 	if err != nil {
 		t.Fatalf("newWithDependencies: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestQuarantineEndsWhenTimerFires(t *testing.T) {
 		ShardQueueDepth:      1,
 		MaxInFlightPerStream: 1,
 	}, dependencies{
-		wall:            &fakeWallClock{now: testEpoch},
+		now:             (&fakeClock{now: testEpoch}).Now,
 		quarantineDelay: time.Millisecond,
 	})
 	if err != nil {
@@ -304,7 +304,7 @@ func TestRemainingTTLFloorsAndClamps(t *testing.T) {
 }
 
 func TestLeaseStreamRequestReceivedDuringQuarantineStaysNotReady(t *testing.T) {
-	clock := &fakeWallClock{now: testEpoch}
+	clock := &fakeClock{now: testEpoch}
 	received := make(chan serverPhase, 1)
 	resumeReceive := make(chan struct{})
 	var resumeOnce sync.Once
@@ -314,7 +314,7 @@ func TestLeaseStreamRequestReceivedDuringQuarantineStaysNotReady(t *testing.T) {
 		ShardQueueDepth:      8,
 		MaxInFlightPerStream: 8,
 	}, dependencies{
-		wall:            clock,
+		now:             clock.Now,
 		quarantineDelay: time.Hour,
 		afterReceive: func(phase serverPhase) {
 			received <- phase
@@ -366,7 +366,7 @@ func TestLeaseStreamRequestReceivedDuringQuarantineStaysNotReady(t *testing.T) {
 }
 
 func TestLeaseStreamPreservesSameKeyFIFO(t *testing.T) {
-	clock := &fakeWallClock{now: testEpoch}
+	clock := &fakeClock{now: testEpoch}
 	firstStarted := make(chan struct{})
 	secondStarted := make(chan struct{})
 	unblockFirst := make(chan struct{})
@@ -379,7 +379,7 @@ func TestLeaseStreamPreservesSameKeyFIFO(t *testing.T) {
 		ShardQueueDepth:      8,
 		MaxInFlightPerStream: 8,
 	}, dependencies{
-		wall:            clock,
+		now:             clock.Now,
 		quarantineDelay: time.Hour,
 		beforeApply: func(op operation) {
 			switch op.requestID {
@@ -452,7 +452,7 @@ func TestLeaseStreamPreservesSameKeyFIFO(t *testing.T) {
 }
 
 func TestLeaseStreamCanReplyOutOfOrderAcrossShards(t *testing.T) {
-	clock := &fakeWallClock{now: testEpoch}
+	clock := &fakeClock{now: testEpoch}
 	firstBlocked := make(chan struct{})
 	unblockFirst := make(chan struct{})
 	var blockOnce sync.Once
@@ -463,7 +463,7 @@ func TestLeaseStreamCanReplyOutOfOrderAcrossShards(t *testing.T) {
 		ShardQueueDepth:      8,
 		MaxInFlightPerStream: 8,
 	}, dependencies{
-		wall:            clock,
+		now:             clock.Now,
 		quarantineDelay: time.Hour,
 		beforeApply: func(op operation) {
 			if op.requestID == 1 {

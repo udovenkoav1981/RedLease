@@ -58,7 +58,7 @@ func (c *Client) Acquire(
 
 	id := c.idGenerator.next()
 	lease := newLease(c, id, key, ttl)
-	operationStart := c.wall.now()
+	operationStart := c.now()
 
 	operationContext, cancelOperation := context.WithTimeout(c.ctx, c.responseTimeout)
 	stopCallerCancellation := context.AfterFunc(ctx, cancelOperation)
@@ -112,7 +112,7 @@ func (c *Client) Acquire(
 					firstFailure = result.err
 				}
 			} else if result.response != nil && isSuccessfulAcquire(result.response.GetStatus()) {
-				now := c.wall.now()
+				now := c.now()
 				successful[result.replica] = true
 				candidates[result.replica] = candidateValidUntil(
 					operationStart,
@@ -146,7 +146,7 @@ func (c *Client) Acquire(
 				candidates,
 				successful,
 				ServerCount-received,
-				c.wall.now(),
+				c.now(),
 			) {
 				received = ServerCount
 			}
@@ -226,7 +226,7 @@ func (c *Client) collectRemainingAcquireResults(
 				operationStart,
 				Milliseconds(result.response.GetTtlMs()),
 			)
-			if c.wall.now().Before(candidate) {
+			if c.now().Before(candidate) {
 				lease.markConfirmed(result.replica, candidate)
 			}
 		}

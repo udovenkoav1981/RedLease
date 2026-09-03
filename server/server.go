@@ -100,7 +100,7 @@ type Server struct {
 	redleasev1.UnimplementedRedLeaseServer
 
 	config resolvedConfig
-	wall   wallClock
+	now    func() time.Time
 	// beforeApply is a package-private scheduling seam used by concurrency
 	// tests. Production servers leave it nil.
 	beforeApply func(operation)
@@ -127,7 +127,7 @@ var _ redleasev1.RedLeaseServer = (*Server)(nil)
 // New constructs a lock-server and starts its restart quarantine period.
 func New(c Config) (*Server, error) {
 	return newWithDependencies(c, dependencies{
-		wall: systemWallClock{},
+		now: wallNow,
 	})
 }
 
@@ -136,13 +136,13 @@ func newWithDependencies(c Config, deps dependencies) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	if deps.wall == nil {
-		return nil, errors.New("wall clock is nil")
+	if deps.now == nil {
+		return nil, errors.New("now function is nil")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
 		config:       config,
-		wall:         deps.wall,
+		now:          deps.now,
 		beforeApply:  deps.beforeApply,
 		afterReceive: deps.afterReceive,
 		ctx:          ctx,
