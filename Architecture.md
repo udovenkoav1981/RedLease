@@ -1,0 +1,344 @@
+# RedLease — архитектура
+
+Этот документ описывает принятую архитектуру RedLease и то, **как** она
+обеспечивает свойства из [`Requirements.md`](Requirements.md).
+
+Архитектурные решения из этого документа не изменяются без отдельного
+согласования.
+
+## 1. Обзор
+
+RedLease — специализированный quorum-based distributed lease service,
+оптимизированный для Acquire и Renew примерно за один network RTT.
+
+Ключевые решения:
+
+```text
+Servers                    5 independent lock-servers
+Quorum                     3 of 5
+Storage                    RAM only
+Disk persistence           none
+Server-configured TTL      <= 5 s
+Typical Renew interval     1 s
+Leader                     none
+Server-to-server hot path  none
+Client transport           5 persistent ordered gRPC streams
+Initial ownership          >= 3/5
+Steady-state target        5/5
+Restart protection         quarantine > configuredTTL + safetyMargin
+Forced lease overwrite     forbidden
+Global fencing token       none
+```
+
+- Архитектура не использует leader-based replicated log. 
+- Серверы не обмениваются сообщениями друг с другом, и ни чего друг о друге не знают
+- Membership статический. Все клиенты используют одну и ту же конфигурацию из пяти серверов.
+- клиент независимо и параллельно обращается ко всем пяти lock-server.
+
+## 2. Топология общения клиент-сервер
+
+В штатном Acquire или Renew клиент делает параллельный fan-out:
+
+```text
+             -> S1
+             -> S2
+client       -> S3
+             -> S4
+             -> S5
+```
+
+Критический путь заканчивается после третьего успешного ответа, поэтому latency
+примерно равна RTT до третьего по скорости сервера.
+
+## 3. Состояние lock-server
+
+Для каждого ключа server хранит только локальное состояние в RAM:
+
+```go
+type Lease struct {
+    LeaseID  LeaseID
+    Deadline time.Time
+}
+```
+
+Операции над одним ключом выполняются локально атомарно. 
+
+Истёкшие записи могут удаляться лениво при обращении и/или фоновым механизмом.
+Точная memory-management strategy будет определена при реализации.
+
+## 4. Lease identity
+
+Lease идентифицируется составным значением:
+
+```text
+leaseID = { 
+    clientID,  : uint32
+    bootID,    : uint32
+    leaseSeq   : uint64
+}
+```
+
+`clientID` — уникальный ID клиентской ноды, заданный статической конфигурацией.
+Повторяющиеся `clientID` являются ошибкой конфигурации.
+
+`bootID` генерируется криптографическим RNG при каждом запуске клиентского
+процесса и разделяет разные инкарнации одной клиентской ноды.
+
+`leaseSeq` — локальный атомарный счётчик, начинающийся с нуля после старта
+процесса. Каждый Acquire использует новое значение. Поэтому один процесс может
+одновременно владеть множеством разных ключей, не переиспользуя идентификаторы.
+
+## 5. Операции протокола
+
+Клиентские операции:
+
+```text
+Acquire(key, leaseID)
+Renew(key, leaseID)
+Release(key, leaseID)
+GetTTL()
+```
+
+### 5.1. Acquire
+
+Клиент создаёт новый `leaseID`, фиксирует локальное время начала операции и
+одновременно отправляет Acquire всем пяти серверам.
+
+Каждый server локально атомарно выполняет:
+
+```text
+if key отсутствует or lease истёк:
+    установить leaseID
+    deadline = localNow + configuredTTL
+    return OK
+else:
+    return BUSY
+```
+
+Клиент устанавливает владение после трёх `OK` и сразу возвращает успех
+приложению. Оставшиеся запросы не блокируют этот результат и продолжают
+обрабатываться для background healing.
+
+### 5.2. Cleanup после failed Acquire
+
+Результат меньше 3/5 означает, что клиент не получил lease. Даже если lease
+частично установлен на одном или двух серверах, клиент немедленно отправляет
+Release с тем же `leaseID` всем пяти серверам:
+
+Повторная попытка Acquire использует новый `leaseID` и randomized backoff.
+
+### 5.3. Background healing и client-side Attach
+
+После commit threshold 3/5 клиент продолжает в фоне доводить активный lease до
+целевых 5/5 в целях повышения отказоустойчивости свого quorum и снижения вероятности 
+повторного конфликта конкурирующих клиентов:
+
+```text
+3/5 -> 4/5 -> 5/5
+```
+
+`Attach` — только название логической операции внутри клиента. Она не является
+операцией wire protocol, не отправляется в stream и ничего не добавляет в
+server API. Lock-server не знает о понятии `Attach`.
+
+В рамках этой логической операции клиент продолжает обрабатывать ответы
+исходного Acquire и отправляет обычный `Acquire(key, leaseID)` серверам, на
+которых lease отсутствует. Healing продолжается в течение жизни lease, в том
+числе после reconnect или restart сервера.
+
+После Release или истечения локальной validity (если Renew не удалось) клиент прекращает healing.
+
+Конкретная retry/backoff policy background healing остаётся параметром
+реализации.
+
+### 5.4. Renew
+
+Примерно раз в секунду клиент фиксирует локальное время начала Renew и
+параллельно отправляет запрос всем пяти серверам.
+
+Server локально атомарно выполняет:
+
+```text
+if current.leaseID != requested.leaseID:
+    return STALE
+if lease истёк:
+    return STALE
+
+deadline = localNow + configuredTTL
+return OK
+```
+
+Истёкший lease не воскрешается. После трёх `OK` Renew успешен и клиент обновляет
+`validUntil`. Если quorum не собран, прежний `validUntil` не меняется, а клиент
+может повторять Renew в оставшемся окне validity.
+
+### 5.5. Release
+
+Server удаляет запись только при совпадении идентификатора:
+
+```text
+if current.leaseID == requested.leaseID:
+    delete lease
+```
+
+Это предотвращает удаление нового lease старым владельцем.
+
+Обычный Release может быть асинхронным best-effort.
+
+### 5.6. GetTTL
+
+`GetTTL()` возвращает TTL, загруженный из конфигурации lock-server при старте.
+Операция не изменяет TTL и не принимает новое значение.
+
+## 6. Модель времени и validity
+
+TTL задаётся только конфигурацией lock-server и загружается при старте процесса.
+В течение жизни процесса значение неизменно. Настройка TTL для отдельного lease
+и изменение TTL через protocol API отсутствуют.
+
+Изменение TTL существующего deployment, в том числе между последовательными
+запусками server process, не поддерживается. Такая процедура требует отдельного
+проектирования с учётом restart quarantine.
+
+От клиента к серверу НЕ передаётся `ttl`. Absolute timestamp или deadline не
+сериализуются.
+
+Каждый server устанавливает локальный deadline:
+
+```go
+deadline := time.Now().Add(configuredTTL)
+```
+
+При старте клиент получает настроенное значение через `GetTTL()` от всех пяти
+серверов и проверяет, что значения равны. Разные TTL являются ошибкой
+конфигурации кластера; клиент не должен начинать lease-операции с таким набором
+серверов. Проверенное значение клиент использует только для расчёта локального
+`validUntil` и не передаёт обратно в Acquire или Renew.
+
+Клиент измеряет продолжительность Acquire и Renew локально:
+
+```go
+start := time.Now()
+elapsed := time.Since(start)
+```
+
+Пока `time.Time` остаётся внутри процесса, Go использует monotonic-компоненту.
+Значения локального monotonic time никогда не сравниваются между машинами.
+
+После успешного Acquire клиент устанавливает:
+
+```text
+validUntil = acquireStart + TTL - safetyMargin
+```
+
+После успешного quorum Renew:
+
+```text
+validUntil = renewStart + TTL - safetyMargin
+```
+
+Ожидание quorum входит в TTL и уменьшает доступное приложению время. Failed
+Renew и клиентский background healing не двигают `validUntil` вперёд.
+
+NTP используется операционными системами штатно, но correctness не зависит от
+сравнения синхронизированных wall-clock значений.
+
+## 7. Persistent ordered gRPC streams
+
+Каждая клиентская нода поддерживает по одному независимому persistent ordered
+gRPC stream к каждому lock-server:
+
+```text
+client
+  |---- stream ---> S1
+  |---- stream ---> S2
+  |---- stream ---> S3
+  |---- stream ---> S4
+  `---- stream ---> S5
+```
+
+Один stream multiplexes операции для множества ключей:
+
+```text
+Acquire
+Renew
+Release
+Acquire
+...
+```
+
+Streams независимы: slow или disconnected server не создаёт head-of-line
+blocking для остальных четырёх путей.
+
+Persistent streams:
+
+- убирают connection setup из hot path;
+- сохраняют порядок операций для пары client/server;
+- уменьшают RPC overhead;
+- позволяют обслуживать тысячи активных leases через пять соединений.
+
+Точная reconnect sequencing и необходимость отдельного request sequence number
+будут определены при проектировании wire protocol.
+
+## 8. Restart quarantine
+
+После crash/restart server теряет все RAM-only leases. Чтобы пустой server не
+создал новый конфликтующий quorum, каждый процесс начинает работу в состоянии
+`QUARANTINE`:
+
+```text
+server start
+    |
+    v
+QUARANTINE
+    |
+    | любой запрос -> NOT_READY
+    |
+    | wait > configuredTTL + safetyMargin
+    v
+ACTIVE
+```
+
+Переход в `ACTIVE` выполняется по локальному monotonic timer только после:
+
+```text
+REJOIN_DELAY > configuredTTL + safetyMargin
+```
+
+Это server-side invariant. В `QUARANTINE` server никогда не возвращает `OK` на
+любой запрос, поэтому только что перезапущенный узел нельзя
+использовать в успешном quorum даже при клиенте, не знающем о restart.
+
+После перехода в `ACTIVE` server может снова получить реплики активных leases
+через обычные Acquire, отправленные client-side background healing.
+
+## 9. Полный restart кластера
+
+При одновременном падении пяти серверов всё lock state теряется. После запуска
+каждый server независимо проходит обязательный quarantine.
+
+Даже если процессы или операционные системы перезапустились быстрее пяти
+секунд, новый quorum не станет доступен раньше, чем истекут все leases,
+существовавшие до отказа:
+
+```text
+all RAM state lost
+        |
+all servers enter QUARANTINE
+        |
+wait > configuredTTL + safetyMargin
+        |
+servers become ACTIVE
+```
+
+Таким образом безопасность не зависит от длительности внешней процедуры
+restart.
+
+## 10. Архитектурные инварианты
+
+```text
+< 3 successful replicas -> client does not own lease
+>=3 successful replicas -> client owns lease
+3/5                     -> commit threshold
+5/5                     -> desired steady state
+```
