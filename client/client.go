@@ -47,7 +47,7 @@ func New(config Config) (*Client, error) {
 	client := &Client{
 		idGenerator:     idGenerator,
 		responseTimeout: resolved.responseTimeout,
-		now:             wallNow,
+		now:             time.Now,
 		ctx:             ctx,
 		cancel:          cancel,
 	}

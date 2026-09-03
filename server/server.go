@@ -127,7 +127,7 @@ var _ redleasev1.RedLeaseServer = (*Server)(nil)
 // New constructs a lock-server and starts its restart quarantine period.
 func New(c Config) (*Server, error) {
 	return newWithDependencies(c, dependencies{
-		now: wallNow,
+		now: time.Now,
 	})
 }
 

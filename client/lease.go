@@ -87,7 +87,7 @@ func (l *Lease) Valid() bool {
 	validUntil := l.validUntil
 	active := l.lifecycle == leaseActive
 	l.stateMu.RUnlock()
-	return active && l.now().Before(validUntil)
+	return active && l.now().Round(0).Before(validUntil)
 }
 
 func (l *Lease) setAcquireValidity(validUntil time.Time) {
@@ -100,14 +100,14 @@ func (l *Lease) setAcquireValidity(validUntil time.Time) {
 
 func (l *Lease) markConfirmed(replica int, confirmedUntil time.Time) {
 	l.stateMu.Lock()
-	if l.lifecycle == leaseActive && l.now().Before(confirmedUntil) {
+	if l.lifecycle == leaseActive && l.now().Round(0).Before(confirmedUntil) {
 		l.confirmedUntil[replica] = confirmedUntil.Round(0)
 	}
 	l.stateMu.Unlock()
 }
 
 func (l *Lease) confirmedReplicas() [ServerCount]bool {
-	now := l.now()
+	now := l.now().Round(0)
 	l.stateMu.RLock()
 	defer l.stateMu.RUnlock()
 

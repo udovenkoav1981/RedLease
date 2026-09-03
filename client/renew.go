@@ -59,7 +59,7 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 		}
 	}()
 
-	operationStart := l.now()
+	operationStart := l.now().Round(0)
 	operationContext, cancelOperation := context.WithTimeout(l.ctx, l.client.responseTimeout)
 	stopCallerCancellation := context.AfterFunc(ctx, cancelOperation)
 	defer func() {
@@ -120,7 +120,7 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 				result.response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
 				l.clearConfirmed(result.replica)
 			} else {
-				now := l.now()
+				now := l.now().Round(0)
 				successful[result.replica] = true
 				candidates[result.replica] = candidateValidUntil(
 					operationStart,
@@ -158,7 +158,7 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 				candidates,
 				successful,
 				ServerCount-received,
-				l.now(),
+				l.now().Round(0),
 			) {
 				collecting = false
 			}
@@ -238,7 +238,7 @@ func (l *Lease) collectRemainingRenewResults(
 			operationStart,
 			Milliseconds(result.response.GetTtlMs()),
 		)
-		if l.now().Before(candidate) {
+		if l.now().Round(0).Before(candidate) {
 			l.markConfirmed(result.replica, candidate)
 		} else {
 			l.clearConfirmed(result.replica)
