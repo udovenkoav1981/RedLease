@@ -49,15 +49,80 @@ type pendingStreamCall struct {
 	result chan streamCallResult
 }
 
+type streamFuture struct {
+	generation *streamGeneration
+	requestID  uint64
+	pending    *pendingStreamCall
+}
+
+func (f *streamFuture) await(ctx context.Context) (*redleasev1.ServerResponse, error) {
+	select {
+	case result := <-f.pending.result:
+		return result.response, result.err
+	case <-ctx.Done():
+		f.generation.complete(f.requestID, streamCallResult{err: ctx.Err()})
+		result := <-f.pending.result
+		return result.response, result.err
+	}
+}
+
+type outboundRequestState uint8
+
+const (
+	outboundRequestQueued outboundRequestState = iota
+	outboundRequestAccepted
+	outboundRequestCanceled
+)
+
 type outboundStreamRequest struct {
 	request *redleasev1.ClientRequest
+
+	mu       sync.Mutex
+	state    outboundRequestState
+	accepted chan struct{}
+}
+
+func newOutboundStreamRequest(request *redleasev1.ClientRequest) *outboundStreamRequest {
+	return &outboundStreamRequest{
+		request:  request,
+		state:    outboundRequestQueued,
+		accepted: make(chan struct{}),
+	}
+}
+
+func (r *outboundStreamRequest) beginSend() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state == outboundRequestCanceled {
+		return false
+	}
+	r.state = outboundRequestAccepted
+	// Closing accepted is the submission barrier: the single writer has accepted
+	// this request into stream order before it invokes Send.
+	close(r.accepted)
+	return true
+}
+
+func (r *outboundStreamRequest) cancelBeforeSend() outboundRequestState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state == outboundRequestQueued {
+		r.state = outboundRequestCanceled
+	}
+	return r.state
+}
+
+func (r *outboundStreamRequest) currentState() outboundRequestState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.state
 }
 
 type streamGeneration struct {
 	stream leaseClientStream
 	cancel context.CancelFunc
 
-	sendQueue chan outboundStreamRequest
+	sendQueue chan *outboundStreamRequest
 	done      chan struct{}
 
 	requestIDMu        sync.Mutex
@@ -77,7 +142,7 @@ func newStreamGeneration(stream leaseClientStream, cancel context.CancelFunc) *s
 	generation := &streamGeneration{
 		stream:    stream,
 		cancel:    cancel,
-		sendQueue: make(chan outboundStreamRequest),
+		sendQueue: make(chan *outboundStreamRequest),
 		done:      make(chan struct{}),
 		pending:   make(map[uint64]*pendingStreamCall),
 	}
@@ -93,6 +158,17 @@ func (g *streamGeneration) call(
 	ctx context.Context,
 	request *redleasev1.ClientRequest,
 ) (*redleasev1.ServerResponse, error) {
+	future, err := g.submit(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return future.await(ctx)
+}
+
+func (g *streamGeneration) submit(
+	ctx context.Context,
+	request *redleasev1.ClientRequest,
+) (*streamFuture, error) {
 	if request == nil {
 		return nil, errNilStreamRequest
 	}
@@ -107,36 +183,72 @@ func (g *streamGeneration) call(
 	if err := g.register(requestID, call); err != nil {
 		return nil, err
 	}
+	future := &streamFuture{
+		generation: g,
+		requestID:  requestID,
+		pending:    call,
+	}
 
 	requestCopy := &redleasev1.ClientRequest{
 		RequestId: requestID,
 		Operation: request.Operation,
 	}
+	outbound := newOutboundStreamRequest(requestCopy)
 
 	if err := ctx.Err(); err != nil {
 		g.complete(requestID, streamCallResult{err: err})
-		result := <-call.result
-		return result.response, result.err
+		return nil, err
 	}
 
 	select {
-	case g.sendQueue <- outboundStreamRequest{request: requestCopy}:
+	case g.sendQueue <- outbound:
 	case <-ctx.Done():
 		g.complete(requestID, streamCallResult{err: ctx.Err()})
-		result := <-call.result
-		return result.response, result.err
+		return nil, ctx.Err()
 	case <-g.done:
-		result := <-call.result
-		return result.response, result.err
+		return nil, g.err()
 	}
 
 	select {
-	case result := <-call.result:
-		return result.response, result.err
+	case <-outbound.accepted:
+		return g.submissionOutcome(future, outbound)
 	case <-ctx.Done():
-		g.complete(requestID, streamCallResult{err: ctx.Err()})
-		result := <-call.result
-		return result.response, result.err
+		return g.cancelSubmission(ctx.Err(), future, outbound)
+	case <-g.done:
+		if outbound.currentState() == outboundRequestAccepted {
+			return future, nil
+		}
+		return nil, g.err()
+	}
+}
+
+func (g *streamGeneration) submissionOutcome(
+	future *streamFuture,
+	outbound *outboundStreamRequest,
+) (*streamFuture, error) {
+	if outbound.currentState() == outboundRequestAccepted {
+		return future, nil
+	}
+	if terminalErr := g.err(); terminalErr != nil {
+		return nil, terminalErr
+	}
+	return nil, &streamTransportError{cause: errStreamClosed}
+}
+
+func (g *streamGeneration) cancelSubmission(
+	cause error,
+	future *streamFuture,
+	outbound *outboundStreamRequest,
+) (*streamFuture, error) {
+	state := outbound.cancelBeforeSend()
+	switch state {
+	case outboundRequestCanceled:
+		g.complete(future.requestID, streamCallResult{err: cause})
+		return nil, cause
+	case outboundRequestAccepted:
+		return future, nil
+	default:
+		panic("unexpected outbound request state")
 	}
 }
 
@@ -200,6 +312,9 @@ func (g *streamGeneration) sendLoop() {
 		case <-g.done:
 			return
 		case outbound := <-g.sendQueue:
+			if !outbound.beginSend() {
+				continue
+			}
 			if err := g.stream.Send(outbound.request); err != nil {
 				g.terminate(fmt.Errorf("send: %w", err))
 				return

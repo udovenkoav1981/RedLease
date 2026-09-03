@@ -106,6 +106,17 @@ func (c *replicaConn) call(
 	ctx context.Context,
 	request *redleasev1.ClientRequest,
 ) (*redleasev1.ServerResponse, error) {
+	future, err := c.submit(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return future.await(ctx)
+}
+
+func (c *replicaConn) submit(
+	ctx context.Context,
+	request *redleasev1.ClientRequest,
+) (*streamFuture, error) {
 	c.stateMu.Lock()
 	generation := c.generation
 	cause := c.lastErr
@@ -121,7 +132,7 @@ func (c *replicaConn) call(
 
 	// A failed call is deliberately not retried on a newer generation: the
 	// server may already have applied the operation before transport failure.
-	return generation.call(ctx, request)
+	return generation.submit(ctx, request)
 }
 
 // readiness returns a level-triggered snapshot plus a channel closed on the

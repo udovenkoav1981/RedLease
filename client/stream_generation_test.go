@@ -40,6 +40,163 @@ func TestStreamGenerationCorrelatesOutOfOrderResponses(t *testing.T) {
 	}
 }
 
+func TestStreamGenerationCallRemainsSubmitAndAwaitWrapper(t *testing.T) {
+	generation, stream := newTestStreamGeneration(t)
+
+	result := startStreamCall(generation, acquireStreamRequest("wrapper"))
+	request := receiveSentRequest(t, stream)
+	stream.receive <- fakeReceive{
+		response: streamResponse(request.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
+	}
+
+	received := receiveCallResult(t, result)
+	if received.err != nil {
+		t.Fatalf("call: %v", received.err)
+	}
+	if received.response.GetRequestId() != request.GetRequestId() {
+		t.Fatalf(
+			"response request ID = %d, want %d",
+			received.response.GetRequestId(),
+			request.GetRequestId(),
+		)
+	}
+}
+
+func TestStreamFutureBuffersResponseBeforeAwait(t *testing.T) {
+	generation, stream := newTestStreamGeneration(t)
+
+	future, err := generation.submit(context.Background(), acquireStreamRequest("buffered"))
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	request := receiveSentRequest(t, stream)
+	stream.receive <- fakeReceive{
+		response: streamResponse(request.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
+	}
+
+	// Observe that Recv completed the buffered future before await is invoked,
+	// then put the result back for the real await call.
+	var buffered streamCallResult
+	select {
+	case buffered = <-future.pending.result:
+	case <-time.After(time.Second):
+		t.Fatal("response was not buffered before await")
+	}
+	future.pending.result <- buffered
+
+	response, err := future.await(context.Background())
+	if err != nil {
+		t.Fatalf("await: %v", err)
+	}
+	if response.GetRequestId() != request.GetRequestId() {
+		t.Fatalf("response request ID = %d, want %d", response.GetRequestId(), request.GetRequestId())
+	}
+}
+
+func TestStreamSubmitReturnsAfterWriterAcceptanceBeforeSendCompletes(t *testing.T) {
+	generation, stream := newTestStreamGeneration(t)
+
+	submission := startStreamSubmit(generation, context.Background(), acquireStreamRequest("barrier"))
+	stream.waitForSendAttempt(t)
+
+	// fake Send cannot complete until the test receives from stream.sent.
+	// Submission must nevertheless complete because the single writer has
+	// already accepted the request into FIFO order.
+	submitted := receiveSubmitResult(t, submission)
+	if submitted.err != nil {
+		t.Fatalf("submit: %v", submitted.err)
+	}
+	if submitted.future == nil {
+		t.Fatal("submit returned a nil future")
+	}
+
+	request := receiveSentRequest(t, stream)
+	stream.receive <- fakeReceive{
+		response: streamResponse(request.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
+	}
+	if _, err := submitted.future.await(context.Background()); err != nil {
+		t.Fatalf("await: %v", err)
+	}
+}
+
+func TestStreamSubmitSendFailureCompletesAcceptedFuture(t *testing.T) {
+	sendFailure := errors.New("send failure")
+	generation, stream := newTestStreamGenerationWithOptions(t, fakeStreamOptions{sendErr: sendFailure})
+
+	submission := startStreamSubmit(generation, context.Background(), acquireStreamRequest("request"))
+	stream.waitForSendAttempt(t)
+	submitted := receiveSubmitResult(t, submission)
+	if submitted.err != nil {
+		t.Fatalf("accepted submit returned error: %v", submitted.err)
+	}
+	if submitted.future == nil {
+		t.Fatal("accepted submit returned nil future")
+	}
+
+	_, err := submitted.future.await(context.Background())
+	assertTransportCause(t, err, sendFailure)
+}
+
+func TestStreamSubmitCancellationBeforeWriterAcceptanceDoesNotSend(t *testing.T) {
+	generation, stream := newTestStreamGeneration(t)
+
+	first, err := generation.submit(context.Background(), acquireStreamRequest("first"))
+	if err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	stream.waitForSendAttempt(t)
+
+	secondContext, cancelSecond := context.WithCancel(context.Background())
+	secondSubmission := startStreamSubmit(generation, secondContext, acquireStreamRequest("canceled"))
+	cancelSecond()
+	second := receiveSubmitResult(t, secondSubmission)
+	if !errors.Is(second.err, context.Canceled) {
+		t.Fatalf("second submit error = %v, want context canceled", second.err)
+	}
+	if second.future != nil {
+		t.Fatal("unaccepted canceled submit returned a future")
+	}
+
+	firstRequest := receiveSentRequest(t, stream)
+	stream.receive <- fakeReceive{
+		response: streamResponse(firstRequest.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
+	}
+	if _, err := first.await(context.Background()); err != nil {
+		t.Fatalf("first await: %v", err)
+	}
+
+	select {
+	case unexpected := <-stream.sent:
+		t.Fatalf("canceled request was sent: %+v", unexpected)
+	default:
+	}
+}
+
+func TestStreamSubmitCancellationAfterWriterAcceptanceReturnsFuture(t *testing.T) {
+	generation, stream := newTestStreamGeneration(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	submission := startStreamSubmit(generation, ctx, acquireStreamRequest("accepted"))
+	stream.waitForSendAttempt(t)
+	cancel()
+
+	submitted := receiveSubmitResult(t, submission)
+	if submitted.err != nil {
+		t.Fatalf("accepted submit returned error after cancellation: %v", submitted.err)
+	}
+	if submitted.future == nil {
+		t.Fatal("accepted submit returned nil future after cancellation")
+	}
+
+	request := receiveSentRequest(t, stream)
+	stream.receive <- fakeReceive{
+		response: streamResponse(request.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
+	}
+	if _, err := submitted.future.await(context.Background()); err != nil {
+		t.Fatalf("await: %v", err)
+	}
+}
+
 func TestStreamGenerationTimeoutAndLateResponseDoNotBlockAnotherCall(t *testing.T) {
 	generation, stream := newTestStreamGeneration(t)
 
@@ -159,6 +316,11 @@ type fakeReceive struct {
 	err      error
 }
 
+type streamSubmitResult struct {
+	future *streamFuture
+	err    error
+}
+
 type fakeStreamOptions struct {
 	sendErr  error
 	closeErr error
@@ -262,6 +424,30 @@ func startStreamCallWithContext(
 		result <- streamCallResult{response: response, err: err}
 	}()
 	return result
+}
+
+func startStreamSubmit(
+	generation *streamGeneration,
+	ctx context.Context,
+	request *redleasev1.ClientRequest,
+) <-chan streamSubmitResult {
+	result := make(chan streamSubmitResult, 1)
+	go func() {
+		future, err := generation.submit(ctx, request)
+		result <- streamSubmitResult{future: future, err: err}
+	}()
+	return result
+}
+
+func receiveSubmitResult(t *testing.T, result <-chan streamSubmitResult) streamSubmitResult {
+	t.Helper()
+	select {
+	case received := <-result:
+		return received
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for submit result")
+		return streamSubmitResult{}
+	}
 }
 
 func receiveSentRequest(t *testing.T, stream *fakeLeaseClientStream) *redleasev1.ClientRequest {
