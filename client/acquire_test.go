@@ -295,9 +295,10 @@ func TestClientAcquireConcurrentCalls(t *testing.T) {
 }
 
 type acquireHarness struct {
-	client  *Client
-	streams [ServerCount]*fakeLeaseClientStream
-	clock   *fixedWallClock
+	client    *Client
+	streams   [ServerCount]*fakeLeaseClientStream
+	factories [ServerCount]*scriptedStreamFactory
+	clock     *fixedWallClock
 }
 
 type fixedWallClock struct {
@@ -309,6 +310,12 @@ func (c *fixedWallClock) now() time.Time {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.time
+}
+
+func (c *fixedWallClock) advance(duration time.Duration) {
+	c.mu.Lock()
+	c.time = c.time.Add(duration)
+	c.mu.Unlock()
 }
 
 type acquireCallResult struct {
@@ -330,7 +337,7 @@ func newAcquireHarness(t *testing.T) *acquireHarness {
 	client.responseTimeout = 500 * time.Millisecond
 	client.wall = clock
 
-	harness := &acquireHarness{client: client, clock: clock}
+	harness := &acquireHarness{client: client, factories: factories, clock: clock}
 	for replica, factory := range factories {
 		stream := newReplicaFakeStream()
 		harness.streams[replica] = stream

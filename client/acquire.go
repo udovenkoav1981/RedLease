@@ -67,7 +67,7 @@ func (c *Client) Acquire(
 		cancelOperation()
 	}()
 
-	collectionContext, cancelCollection := context.WithCancel(c.ctx)
+	collectionContext, cancelCollection := context.WithCancel(lease.ctx)
 	submissions := make(chan acquireSubmission, ServerCount)
 	results := make(chan acquireReplicaResult, ServerCount)
 
@@ -91,6 +91,7 @@ func (c *Client) Acquire(
 
 	if err := c.acquireCancellationError(ctx); err != nil {
 		cancelCollection()
+		lease.cancel()
 		c.cleanupFailedAcquire(lease.key, id)
 		return nil, &notAcquiredError{cause: err}
 	}
@@ -118,7 +119,7 @@ func (c *Client) Acquire(
 					Milliseconds(result.response.GetTtlMs()),
 				)
 				if now.Before(candidates[result.replica]) {
-					lease.markConfirmed(result.replica)
+					lease.markConfirmed(result.replica, candidates[result.replica])
 				}
 
 				validUntil, hasQuorum := bestAcquireQuorum(candidates, successful)
@@ -160,6 +161,7 @@ func (c *Client) Acquire(
 	}
 
 	cancelCollection()
+	lease.cancel()
 	c.cleanupFailedAcquire(lease.key, id)
 	return nil, &notAcquiredError{cause: firstFailure}
 }
@@ -225,7 +227,7 @@ func (c *Client) collectRemainingAcquireResults(
 				Milliseconds(result.response.GetTtlMs()),
 			)
 			if c.wall.now().Before(candidate) {
-				lease.markConfirmed(result.replica)
+				lease.markConfirmed(result.replica, candidate)
 			}
 		}
 	}
@@ -247,31 +249,7 @@ func acquireQuorumStillPossible(
 }
 
 func (c *Client) cleanupFailedAcquire(key []byte, id leaseID) {
-	cleanupContext, cancelCleanup := context.WithTimeout(c.ctx, c.responseTimeout)
-	defer cancelCleanup()
-
-	submissions := make(chan acquireSubmission, ServerCount)
-	for replica := range c.replicas {
-		request := newReleaseRequest(key, id)
-		go func() {
-			future, err := c.replicas[replica].submit(cleanupContext, request)
-			submissions <- acquireSubmission{replica: replica, future: future, err: err}
-		}()
-	}
-
-	for range ServerCount {
-		submission := <-submissions
-		if submission.err != nil {
-			continue
-		}
-		go c.drainCleanupResponse(submission.future)
-	}
-}
-
-func (c *Client) drainCleanupResponse(future *streamFuture) {
-	ctx, cancel := context.WithTimeout(c.ctx, c.responseTimeout)
-	defer cancel()
-	_, _ = future.await(ctx)
+	c.releaseAll(key, id)
 }
 
 func bestAcquireQuorum(
