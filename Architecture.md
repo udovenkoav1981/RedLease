@@ -18,7 +18,8 @@ Servers                    5 independent lock-servers
 Quorum                     3 of 5
 Storage                    RAM only
 Disk persistence           none
-Server-configured TTL      <= 5 s
+Protocol maximum TTL       5 s
+Per-server configuredMaxTTL <= Protocol maximum TTL
 Typical Renew interval     1 s
 Safety margin              100 ms (fixed)
 Leader                     none
@@ -26,7 +27,7 @@ Server-to-server hot path  none
 Client transport           5 persistent ordered gRPC streams
 Initial ownership          >= 3/5
 Steady-state target        5/5
-Restart protection         quarantine > configuredTTL + safetyMargin
+Restart protection         quarantine > protocolMaxTTL + safetyMargin
 Forced lease overwrite     forbidden
 Global fencing token       none
 ```
@@ -34,13 +35,11 @@ Global fencing token       none
 - Архитектура не использует leader-based replicated log. 
 - Серверы не обмениваются сообщениями друг с другом, и ни чего друг о друге не знают
 - Membership статический. Все клиенты используют одну и ту же конфигурацию из пяти серверов.
-- клиент независимо и параллельно обращается ко всем lock-server с выбранным
-  TTL; в корректной конфигурации — ко всем пяти.
+- клиент независимо и параллельно обращается ко всем lock-server.
 
 ## 2. Топология общения клиент-сервер
 
-В штатном Acquire или Renew клиент делает параллельный fan-out на серверы,
-прошедшие проверку TTL:
+В штатном Acquire или Renew клиент делает параллельный fan-out на все серверы:
 
 ```text
              -> S1
@@ -96,8 +95,8 @@ leaseID = {
 Клиентские операции:
 
 ```text
-Acquire(key, leaseID)
-Renew(key, leaseID)
+Acquire(key, leaseID, ttl)
+Renew(key, leaseID, ttl)
 Release(key, leaseID)
 GetTTL()
 ```
@@ -105,26 +104,33 @@ GetTTL()
 ### 5.1. Acquire
 
 Клиент создаёт новый `leaseID`, фиксирует локальное время начала операции и
-одновременно отправляет Acquire всем доступным серверам с `selectedTTL`. В
-корректной конфигурации это все пять серверов.
+одновременно отправляет `Acquire(key, leaseID, requestedTTL)` всем пяти
+серверам.
 
 Каждый server локально атомарно выполняет:
 
 ```text
-if key отсутствует or lease истёк:
+if requestedTTL <= 0:
+    return INVALID_TTL
+
+effectiveTTL = min(requestedTTL, configuredMaxTTL)
+now = localNow
+
+if key отсутствует or deadline <= now:
     установить leaseID
-    deadline = localNow + configuredTTL
-    return OK
+    deadline = now + effectiveTTL
+    return OK(ttl = deadline - now)
 if current.leaseID == requested.leaseID:
     deadline не изменять
-    return ALREADY_OWNED
+    return ALREADY_OWNED(ttl = deadline - now)
 return BUSY
 ```
 
 `OK` и `ALREADY_OWNED` подтверждают наличие запрошенного `leaseID` на сервере и
 учитываются клиентом как успешная реплика. `ALREADY_OWNED` делает повторный
 Acquire идемпотентным, но не продлевает server deadline: продление выполняется
-только через Renew.
+только через Renew. Поле `ttl` успешного ответа содержит оставшееся время до
+server deadline на момент формирования ответа.
 
 Клиент устанавливает владение после трёх успешных реплик и сразу возвращает
 успех приложению. Оставшиеся запросы не блокируют этот результат и продолжают
@@ -134,8 +140,7 @@ Acquire идемпотентным, но не продлевает server deadli
 
 Результат меньше 3/5 означает, что клиент не получил lease. Даже если lease
 частично установлен на одном или двух серверах, клиент немедленно отправляет
-Release с тем же `leaseID` всем серверам, которым был отправлен Acquire. В
-корректной конфигурации это все пять серверов.
+Release с тем же `leaseID` всем пяти серверам.
 
 Повторная попытка Acquire использует новый `leaseID` и randomized backoff.
 
@@ -154,9 +159,10 @@ Release с тем же `leaseID` всем серверам, которым бы�
 server API. Lock-server не знает о понятии `Attach`.
 
 В рамках этой логической операции клиент продолжает обрабатывать ответы
-исходного Acquire и отправляет обычный `Acquire(key, leaseID)` серверам, на
-которых lease отсутствует. Healing продолжается в течение жизни lease, в том
-числе после reconnect или restart сервера.
+исходного Acquire и отправляет обычный
+`Acquire(key, leaseID, requestedTTL)` серверам, на которых lease отсутствует.
+Healing продолжается в течение жизни lease, в том числе после reconnect или
+restart сервера.
 
 После Release или истечения локальной validity (если Renew не удалось) клиент прекращает healing.
 
@@ -166,18 +172,24 @@ server API. Lock-server не знает о понятии `Attach`.
 ### 5.4. Renew
 
 Примерно раз в секунду клиент фиксирует локальное время начала Renew и
-параллельно отправляет запрос всем серверам с выбранным TTL.
+параллельно отправляет `Renew(key, leaseID, requestedTTL)` всем пяти серверам.
 
 Server локально атомарно выполняет:
 
 ```text
+if requestedTTL <= 0:
+    return INVALID_TTL
+
+now = localNow
+
 if current.leaseID != requested.leaseID:
     return STALE
-if lease истёк:
+if deadline <= now:
     return STALE
 
-deadline = localNow + configuredTTL
-return OK
+effectiveTTL = min(requestedTTL, configuredMaxTTL)
+deadline = max(deadline, now + effectiveTTL)
+return OK(ttl = deadline - now)
 ```
 
 Истёкший lease не воскрешается. После трёх `OK` Renew успешен и клиент обновляет
@@ -201,42 +213,51 @@ if current.leaseID == requested.leaseID:
 
 ### 5.6. GetTTL
 
-`GetTTL()` возвращает TTL, загруженный из конфигурации lock-server при старте.
-Операция не изменяет TTL и не принимает новое значение. `GetTTL()` доступен как
-в `QUARANTINE`, так и в `ACTIVE`.
+`GetTTL()` возвращает `configuredMaxTTL`, загруженный из конфигурации
+lock-server при старте. Операция не изменяет значение и не принимает новое.
+`GetTTL()` доступен как в `QUARANTINE`, так и в `ACTIVE`.
 
 ## 6. Модель времени и validity
 
-TTL задаётся только конфигурацией lock-server и загружается при старте процесса.
-В течение жизни процесса значение неизменно. Настройка TTL для отдельного lease
-и изменение TTL через protocol API отсутствуют.
+Каждый lock-server загружает из конфигурации `configuredMaxTTL` — максимальный
+срок, который он может предоставить одному lease. Server проверяет при старте:
 
-Изменение TTL существующего deployment, в том числе между последовательными
-запусками server process, не поддерживается. Такая процедура требует отдельного
-проектирования с учётом restart quarantine.
+```text
+0 < configuredMaxTTL <= protocolMaxTTL
+protocolMaxTTL = 5 s
+```
 
-От клиента к серверу НЕ передаётся `ttl`. Absolute timestamp или deadline не
-сериализуются.
+Некорректное значение не позволяет server process запуститься. В течение жизни
+процесса `configuredMaxTTL` неизменен, но может отличаться у разных серверов и
+может быть изменён при следующем restart отдельного server process.
+
+Клиент передаёт желаемый `requestedTTL` в Acquire и Renew. Server применяет:
+
+```text
+effectiveTTL = min(requestedTTL, configuredMaxTTL)
+```
+
+Тем самым никакой Acquire или Renew не может установить deadline дальше, чем на
+`configuredMaxTTL` от текущего server-local времени.
+
+Rolling-изменение `configuredMaxTTL` выполняется изменением конфигурации и
+restart отдельных серверов. Пока обновление продолжается, серверы могут иметь
+разные лимиты; клиент учитывает фактический `ttl` каждого успешного ответа.
+Quarantine рассчитывается по неизменному `protocolMaxTTL`, а не по новому
+`configuredMaxTTL`, поэтому безопасны как увеличение, так и уменьшение лимита.
+
+Absolute timestamp и deadline между машинами не сериализуются.
 
 Каждый server устанавливает локальный deadline:
 
 ```go
-deadline := time.Now().Add(configuredTTL)
+effectiveTTL := min(requestedTTL, configuredMaxTTL)
+deadline := time.Now().Add(effectiveTTL)
 ```
 
-При старте клиент устанавливает соединение минимум с тремя серверами и получает
-их значения через `GetTTL()`. Клиент становится ready только после того, как
-нашёл не менее трёх серверов с одинаковым TTL. Это значение становится
-`selectedTTL` и не меняется до завершения client process.
-
-Серверы с `configuredTTL == selectedTTL` допускаются к Acquire, Renew и
-background healing. Если при startup или последующем reconnect обнаружен server
-с другим TTL, он исключается из lease quorum. Пока клиенту известен хотя бы один
-такой server, при каждом Acquire пишется `ERROR`, а работа продолжается только с
-серверами с `selectedTTL`.
-
-`selectedTTL` используется только для расчёта локального `validUntil` и не
-передаётся обратно в Acquire или Renew.
+Успешные ответы Acquire и Renew содержат `ttl` — оставшуюся локальную validity
+соответствующей серверной реплики на момент формирования ответа. Это позволяет
+одному клиентскому quorum включать серверы с разными `configuredMaxTTL`.
 
 Клиент измеряет продолжительность Acquire и Renew локально:
 
@@ -248,22 +269,32 @@ elapsed := time.Since(start)
 Пока `time.Time` остаётся внутри процесса, Go использует monotonic-компоненту.
 Значения локального monotonic time никогда не сравниваются между машинами.
 
-После успешного Acquire клиент устанавливает:
+Для каждого успешного ответа `i` клиент консервативно вычисляет:
 
 ```text
-validUntil = acquireStart + TTL - safetyMargin
+candidateValidUntil[i] = operationStart + response[i].ttl - safetyMargin
 ```
 
-После успешного quorum Renew:
+Для подтверждения операции клиент выбирает quorum `Q` из трёх успешных ответов.
+Локальная validity этого quorum равна минимальной validity его реплик:
 
 ```text
-validUntil = renewStart + TTL - safetyMargin
+quorumValidUntil = min(candidateValidUntil[i]), i in Q
 ```
 
 `safetyMargin` — фиксированная константа протокола, равная 100 ms.
 
-Ожидание quorum входит в TTL и уменьшает доступное приложению время. Failed
-Renew и клиентский background healing не двигают `validUntil` вперёд.
+Acquire считается успешным только если `quorumValidUntil` ещё не достигнут к
+моменту принятия решения. Для успешного Renew клиент обновляет свой срок как:
+
+```text
+validUntil = max(previousValidUntil, quorumValidUntil)
+```
+
+Использование `operationStart` вычитает из доступной клиенту validity время
+получения quorum. Failed Renew и клиентский background healing не двигают
+`validUntil` вперёд. Ответы, пришедшие после выбора quorum и возврата результата,
+могут обновить сведения о репликах, но сами по себе не меняют `validUntil`.
 
 NTP используется операционными системами штатно, но correctness не зависит от
 сравнения синхронизированных wall-clock значений.
@@ -317,12 +348,12 @@ server start
     v
 QUARANTINE
     |
-    | GetTTL  -> configuredTTL
+    | GetTTL  -> configuredMaxTTL
     | Acquire -> NOT_READY
     | Renew   -> NOT_READY
     | Release -> NOT_READY
     |
-    | wait > configuredTTL + safetyMargin
+    | wait > protocolMaxTTL + safetyMargin
     v
 ACTIVE
 ```
@@ -330,7 +361,7 @@ ACTIVE
 Переход в `ACTIVE` выполняется по локальному monotonic timer только после:
 
 ```text
-REJOIN_DELAY > configuredTTL + safetyMargin
+REJOIN_DELAY > protocolMaxTTL + safetyMargin
 ```
 
 Это server-side invariant. В `QUARANTINE` server отвечает на read-only
@@ -355,7 +386,7 @@ all RAM state lost
         |
 all servers enter QUARANTINE
         |
-wait > configuredTTL + safetyMargin
+wait > protocolMaxTTL + safetyMargin
         |
 servers become ACTIVE
 ```
