@@ -23,6 +23,7 @@ Per-server configuredMaxTTL <= Protocol maximum TTL
 Typical Renew interval     1 s
 Safety margin              100 ms (fixed)
 Lease time source          local wall clock (`time.Now().Round(0)`)
+Wire TTL representation    uint64 milliseconds
 Leader                     none
 Server-to-server hot path  none
 Client transport           5 persistent ordered gRPC streams
@@ -102,6 +103,11 @@ Release(key, leaseID)
 GetTTL()
 ```
 
+Все значения TTL в wire protocol передаются как `uint64` миллисекунд. Поэтому
+отрицательный `requestedTTL` не представим и отдельного ответа `INVALID_TTL`
+нет. Нулевой `requestedTTL` допустим: новый lease с таким TTL не даёт клиенту
+положительной validity, а Renew не сокращает уже существующий deadline.
+
 ### 5.1. Acquire
 
 Клиент создаёт новый `leaseID`, фиксирует локальное время начала операции и
@@ -111,9 +117,6 @@ GetTTL()
 Каждый server локально атомарно выполняет:
 
 ```text
-if requestedTTL <= 0:
-    return INVALID_TTL
-
 effectiveTTL = min(requestedTTL, configuredMaxTTL)
 now = localNow
 
@@ -133,9 +136,10 @@ Acquire идемпотентным, но не продлевает server deadli
 только через Renew. Поле `ttl` успешного ответа содержит оставшееся время до
 server deadline на момент формирования ответа.
 
-Клиент устанавливает владение после трёх успешных реплик и сразу возвращает
-успех приложению. Оставшиеся запросы не блокируют этот результат и продолжают
-обрабатываться для background healing.
+Клиент устанавливает владение после трёх успешных реплик, если рассчитанный для
+них `quorumValidUntil` ещё не достигнут, и сразу возвращает успех приложению.
+Оставшиеся запросы не блокируют этот результат и продолжают обрабатываться для
+background healing.
 
 ### 5.2. Cleanup после failed Acquire
 
@@ -178,9 +182,6 @@ restart сервера.
 Server локально атомарно выполняет:
 
 ```text
-if requestedTTL <= 0:
-    return INVALID_TTL
-
 now = localNow
 
 if current.leaseID != requested.leaseID:
@@ -341,12 +342,35 @@ blocking для остальных четырёх путей.
 Persistent streams:
 
 - убирают connection setup из hot path;
-- сохраняют порядок операций для пары client/server;
+- сохраняют порядок доставки запросов для пары client/server;
 - уменьшают RPC overhead;
 - позволяют обслуживать тысячи активных leases через пять соединений.
 
-Точная reconnect sequencing и необходимость отдельного request sequence number
-будут определены при проектировании wire protocol.
+Каждый запрос содержит `requestID`, уникальный в пределах одного stream. Server
+возвращает тот же `requestID` в ответе. Это correlation identifier, а не номер
+операции: он не задаёт порядок применения, не сохраняется server после reconnect
+и не обеспечивает дедупликацию.
+
+Server принимает запросы одного stream по порядку и направляет их в ordered
+очереди по `key`. Операции одного ключа применяются в порядке получения, а
+разные ключи могут обрабатываться параллельно. На практике это может быть
+реализовано фиксированным количеством worker queues с выбором очереди по
+`hash(key)`. Количество workers является параметром реализации.
+
+Завершённые операции поступают в общий response channel и отправляются одним
+writer в gRPC stream. Поэтому ответы для разных ключей могут возвращаться не в
+порядке запросов. Client сопоставляет их через `requestID` и не ждёт предыдущий
+ответ перед отправкой следующего запроса.
+
+Для каждого ожидаемого ответа client хранит отдельный deadline. После timeout
+запрос перестаёт участвовать в quorum, а возможный поздний ответ игнорируется.
+Разрыв stream завершает все его незавершённые запросы transport error и
+запускает reconnect; client никогда не ждёт отдельный пропущенный ответ
+бесконечно. `requestID` не устраняет неопределённость результата при разрыве
+stream: повторная отправка опирается на идемпотентность операций по `leaseID`.
+
+Точная retry sequencing после reconnect будет определена при реализации
+client transport.
 
 ## 8. Restart quarantine
 

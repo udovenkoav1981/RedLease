@@ -1,0 +1,88 @@
+syntax = "proto3";
+
+package redlease.v1;
+
+option go_package = "github.com/udovenkoav1981/RedLease/proto/redlease/v1;redleasev1";
+
+// RedLease exposes every client operation through one persistent
+// bidirectional stream per client/server pair. Responses for different keys
+// may be sent out of request order and are correlated by request_id.
+service RedLease {
+  rpc LeaseStream(stream ClientRequest) returns (stream ServerResponse);
+}
+
+message LeaseID {
+  uint32 client_id = 1;
+  uint32 boot_id = 2;
+  uint64 lease_seq = 3;
+}
+
+message ClientRequest {
+  // Unique within one LeaseStream. It is echoed by the server and is not a
+  // cross-reconnect deduplication key.
+  uint64 request_id = 1;
+
+  oneof operation {
+    AcquireRequest acquire = 2;
+    RenewRequest renew = 3;
+    ReleaseRequest release = 4;
+    GetTTLRequest get_ttl = 5;
+  }
+}
+
+message ServerResponse {
+  // Correlates this response with a ClientRequest on the same LeaseStream.
+  uint64 request_id = 1;
+
+  oneof result {
+    AcquireResponse acquire = 2;
+    RenewResponse renew = 3;
+    ReleaseResponse release = 4;
+    GetTTLResponse get_ttl = 5;
+  }
+}
+
+message AcquireRequest {
+  bytes key = 1;
+  LeaseID lease_id = 2;
+  uint64 requested_ttl_ms = 3;
+}
+
+message RenewRequest {
+  bytes key = 1;
+  LeaseID lease_id = 2;
+  uint64 requested_ttl_ms = 3;
+}
+
+message ReleaseRequest {
+  bytes key = 1;
+  LeaseID lease_id = 2;
+}
+
+message GetTTLRequest {}
+
+enum LeaseStatus {
+  LEASE_STATUS_OK = 0;
+  LEASE_STATUS_ALREADY_OWNED = 1;
+  LEASE_STATUS_BUSY = 2;
+  LEASE_STATUS_STALE = 3;
+  LEASE_STATUS_NOT_READY = 4;
+}
+
+message AcquireResponse {
+  LeaseStatus status = 1;
+  uint64 ttl_ms = 2;
+}
+
+message RenewResponse {
+  LeaseStatus status = 1;
+  uint64 ttl_ms = 2;
+}
+
+message ReleaseResponse {
+  LeaseStatus status = 1;
+}
+
+message GetTTLResponse {
+  uint64 configured_max_ttl_ms = 1;
+}
