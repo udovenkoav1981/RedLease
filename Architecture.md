@@ -22,6 +22,7 @@ Protocol maximum TTL       5 s
 Per-server configuredMaxTTL <= Protocol maximum TTL
 Typical Renew interval     1 s
 Safety margin              100 ms (fixed)
+Lease time source          local wall clock (`time.Now().Round(0)`)
 Leader                     none
 Server-to-server hot path  none
 Client transport           5 persistent ordered gRPC streams
@@ -252,7 +253,8 @@ Absolute timestamp и deadline между машинами не сериализ
 
 ```go
 effectiveTTL := min(requestedTTL, configuredMaxTTL)
-deadline := time.Now().Add(effectiveTTL)
+now := time.Now().Round(0)
+deadline := now.Add(effectiveTTL)
 ```
 
 Успешные ответы Acquire и Renew содержат `ttl` — оставшуюся локальную validity
@@ -262,12 +264,19 @@ deadline := time.Now().Add(effectiveTTL)
 Клиент измеряет продолжительность Acquire и Renew локально:
 
 ```go
-start := time.Now()
-elapsed := time.Since(start)
+operationStart := time.Now().Round(0)
+elapsed := time.Now().Round(0).Sub(operationStart)
 ```
 
-Пока `time.Time` остаётся внутри процесса, Go использует monotonic-компоненту.
-Значения локального monotonic time никогда не сравниваются между машинами.
+Вызов `Round(0)` удаляет monotonic-компоненту из `time.Time`. Server deadlines,
+клиентские `operationStart`, `candidateValidUntil` и `validUntil` используют
+локальное wall-clock время. Благодаря этому время, проведённое OS или VM в
+suspend, учитывается после resume: server считает lease, чей deadline прошёл за
+время паузы, истёкшим, а клиент не начинает новую защищённую операцию по уже
+истёкшему `validUntil`.
+
+Значения локального времени никогда не сравниваются между машинами и absolute
+timestamp по протоколу не передаётся. 
 
 Для каждого успешного ответа `i` клиент консервативно вычисляет:
 
@@ -296,8 +305,11 @@ validUntil = max(previousValidUntil, quorumValidUntil)
 `validUntil` вперёд. Ответы, пришедшие после выбора quorum и возврата результата,
 могут обновить сведения о репликах, но сами по себе не меняют `validUntil`.
 
-NTP используется операционными системами штатно, но correctness не зависит от
-сравнения синхронизированных wall-clock значений.
+`time.Now().Round(0)` не может остановить уже начатую бизнес-операцию при
+suspend клиентской VM. После resume такая операция может продолжиться уже после
+истечения lease; это входит в явно принятое ограничение отсутствия global
+fencing token. Клиент проверяет `validUntil` перед запуском новых защищённых
+операций.
 
 ## 7. Persistent ordered gRPC streams
 
