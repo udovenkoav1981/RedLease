@@ -1,6 +1,7 @@
 package client_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	redleaseclient "github.com/udovenkoav1981/RedLease/client"
+	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 	redleaseserver "github.com/udovenkoav1981/RedLease/server"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -222,12 +224,112 @@ func TestFullClusterRestartDoesNotRestoreOldLeaseEndToEnd(t *testing.T) {
 	newLease.Release()
 }
 
+func TestServerKeyLimitEndToEnd(t *testing.T) {
+	t.Parallel()
+	cluster := newIntegrationClusterWithMaxKeys(t, 1)
+	defer cluster.close()
+
+	client := cluster.newClient(t, 1)
+	defer client.Close()
+	waitReady(t, client)
+	waitForServerActivation()
+
+	operationContext, cancelOperation := context.WithTimeout(context.Background(), 2*time.Second)
+	firstLease, err := client.Acquire(operationContext, []byte("first-capacity-key"), 5_000)
+	cancelOperation()
+	if err != nil {
+		t.Fatalf("first Acquire: %v", err)
+	}
+
+	operationContext, cancelOperation = context.WithTimeout(context.Background(), 2*time.Second)
+	limitedLease, err := client.Acquire(operationContext, []byte("over-capacity-key"), 5_000)
+	cancelOperation()
+	if !errors.Is(err, redleaseclient.ErrNotAcquired) ||
+		!errors.Is(err, redleaseclient.ErrKeyLimitReached) {
+		t.Fatalf("over-capacity Acquire error = %v, want ErrNotAcquired and ErrKeyLimitReached", err)
+	}
+	if limitedLease != nil {
+		t.Fatal("over-capacity Acquire returned a lease")
+	}
+
+	firstLease.Release()
+	replacement := acquireEventually(
+		t,
+		client,
+		[]byte("replacement-capacity-key"),
+		5_000,
+		2*time.Second,
+	)
+	replacement.Release()
+}
+
+func TestServerKeySizeLimitOverGRPC(t *testing.T) {
+	t.Parallel()
+	cluster := newIntegrationCluster(t)
+	defer cluster.close()
+	waitForServerActivation()
+
+	connection, err := grpc.NewClient(
+		"passthrough:///redlease-key-size",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return cluster.dialReplica(ctx, 0)
+		}),
+	)
+	if err != nil {
+		t.Fatalf("create gRPC connection: %v", err)
+	}
+	defer connection.Close()
+
+	streamContext, cancelStream := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelStream()
+	stream, err := redleasev1.NewRedLeaseClient(connection).LeaseStream(streamContext)
+	if err != nil {
+		t.Fatalf("open LeaseStream: %v", err)
+	}
+
+	acquire := func(requestID uint64, key []byte) redleasev1.LeaseStatus {
+		t.Helper()
+		err := stream.Send(&redleasev1.ClientRequest{
+			RequestId: requestID,
+			Operation: &redleasev1.ClientRequest_Acquire{Acquire: &redleasev1.AcquireRequest{
+				Key: key,
+				LeaseId: &redleasev1.LeaseID{
+					ClientId: 1,
+					BootId:   1,
+					LeaseSeq: requestID,
+				},
+				RequestedTtlMs: 5_000,
+			}},
+		})
+		if err != nil {
+			t.Fatalf("send Acquire %d: %v", requestID, err)
+		}
+		response, err := stream.Recv()
+		if err != nil {
+			t.Fatalf("receive Acquire %d: %v", requestID, err)
+		}
+		if response.GetRequestId() != requestID || response.GetAcquire() == nil {
+			t.Fatalf("Acquire %d response = %+v", requestID, response)
+		}
+		return response.GetAcquire().GetStatus()
+	}
+
+	if status := acquire(1, bytes.Repeat([]byte{'x'}, redleaseclient.MaxKeyBytes+1)); status != redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE {
+		t.Fatalf("oversized Acquire = %s, want KEY_TOO_LARGE", status)
+	}
+	if status := acquire(2, bytes.Repeat([]byte{'x'}, redleaseclient.MaxKeyBytes)); status != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+		t.Fatalf("boundary-size Acquire = %s, want OK", status)
+	}
+}
+
 type integrationCluster struct {
 	mu          sync.RWMutex
 	listeners   [redleaseclient.ServerCount]*bufconn.Listener
 	grpcServers [redleaseclient.ServerCount]*grpc.Server
 	lockServers [redleaseclient.ServerCount]*redleaseserver.Server
 	ttls        [redleaseclient.ServerCount]time.Duration
+	maxKeys     uint64
 }
 
 func newIntegrationCluster(t *testing.T) *integrationCluster {
@@ -236,7 +338,16 @@ func newIntegrationCluster(t *testing.T) *integrationCluster {
 	for index := range ttls {
 		ttls[index] = redleaseserver.ProtocolMaxTTL
 	}
-	return newIntegrationClusterWithTTLs(t, ttls)
+	return newIntegrationClusterWithConfig(t, ttls, 0)
+}
+
+func newIntegrationClusterWithMaxKeys(t *testing.T, maxKeys uint64) *integrationCluster {
+	t.Helper()
+	var ttls [redleaseclient.ServerCount]time.Duration
+	for index := range ttls {
+		ttls[index] = redleaseserver.ProtocolMaxTTL
+	}
+	return newIntegrationClusterWithConfig(t, ttls, maxKeys)
 }
 
 func newIntegrationClusterWithTTLs(
@@ -244,8 +355,16 @@ func newIntegrationClusterWithTTLs(
 	ttls [redleaseclient.ServerCount]time.Duration,
 ) *integrationCluster {
 	t.Helper()
-	cluster := &integrationCluster{}
-	cluster.ttls = ttls
+	return newIntegrationClusterWithConfig(t, ttls, 0)
+}
+
+func newIntegrationClusterWithConfig(
+	t *testing.T,
+	ttls [redleaseclient.ServerCount]time.Duration,
+	maxKeys uint64,
+) *integrationCluster {
+	t.Helper()
+	cluster := &integrationCluster{ttls: ttls, maxKeys: maxKeys}
 
 	for index := range redleaseclient.ServerCount {
 		cluster.startReplica(t, index)
@@ -289,6 +408,7 @@ func (c *integrationCluster) startReplica(t *testing.T, index int) {
 	t.Helper()
 	lockServer, err := redleaseserver.New(redleaseserver.Config{
 		ConfiguredMaxTTL:     c.ttls[index],
+		MaxKeys:              c.maxKeys,
 		ShardCount:           4,
 		ShardQueueDepth:      64,
 		MaxInFlightPerStream: 64,
