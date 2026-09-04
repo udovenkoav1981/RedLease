@@ -229,6 +229,56 @@ func TestBackgroundHealingStopsBeforeReleaseSubmission(t *testing.T) {
 	}
 }
 
+func TestBackgroundHealingDoesNotAcquireAfterReleaseAndReconnect(t *testing.T) {
+	harness := newAcquireHarness(t)
+	result := startClientAcquire(harness.client, context.Background(), []byte("release-reconnect"), 2_000)
+	initial := harness.receiveAcquireRequests(t)
+
+	for replica := range quorumSize {
+		harness.respondAcquire(
+			replica,
+			initial[replica],
+			redleasev1.LeaseStatus_LEASE_STATUS_OK,
+			2_000,
+		)
+	}
+	acquired := receiveAcquireCallResult(t, result)
+	if acquired.err != nil {
+		t.Fatalf("Acquire: %v", acquired.err)
+	}
+
+	harness.streams[4].receive <- fakeReceive{err: errors.New("disconnect before Release")}
+	waitForReplicaState(t, harness.client.replicas[4], false, false)
+	acquired.lease.Release()
+
+	for replica := range ServerCount - 1 {
+		release := receiveReleaseRequest(t, harness.streams[replica])
+		harness.respondRelease(replica, release)
+	}
+	waitForLeaseReleased(t, acquired.lease)
+
+	reconnected := newReplicaFakeStream()
+	harness.factories[4].results <- streamFactoryResult{stream: reconnected}
+	waitForReplicaState(t, harness.client.replicas[4], true, false)
+	harness.streams[4] = reconnected
+
+	request := receiveSentRequest(t, reconnected)
+	if request.GetRelease() == nil {
+		t.Fatalf("first request after Release and reconnect is not Release: %+v", request)
+	}
+	if !sameProtobufLeaseID(request.GetRelease().GetLeaseId(), initial[4].GetAcquire().GetLeaseId()) {
+		t.Fatal("Release after reconnect used a different lease ID")
+	}
+	harness.respondRelease(4, request)
+	waitForNoPendingStreamCalls(t, harness.client)
+
+	select {
+	case unexpected := <-reconnected.sent:
+		t.Fatalf("request sent after reconnect cleanup: %+v", unexpected)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func assertHealingAcquire(
 	t *testing.T,
 	healing *redleasev1.ClientRequest,
