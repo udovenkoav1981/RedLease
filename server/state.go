@@ -54,8 +54,27 @@ type leaseShard struct {
 
 func (s *Server) runShard(shard *leaseShard) {
 	defer s.wg.Done()
-	for job := range shard.jobs {
-		job.complete(s.apply(shard, job.operation))
+	cleanup := time.NewTicker(leaseCleanupInterval)
+	defer cleanup.Stop()
+
+	for {
+		select {
+		case job, open := <-shard.jobs:
+			if !open {
+				return
+			}
+			job.complete(s.apply(shard, job.operation))
+		case <-cleanup.C:
+			deleteExpiredLeases(shard, s.now().Round(0))
+		}
+	}
+}
+
+func deleteExpiredLeases(shard *leaseShard, now time.Time) {
+	for key, current := range shard.leases {
+		if !current.deadline.After(now) {
+			delete(shard.leases, key)
+		}
 	}
 }
 

@@ -280,6 +280,26 @@ func TestRemainingTTLFloorsAndClamps(t *testing.T) {
 	}
 }
 
+func TestDeleteExpiredLeases(t *testing.T) {
+	shard := &leaseShard{leases: map[string]lease{
+		"expired":  {deadline: testEpoch.Add(-time.Millisecond)},
+		"boundary": {deadline: testEpoch},
+		"active":   {deadline: testEpoch.Add(time.Millisecond)},
+	}}
+
+	deleteExpiredLeases(shard, testEpoch)
+
+	if _, exists := shard.leases["expired"]; exists {
+		t.Fatal("expired lease was not deleted")
+	}
+	if _, exists := shard.leases["boundary"]; exists {
+		t.Fatal("lease at deadline boundary was not deleted")
+	}
+	if _, exists := shard.leases["active"]; !exists {
+		t.Fatal("active lease was deleted")
+	}
+}
+
 func TestLeaseStreamRequestReceivedDuringQuarantineStaysNotReady(t *testing.T) {
 	clock := &fakeClock{now: testEpoch}
 	received := make(chan serverPhase, 1)

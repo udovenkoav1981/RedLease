@@ -23,6 +23,7 @@ const (
 	defaultShardCount           = 256
 	defaultShardQueueDepth      = 256
 	defaultMaxInFlightPerStream = 256
+	leaseCleanupInterval        = time.Second
 )
 
 // Config controls one in-memory lock-server instance. Zero values for the
