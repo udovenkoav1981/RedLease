@@ -1,7 +1,9 @@
 package server
 
 import (
+	"container/heap"
 	"hash/maphash"
+	"sync"
 	"time"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
@@ -30,8 +32,40 @@ func makeLeaseID(id *redleasev1.LeaseID) leaseID {
 }
 
 type lease struct {
-	id       leaseID
-	deadline time.Time
+	key       string
+	id        leaseID
+	deadline  time.Time
+	heapIndex int
+}
+
+type leaseDeadlineHeap []*lease
+
+func (h leaseDeadlineHeap) Len() int { return len(h) }
+
+func (h leaseDeadlineHeap) Less(i, j int) bool {
+	return h[i].deadline.Before(h[j].deadline)
+}
+
+func (h leaseDeadlineHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].heapIndex = i
+	h[j].heapIndex = j
+}
+
+func (h *leaseDeadlineHeap) Push(value any) {
+	current := value.(*lease)
+	current.heapIndex = len(*h)
+	*h = append(*h, current)
+}
+
+func (h *leaseDeadlineHeap) Pop() any {
+	old := *h
+	last := len(old) - 1
+	current := old[last]
+	old[last] = nil
+	current.heapIndex = -1
+	*h = old[:last]
+	return current
 }
 
 type operation struct {
@@ -48,37 +82,56 @@ type shardJob struct {
 }
 
 type leaseShard struct {
-	leases map[string]lease
-	jobs   chan shardJob
+	mu        sync.Mutex
+	leases    map[string]*lease
+	deadlines leaseDeadlineHeap
+	jobs      chan shardJob
 }
 
 func (s *Server) runShard(shard *leaseShard) {
 	defer s.wg.Done()
-	cleanup := time.NewTicker(leaseCleanupInterval)
-	defer cleanup.Stop()
-
-	for {
-		select {
-		case job, open := <-shard.jobs:
-			if !open {
-				return
-			}
-			job.complete(s.apply(shard, job.operation))
-		case <-cleanup.C:
-			s.releaseKeys(deleteExpiredLeases(shard, time.Now().Round(0)))
-		}
+	for job := range shard.jobs {
+		job.complete(s.apply(shard, job.operation))
 	}
 }
 
-func deleteExpiredLeases(shard *leaseShard, now time.Time) uint64 {
+func (shard *leaseShard) addLease(key string, id leaseID, deadline time.Time) {
+	current := &lease{
+		key:       key,
+		id:        id,
+		deadline:  deadline,
+		heapIndex: -1,
+	}
+	shard.leases[key] = current
+	heap.Push(&shard.deadlines, current)
+}
+
+func (shard *leaseShard) removeLease(current *lease) {
+	delete(shard.leases, current.key)
+	heap.Remove(&shard.deadlines, current.heapIndex)
+}
+
+func (shard *leaseShard) removeExpiredLeases(now time.Time) uint64 {
 	var deleted uint64
-	for key, current := range shard.leases {
-		if !current.deadline.After(now) {
-			delete(shard.leases, key)
-			deleted++
-		}
+	for len(shard.deadlines) != 0 && !shard.deadlines[0].deadline.After(now) {
+		current := heap.Pop(&shard.deadlines).(*lease)
+		delete(shard.leases, current.key)
+		deleted++
 	}
 	return deleted
+}
+
+func (s *Server) removeExpiredKeys(now time.Time) {
+	s.cleanupMu.Lock()
+	defer s.cleanupMu.Unlock()
+
+	var deleted uint64
+	for _, shard := range s.shards {
+		shard.mu.Lock()
+		deleted += shard.removeExpiredLeases(now)
+		shard.mu.Unlock()
+	}
+	s.releaseKeys(deleted)
 }
 
 func (s *Server) apply(shard *leaseShard, op operation) *redleasev1.ServerResponse {
@@ -103,40 +156,62 @@ func (s *Server) apply(shard *leaseShard, op operation) *redleasev1.ServerRespon
 }
 
 func (s *Server) acquire(shard *leaseShard, op operation, now time.Time) *redleasev1.ServerResponse {
-	current, exists := shard.leases[op.key]
-	if exists && current.deadline.After(now) && current.id == op.leaseID {
-		return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED,
-			remainingTTLMS(current.deadline, now, s.config.configuredMaxTTLMS))
-	}
-	if exists && current.deadline.After(now) {
-		return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_BUSY, 0)
-	}
-	if exists {
-		delete(shard.leases, op.key)
-		s.releaseKeys(1)
-	}
-
 	effectiveTTLMS := min(op.requestedTTLMS, s.config.configuredMaxTTLMS)
-	if effectiveTTLMS == 0 {
-		return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK, 0)
+	cleanupAttempted := false
+	for {
+		shard.mu.Lock()
+		current, exists := shard.leases[op.key]
+		if exists && current.deadline.After(now) && current.id == op.leaseID {
+			response := acquireResponse(
+				op.requestID,
+				redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED,
+				remainingTTLMS(current.deadline, now, s.config.configuredMaxTTLMS),
+			)
+			shard.mu.Unlock()
+			return response
+		}
+		if exists && current.deadline.After(now) {
+			shard.mu.Unlock()
+			return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_BUSY, 0)
+		}
+		if exists {
+			shard.removeLease(current)
+			s.releaseKeys(1)
+		}
+
+		if effectiveTTLMS == 0 {
+			shard.mu.Unlock()
+			return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK, 0)
+		}
+		if s.reserveKey() {
+			shard.addLease(
+				op.key,
+				op.leaseID,
+				now.Add(time.Duration(effectiveTTLMS)*time.Millisecond),
+			)
+			shard.mu.Unlock()
+			return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK, effectiveTTLMS)
+		}
+		shard.mu.Unlock()
+
+		if cleanupAttempted {
+			return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_KEY_LIMIT_REACHED, 0)
+		}
+		s.removeExpiredKeys(now)
+		cleanupAttempted = true
 	}
-	if !s.reserveKey() {
-		return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_KEY_LIMIT_REACHED, 0)
-	}
-	shard.leases[op.key] = lease{
-		id:       op.leaseID,
-		deadline: now.Add(time.Duration(effectiveTTLMS) * time.Millisecond),
-	}
-	return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK, effectiveTTLMS)
 }
 
 func (s *Server) renew(shard *leaseShard, op operation, now time.Time) *redleasev1.ServerResponse {
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
 	current, exists := shard.leases[op.key]
 	if !exists {
 		return renewResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_STALE, 0)
 	}
 	if !current.deadline.After(now) {
-		delete(shard.leases, op.key)
+		shard.removeLease(current)
 		s.releaseKeys(1)
 		return renewResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_STALE, 0)
 	}
@@ -148,16 +223,19 @@ func (s *Server) renew(shard *leaseShard, op operation, now time.Time) *redlease
 	candidate := now.Add(time.Duration(effectiveTTLMS) * time.Millisecond)
 	if candidate.After(current.deadline) {
 		current.deadline = candidate
-		shard.leases[op.key] = current
+		heap.Fix(&shard.deadlines, current.heapIndex)
 	}
 	return renewResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK,
 		remainingTTLMS(current.deadline, now, s.config.configuredMaxTTLMS))
 }
 
 func (s *Server) release(shard *leaseShard, op operation, now time.Time) *redleasev1.ServerResponse {
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
 	current, exists := shard.leases[op.key]
 	if exists && (!current.deadline.After(now) || current.id == op.leaseID) {
-		delete(shard.leases, op.key)
+		shard.removeLease(current)
 		s.releaseKeys(1)
 	}
 	return releaseResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK)

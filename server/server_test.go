@@ -193,17 +193,108 @@ func TestAcquireEnforcesKeyLimitAndRestoresCapacity(t *testing.T) {
 	}
 
 	thirdID := leaseID{clientID: 3, bootID: 3, leaseSeq: 3}
-	afterLazyExpiry := s.acquire(shard, operation{kind: operationAcquire, key: "second", leaseID: thirdID, requestedTTLMS: 1000}, testEpoch.Add(time.Second)).GetAcquire()
-	if afterLazyExpiry.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
-		t.Fatalf("Acquire after lazy expiry = %s, want OK", afterLazyExpiry.GetStatus())
+	afterCapacityCleanup := s.acquire(shard, operation{kind: operationAcquire, key: "third", leaseID: thirdID, requestedTTLMS: 1000}, testEpoch.Add(time.Second)).GetAcquire()
+	if afterCapacityCleanup.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+		t.Fatalf("Acquire after capacity cleanup = %s, want OK", afterCapacityCleanup.GetStatus())
 	}
 	if got := s.keys.Load(); got != 1 {
-		t.Fatalf("key count after lazy expiry replacement = %d, want 1", got)
+		t.Fatalf("key count after capacity cleanup = %d, want 1", got)
+	}
+	if _, exists := shard.leases["second"]; exists {
+		t.Fatal("capacity cleanup kept the expired key")
+	}
+	if _, exists := shard.leases["third"]; !exists {
+		t.Fatal("capacity cleanup did not store the new key")
+	}
+}
+
+func TestCapacityCleanupUsesDeadlineOrderAfterRenew(t *testing.T) {
+	s, err := New(Config{
+		ConfiguredMaxTTL: ProtocolMaxTTL,
+		MaxKeys:          2,
+		ShardCount:       1,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	shard := s.shards[0]
+	firstID := leaseID{clientID: 1, bootID: 1, leaseSeq: 1}
+	secondID := leaseID{clientID: 2, bootID: 2, leaseSeq: 2}
+	thirdID := leaseID{clientID: 3, bootID: 3, leaseSeq: 3}
+
+	s.acquire(shard, operation{kind: operationAcquire, key: "first", leaseID: firstID, requestedTTLMS: 1000}, testEpoch)
+	s.acquire(shard, operation{kind: operationAcquire, key: "second", leaseID: secondID, requestedTTLMS: 2000}, testEpoch)
+	s.renew(shard, operation{kind: operationRenew, key: "first", leaseID: firstID, requestedTTLMS: 5000}, testEpoch.Add(500*time.Millisecond))
+
+	response := s.acquire(shard, operation{kind: operationAcquire, key: "third", leaseID: thirdID, requestedTTLMS: 1000}, testEpoch.Add(2500*time.Millisecond)).GetAcquire()
+	if response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+		t.Fatalf("Acquire after deadline-ordered cleanup = %s, want OK", response.GetStatus())
+	}
+	if _, exists := shard.leases["first"]; !exists {
+		t.Fatal("cleanup removed the older but renewed lease")
+	}
+	if _, exists := shard.leases["second"]; exists {
+		t.Fatal("cleanup kept the newer expired lease")
+	}
+	if _, exists := shard.leases["third"]; !exists {
+		t.Fatal("cleanup did not store the new lease")
+	}
+	if got := s.keys.Load(); got != 2 {
+		t.Fatalf("key count after deadline-ordered cleanup = %d, want 2", got)
+	}
+}
+
+func TestCapacityCleanupReclaimsExpiredLeaseFromAnotherShard(t *testing.T) {
+	s, err := New(Config{
+		ConfiguredMaxTTL: time.Second,
+		MaxKeys:          1,
+		ShardCount:       2,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	firstKey := "key-0"
+	firstShard := s.shardIndex(firstKey)
+	secondKey := ""
+	for sequence := 1; ; sequence++ {
+		candidate := "key-" + strconv.Itoa(sequence)
+		if s.shardIndex(candidate) != firstShard {
+			secondKey = candidate
+			break
+		}
 	}
 
-	s.releaseKeys(deleteExpiredLeases(shard, testEpoch.Add(2*time.Second)))
-	if got := s.keys.Load(); got != 0 {
-		t.Fatalf("key count after background-style cleanup = %d, want 0", got)
+	firstID := leaseID{clientID: 1, bootID: 1, leaseSeq: 1}
+	secondID := leaseID{clientID: 2, bootID: 2, leaseSeq: 2}
+	first := s.acquire(
+		s.shards[firstShard],
+		operation{kind: operationAcquire, key: firstKey, leaseID: firstID, requestedTTLMS: 1000},
+		testEpoch,
+	).GetAcquire()
+	if first.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+		t.Fatalf("first Acquire = %s, want OK", first.GetStatus())
+	}
+
+	secondShard := s.shardIndex(secondKey)
+	second := s.acquire(
+		s.shards[secondShard],
+		operation{kind: operationAcquire, key: secondKey, leaseID: secondID, requestedTTLMS: 1000},
+		testEpoch.Add(time.Second),
+	).GetAcquire()
+	if second.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+		t.Fatalf("cross-shard Acquire after expiry = %s, want OK", second.GetStatus())
+	}
+	if _, exists := s.shards[firstShard].leases[firstKey]; exists {
+		t.Fatal("capacity cleanup kept expired lease in another shard")
+	}
+	if _, exists := s.shards[secondShard].leases[secondKey]; !exists {
+		t.Fatal("capacity cleanup did not store lease in target shard")
+	}
+	if got := s.keys.Load(); got != 1 {
+		t.Fatalf("key count after cross-shard cleanup = %d, want 1", got)
 	}
 }
 
@@ -354,6 +445,9 @@ func TestReleaseIsIdempotentAndDeletesOnlyMatchingLease(t *testing.T) {
 	if got := s.keys.Load(); got != 0 {
 		t.Fatalf("matching Release left key count at %d, want 0", got)
 	}
+	if len(shard.deadlines) != 0 {
+		t.Fatalf("matching Release left %d heap entries, want 0", len(shard.deadlines))
+	}
 
 	missing := s.release(shard, operation{kind: operationRelease, key: "key", leaseID: id}, testEpoch).GetRelease()
 	if missing.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
@@ -375,13 +469,12 @@ func TestRemainingTTLFloorsAndClamps(t *testing.T) {
 }
 
 func TestDeleteExpiredLeases(t *testing.T) {
-	shard := &leaseShard{leases: map[string]lease{
-		"expired":  {deadline: testEpoch.Add(-time.Millisecond)},
-		"boundary": {deadline: testEpoch},
-		"active":   {deadline: testEpoch.Add(time.Millisecond)},
-	}}
+	shard := &leaseShard{leases: make(map[string]*lease)}
+	shard.addLease("active", leaseID{}, testEpoch.Add(time.Millisecond))
+	shard.addLease("expired", leaseID{}, testEpoch.Add(-time.Millisecond))
+	shard.addLease("boundary", leaseID{}, testEpoch)
 
-	if deleted := deleteExpiredLeases(shard, testEpoch); deleted != 2 {
+	if deleted := shard.removeExpiredLeases(testEpoch); deleted != 2 {
 		t.Fatalf("deleted leases = %d, want 2", deleted)
 	}
 
@@ -393,6 +486,9 @@ func TestDeleteExpiredLeases(t *testing.T) {
 	}
 	if _, exists := shard.leases["active"]; !exists {
 		t.Fatal("active lease was deleted")
+	}
+	if len(shard.deadlines) != 1 || shard.deadlines[0] != shard.leases["active"] {
+		t.Fatalf("deadline heap is inconsistent after cleanup: %+v", shard.deadlines)
 	}
 }
 

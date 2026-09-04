@@ -25,7 +25,6 @@ const (
 	defaultShardCount           = 256
 	defaultShardQueueDepth      = 256
 	defaultMaxInFlightPerStream = 256
-	leaseCleanupInterval        = time.Second
 )
 
 // Config controls one in-memory lock-server instance. Zero values for MaxKeys
@@ -121,8 +120,10 @@ type Server struct {
 	shards []*leaseShard
 
 	dispatchMu sync.RWMutex
-	closeOnce  sync.Once
-	wg         sync.WaitGroup
+	// cleanupMu prevents concurrent capacity-triggered scans of all shards.
+	cleanupMu sync.Mutex
+	closeOnce sync.Once
+	wg        sync.WaitGroup
 }
 
 var _ redleasev1.RedLeaseServer = (*Server)(nil)
@@ -144,7 +145,7 @@ func New(c Config) (*Server, error) {
 
 	for i := range s.shards {
 		shard := &leaseShard{
-			leases: make(map[string]lease),
+			leases: make(map[string]*lease),
 			jobs:   make(chan shardJob, config.shardQueueDepth),
 		}
 		s.shards[i] = shard
