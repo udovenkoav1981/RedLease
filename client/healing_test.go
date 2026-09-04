@@ -108,7 +108,7 @@ func TestBackgroundHealingReattachesReplicaAfterStaleRenew(t *testing.T) {
 
 func TestBackgroundHealingContinuesAfterReplicaReconnect(t *testing.T) {
 	harness := newAcquireHarness(t)
-	result := startClientAcquire(harness.client, context.Background(), []byte("reconnect-heal"), 2_000)
+	result := startClientAcquire(harness.client, context.Background(), []byte("reconnect-heal"), 5_000)
 	initial := harness.receiveAcquireRequests(t)
 
 	for replica := range quorumSize {
@@ -116,7 +116,7 @@ func TestBackgroundHealingContinuesAfterReplicaReconnect(t *testing.T) {
 			replica,
 			initial[replica],
 			redleasev1.LeaseStatus_LEASE_STATUS_OK,
-			2_000,
+			5_000,
 		)
 	}
 	acquired := receiveAcquireCallResult(t, result)
@@ -132,11 +132,12 @@ func TestBackgroundHealingContinuesAfterReplicaReconnect(t *testing.T) {
 	harness.streams[4] = reconnected
 
 	fourth := receiveAcquireRequest(t, harness.streams[3])
-	fifth := receiveAcquireRequest(t, reconnected)
 	assertHealingAcquire(t, fourth, initial[3])
+	harness.respondAcquire(3, fourth, redleasev1.LeaseStatus_LEASE_STATUS_OK, 5_000)
+
+	fifth := receiveAcquireRequest(t, reconnected)
 	assertHealingAcquire(t, fifth, initial[4])
-	harness.respondAcquire(3, fourth, redleasev1.LeaseStatus_LEASE_STATUS_OK, 2_000)
-	harness.respondAcquire(4, fifth, redleasev1.LeaseStatus_LEASE_STATUS_OK, 2_000)
+	harness.respondAcquire(4, fifth, redleasev1.LeaseStatus_LEASE_STATUS_OK, 5_000)
 
 	waitForConfirmedReplicas(
 		t,
