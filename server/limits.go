@@ -1,4 +1,4 @@
-package client
+package server
 
 import "github.com/udovenkoav1981/RedLease/internal/protocol"
 

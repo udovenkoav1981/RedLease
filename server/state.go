@@ -138,7 +138,7 @@ func (s *Server) apply(shard *leaseShard, op operation) *redleasev1.ServerRespon
 	if !s.active() {
 		return notReadyResponse(op)
 	}
-	if len(op.key) > redleasev1.MaxKeyBytes {
+	if len(op.key) > MaxKeyBytes {
 		return statusResponse(op, redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE)
 	}
 

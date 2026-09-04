@@ -302,7 +302,7 @@ func TestServerRejectsKeysLargerThanProtocolLimit(t *testing.T) {
 	s := newTestServer(t, time.Second, 1)
 	activateServer(t, s)
 	id := leaseID{clientID: 1, bootID: 1, leaseSeq: 1}
-	tooLarge := strings.Repeat("x", redleasev1.MaxKeyBytes+1)
+	tooLarge := strings.Repeat("x", MaxKeyBytes+1)
 
 	for _, op := range []operation{
 		{kind: operationAcquire, key: tooLarge, leaseID: id, requestedTTLMS: 1000},
@@ -327,7 +327,7 @@ func TestServerRejectsKeysLargerThanProtocolLimit(t *testing.T) {
 		t.Fatalf("oversized operations reserved %d keys, want 0", got)
 	}
 
-	boundary := strings.Repeat("x", redleasev1.MaxKeyBytes)
+	boundary := strings.Repeat("x", MaxKeyBytes)
 	response := s.apply(s.shards[0], operation{
 		kind:           operationAcquire,
 		key:            boundary,
@@ -335,7 +335,7 @@ func TestServerRejectsKeysLargerThanProtocolLimit(t *testing.T) {
 		requestedTTLMS: 1000,
 	}).GetAcquire()
 	if response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
-		t.Fatalf("%d-byte key Acquire = %s, want OK", redleasev1.MaxKeyBytes, response.GetStatus())
+		t.Fatalf("%d-byte key Acquire = %s, want OK", MaxKeyBytes, response.GetStatus())
 	}
 }
 
