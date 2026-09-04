@@ -101,13 +101,6 @@ type Server struct {
 	redleasev1.UnimplementedRedLeaseServer
 
 	config resolvedConfig
-	now    func() time.Time
-	// beforeApply is a package-private scheduling seam used by concurrency
-	// tests. Production servers leave it nil.
-	beforeApply func(operation)
-	// afterReceive is another package-private scheduling seam. It runs after
-	// the stream reader snapshots the phase of a received request.
-	afterReceive func(serverPhase)
 
 	phase  atomic.Uint32
 	closed atomic.Bool
@@ -134,7 +127,6 @@ func New(c Config) (*Server, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
 		config: config,
-		now:    time.Now,
 		ctx:    ctx,
 		cancel: cancel,
 		shards: make([]*leaseShard, config.shardCount),

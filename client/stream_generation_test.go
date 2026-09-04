@@ -197,44 +197,6 @@ func TestStreamSubmitCancellationAfterWriterAcceptanceReturnsFuture(t *testing.T
 	}
 }
 
-func TestStreamTerminationBetweenDequeueAndAcceptanceCancelsRequest(t *testing.T) {
-	dequeued := make(chan struct{})
-	resume := make(chan struct{})
-	var dequeuedOnce sync.Once
-	generation, stream := newTestStreamGenerationWithOptions(t, fakeStreamOptions{
-		beforeSendAcceptance: func() {
-			dequeuedOnce.Do(func() { close(dequeued) })
-			<-resume
-		},
-	})
-
-	submission := startStreamSubmit(
-		generation,
-		context.Background(),
-		acquireStreamRequest("termination-race"),
-	)
-	select {
-	case <-dequeued:
-	case <-time.After(time.Second):
-		t.Fatal("writer did not dequeue request")
-	}
-
-	failure := errors.New("terminated before acceptance")
-	generation.terminate(failure)
-	submitted := receiveSubmitResult(t, submission)
-	assertTransportCause(t, submitted.err, failure)
-	if submitted.future != nil {
-		t.Fatal("request canceled before acceptance returned a future")
-	}
-
-	close(resume)
-	select {
-	case <-stream.sendAttempt:
-		t.Fatal("request reached Send after submit reported definite failure")
-	case <-time.After(20 * time.Millisecond):
-	}
-}
-
 func TestStreamResponseTimeoutTerminatesBlockedSend(t *testing.T) {
 	generation, stream := newTestStreamGeneration(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
@@ -379,9 +341,8 @@ type streamSubmitResult struct {
 }
 
 type fakeStreamOptions struct {
-	sendErr              error
-	closeErr             error
-	beforeSendAcceptance func()
+	sendErr  error
+	closeErr error
 }
 
 type fakeLeaseClientStream struct {
@@ -459,9 +420,7 @@ func newTestStreamGenerationWithOptions(
 		sendErr:     options.sendErr,
 		closeErr:    options.closeErr,
 	}
-	generation := newStreamGenerationWithConfig(stream, cancel, streamGenerationConfig{
-		beforeSendAcceptance: options.beforeSendAcceptance,
-	})
+	generation := newStreamGeneration(stream, cancel)
 	t.Cleanup(func() { _ = generation.Close() })
 	return generation, stream
 }

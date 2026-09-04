@@ -86,9 +86,6 @@ func (s *streamSession) receive(stream grpc.BidiStreamingServer[redleasev1.Clien
 			return
 		}
 		phaseAtReceive := serverPhase(s.server.phase.Load())
-		if s.server.afterReceive != nil {
-			s.server.afterReceive(phaseAtReceive)
-		}
 		if err := s.reserveSlot(); err != nil {
 			s.recvDone <- err
 			return

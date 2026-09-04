@@ -164,32 +164,15 @@ type streamGeneration struct {
 	terminateOnce sync.Once
 	workers       sync.WaitGroup
 	closeSendErr  error
-
-	// beforeSendAcceptance is a test-only scheduling seam. Production
-	// generations leave it nil.
-	beforeSendAcceptance func()
 }
 
 func newStreamGeneration(stream leaseClientStream, cancel context.CancelFunc) *streamGeneration {
-	return newStreamGenerationWithConfig(stream, cancel, streamGenerationConfig{})
-}
-
-type streamGenerationConfig struct {
-	beforeSendAcceptance func()
-}
-
-func newStreamGenerationWithConfig(
-	stream leaseClientStream,
-	cancel context.CancelFunc,
-	config streamGenerationConfig,
-) *streamGeneration {
 	generation := &streamGeneration{
-		stream:               stream,
-		cancel:               cancel,
-		sendQueue:            make(chan *outboundStreamRequest),
-		done:                 make(chan struct{}),
-		pending:              make(map[uint64]*pendingStreamCall),
-		beforeSendAcceptance: config.beforeSendAcceptance,
+		stream:    stream,
+		cancel:    cancel,
+		sendQueue: make(chan *outboundStreamRequest),
+		done:      make(chan struct{}),
+		pending:   make(map[uint64]*pendingStreamCall),
 	}
 
 	generation.workers.Add(2)
@@ -355,9 +338,6 @@ func (g *streamGeneration) sendLoop() {
 		case <-g.done:
 			return
 		case outbound := <-g.sendQueue:
-			if g.beforeSendAcceptance != nil {
-				g.beforeSendAcceptance()
-			}
 			if !outbound.beginSend() {
 				continue
 			}

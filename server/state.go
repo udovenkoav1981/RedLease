@@ -65,7 +65,7 @@ func (s *Server) runShard(shard *leaseShard) {
 			}
 			job.complete(s.apply(shard, job.operation))
 		case <-cleanup.C:
-			deleteExpiredLeases(shard, s.now().Round(0))
+			deleteExpiredLeases(shard, time.Now().Round(0))
 		}
 	}
 }
@@ -82,11 +82,8 @@ func (s *Server) apply(shard *leaseShard, op operation) *redleasev1.ServerRespon
 	if !s.active() {
 		return notReadyResponse(op)
 	}
-	if s.beforeApply != nil {
-		s.beforeApply(op)
-	}
 
-	now := s.now().Round(0)
+	now := time.Now().Round(0)
 	switch op.kind {
 	case operationAcquire:
 		return s.acquire(shard, op, now)

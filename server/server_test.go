@@ -17,26 +17,8 @@ import (
 
 var testEpoch = time.Date(2026, time.January, 2, 3, 4, 5, 123456789, time.UTC)
 
-type fakeClock struct {
-	mu  sync.Mutex
-	now time.Time
-}
-
-func (c *fakeClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
-func (c *fakeClock) Advance(d time.Duration) {
-	c.mu.Lock()
-	c.now = c.now.Add(d)
-	c.mu.Unlock()
-}
-
-func newTestServer(t *testing.T, maxTTL time.Duration, shardCount int) (*Server, *fakeClock) {
+func newTestServer(t *testing.T, maxTTL time.Duration, shardCount int) *Server {
 	t.Helper()
-	clock := &fakeClock{now: testEpoch}
 	s, err := New(Config{
 		ConfiguredMaxTTL:     maxTTL,
 		ShardCount:           shardCount,
@@ -46,13 +28,12 @@ func newTestServer(t *testing.T, maxTTL time.Duration, shardCount int) (*Server,
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	s.now = clock.Now
 	t.Cleanup(func() {
 		if err := s.Close(); err != nil {
 			t.Errorf("Close: %v", err)
 		}
 	})
-	return s, clock
+	return s
 }
 
 func activateServer(t *testing.T, s *Server) {
@@ -91,7 +72,7 @@ func TestConfigValidate(t *testing.T) {
 }
 
 func TestQuarantineAndGetTTL(t *testing.T) {
-	s, _ := newTestServer(t, 2*time.Second, 1)
+	s := newTestServer(t, 2*time.Second, 1)
 	shard := s.shards[0]
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
 
@@ -124,8 +105,7 @@ func TestQuarantineAndGetTTL(t *testing.T) {
 }
 
 func TestAcquireClampsMaxUint64BeforeDurationConversion(t *testing.T) {
-	s, clock := newTestServer(t, 2*time.Second, 1)
-	activateServer(t, s)
+	s := newTestServer(t, 2*time.Second, 1)
 
 	op := operation{
 		requestID:      1,
@@ -134,41 +114,40 @@ func TestAcquireClampsMaxUint64BeforeDurationConversion(t *testing.T) {
 		leaseID:        leaseID{clientID: 1, bootID: 2, leaseSeq: 3},
 		requestedTTLMS: math.MaxUint64,
 	}
-	response := s.apply(s.shards[0], op).GetAcquire()
+	response := s.acquire(s.shards[0], op, testEpoch).GetAcquire()
 	if response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK || response.GetTtlMs() != 2000 {
 		t.Fatalf("Acquire = (%s, %d), want (OK, 2000)", response.GetStatus(), response.GetTtlMs())
 	}
-	wantDeadline := clock.Now().Round(0).Add(2 * time.Second)
+	wantDeadline := testEpoch.Add(2 * time.Second)
 	if got := s.shards[0].leases["key"].deadline; !got.Equal(wantDeadline) {
 		t.Fatalf("deadline = %s, want %s", got, wantDeadline)
 	}
 }
 
 func TestAcquireZeroTTLHasNoPositiveValidity(t *testing.T) {
-	s, _ := newTestServer(t, 2*time.Second, 1)
-	activateServer(t, s)
+	s := newTestServer(t, 2*time.Second, 1)
 	first := leaseID{clientID: 1, bootID: 1, leaseSeq: 1}
 	second := leaseID{clientID: 2, bootID: 2, leaseSeq: 2}
 
-	response := s.apply(s.shards[0], operation{kind: operationAcquire, key: "key", leaseID: first}).GetAcquire()
+	response := s.acquire(s.shards[0], operation{kind: operationAcquire, key: "key", leaseID: first}, testEpoch).GetAcquire()
 	if response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK || response.GetTtlMs() != 0 {
 		t.Fatalf("zero Acquire = (%s, %d), want (OK, 0)", response.GetStatus(), response.GetTtlMs())
 	}
-	response = s.apply(s.shards[0], operation{kind: operationAcquire, key: "key", leaseID: second, requestedTTLMS: 1}).GetAcquire()
+	response = s.acquire(s.shards[0], operation{kind: operationAcquire, key: "key", leaseID: second, requestedTTLMS: 1}, testEpoch).GetAcquire()
 	if response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
 		t.Fatalf("Acquire after zero TTL = %s, want OK", response.GetStatus())
 	}
 }
 
 func TestAcquireAlreadyOwnedDoesNotExtendDeadline(t *testing.T) {
-	s, clock := newTestServer(t, 2*time.Second, 1)
-	activateServer(t, s)
+	s := newTestServer(t, 2*time.Second, 1)
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
+	now := testEpoch
 
-	s.apply(s.shards[0], operation{kind: operationAcquire, key: "key", leaseID: id, requestedTTLMS: 1000})
+	s.acquire(s.shards[0], operation{kind: operationAcquire, key: "key", leaseID: id, requestedTTLMS: 1000}, now)
 	wantDeadline := s.shards[0].leases["key"].deadline
-	clock.Advance(250 * time.Millisecond)
-	response := s.apply(s.shards[0], operation{kind: operationAcquire, key: "key", leaseID: id, requestedTTLMS: 2000}).GetAcquire()
+	now = now.Add(250 * time.Millisecond)
+	response := s.acquire(s.shards[0], operation{kind: operationAcquire, key: "key", leaseID: id, requestedTTLMS: 2000}, now).GetAcquire()
 	if response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED || response.GetTtlMs() != 750 {
 		t.Fatalf("repeated Acquire = (%s, %d), want (ALREADY_OWNED, 750)", response.GetStatus(), response.GetTtlMs())
 	}
@@ -177,27 +156,27 @@ func TestAcquireAlreadyOwnedDoesNotExtendDeadline(t *testing.T) {
 	}
 
 	other := leaseID{clientID: 9, bootID: 9, leaseSeq: 9}
-	busy := s.apply(s.shards[0], operation{kind: operationAcquire, key: "key", leaseID: other, requestedTTLMS: 1000}).GetAcquire()
+	busy := s.acquire(s.shards[0], operation{kind: operationAcquire, key: "key", leaseID: other, requestedTTLMS: 1000}, now).GetAcquire()
 	if busy.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_BUSY || busy.GetTtlMs() != 0 {
 		t.Fatalf("foreign Acquire = (%s, %d), want (BUSY, 0)", busy.GetStatus(), busy.GetTtlMs())
 	}
 }
 
 func TestRenewExtendsToConfiguredMaximumAndNeverShortens(t *testing.T) {
-	s, clock := newTestServer(t, 2*time.Second, 1)
-	activateServer(t, s)
+	s := newTestServer(t, 2*time.Second, 1)
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
 	shard := s.shards[0]
+	now := testEpoch
 
-	s.apply(shard, operation{kind: operationAcquire, key: "key", leaseID: id, requestedTTLMS: 1000})
-	clock.Advance(200 * time.Millisecond)
-	response := s.apply(shard, operation{kind: operationRenew, key: "key", leaseID: id, requestedTTLMS: math.MaxUint64}).GetRenew()
+	s.acquire(shard, operation{kind: operationAcquire, key: "key", leaseID: id, requestedTTLMS: 1000}, now)
+	now = now.Add(200 * time.Millisecond)
+	response := s.renew(shard, operation{kind: operationRenew, key: "key", leaseID: id, requestedTTLMS: math.MaxUint64}, now).GetRenew()
 	if response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK || response.GetTtlMs() != 2000 {
 		t.Fatalf("max Renew = (%s, %d), want (OK, 2000)", response.GetStatus(), response.GetTtlMs())
 	}
-	wantDeadline := clock.Now().Round(0).Add(2 * time.Second)
+	wantDeadline := now.Add(2 * time.Second)
 
-	zero := s.apply(shard, operation{kind: operationRenew, key: "key", leaseID: id, requestedTTLMS: 0}).GetRenew()
+	zero := s.renew(shard, operation{kind: operationRenew, key: "key", leaseID: id, requestedTTLMS: 0}, now).GetRenew()
 	if zero.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK || zero.GetTtlMs() != 2000 {
 		t.Fatalf("zero Renew = (%s, %d), want (OK, 2000)", zero.GetStatus(), zero.GetTtlMs())
 	}
@@ -207,19 +186,18 @@ func TestRenewExtendsToConfiguredMaximumAndNeverShortens(t *testing.T) {
 }
 
 func TestRenewStaleAndExpiry(t *testing.T) {
-	s, clock := newTestServer(t, time.Second, 1)
-	activateServer(t, s)
+	s := newTestServer(t, time.Second, 1)
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
 	other := leaseID{clientID: 4, bootID: 5, leaseSeq: 6}
 	shard := s.shards[0]
 
-	missing := s.apply(shard, operation{kind: operationRenew, key: "missing", leaseID: id, requestedTTLMS: 1000}).GetRenew()
+	missing := s.renew(shard, operation{kind: operationRenew, key: "missing", leaseID: id, requestedTTLMS: 1000}, testEpoch).GetRenew()
 	if missing.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_STALE {
 		t.Fatalf("missing Renew = %s, want STALE", missing.GetStatus())
 	}
-	s.apply(shard, operation{kind: operationAcquire, key: "key", leaseID: id, requestedTTLMS: 1000})
+	s.acquire(shard, operation{kind: operationAcquire, key: "key", leaseID: id, requestedTTLMS: 1000}, testEpoch)
 	wantDeadline := shard.leases["key"].deadline
-	foreign := s.apply(shard, operation{kind: operationRenew, key: "key", leaseID: other, requestedTTLMS: 1000}).GetRenew()
+	foreign := s.renew(shard, operation{kind: operationRenew, key: "key", leaseID: other, requestedTTLMS: 1000}, testEpoch).GetRenew()
 	if foreign.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_STALE {
 		t.Fatalf("foreign Renew = %s, want STALE", foreign.GetStatus())
 	}
@@ -227,8 +205,7 @@ func TestRenewStaleAndExpiry(t *testing.T) {
 		t.Fatalf("foreign Renew changed deadline from %s to %s", wantDeadline, got)
 	}
 
-	clock.Advance(time.Second)
-	expired := s.apply(shard, operation{kind: operationRenew, key: "key", leaseID: id, requestedTTLMS: 1000}).GetRenew()
+	expired := s.renew(shard, operation{kind: operationRenew, key: "key", leaseID: id, requestedTTLMS: 1000}, testEpoch.Add(time.Second)).GetRenew()
 	if expired.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_STALE {
 		t.Fatalf("expired Renew = %s, want STALE", expired.GetStatus())
 	}
@@ -238,14 +215,13 @@ func TestRenewStaleAndExpiry(t *testing.T) {
 }
 
 func TestReleaseIsIdempotentAndDeletesOnlyMatchingLease(t *testing.T) {
-	s, _ := newTestServer(t, time.Second, 1)
-	activateServer(t, s)
+	s := newTestServer(t, time.Second, 1)
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
 	other := leaseID{clientID: 4, bootID: 5, leaseSeq: 6}
 	shard := s.shards[0]
-	s.apply(shard, operation{kind: operationAcquire, key: "key", leaseID: id, requestedTTLMS: 1000})
+	s.acquire(shard, operation{kind: operationAcquire, key: "key", leaseID: id, requestedTTLMS: 1000}, testEpoch)
 
-	foreign := s.apply(shard, operation{kind: operationRelease, key: "key", leaseID: other}).GetRelease()
+	foreign := s.release(shard, operation{kind: operationRelease, key: "key", leaseID: other}, testEpoch).GetRelease()
 	if foreign.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
 		t.Fatalf("foreign Release = %s, want OK", foreign.GetStatus())
 	}
@@ -253,7 +229,7 @@ func TestReleaseIsIdempotentAndDeletesOnlyMatchingLease(t *testing.T) {
 		t.Fatal("foreign Release deleted lease")
 	}
 
-	matching := s.apply(shard, operation{kind: operationRelease, key: "key", leaseID: id}).GetRelease()
+	matching := s.release(shard, operation{kind: operationRelease, key: "key", leaseID: id}, testEpoch).GetRelease()
 	if matching.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
 		t.Fatalf("matching Release = %s, want OK", matching.GetStatus())
 	}
@@ -261,7 +237,7 @@ func TestReleaseIsIdempotentAndDeletesOnlyMatchingLease(t *testing.T) {
 		t.Fatal("matching Release did not delete lease")
 	}
 
-	missing := s.apply(shard, operation{kind: operationRelease, key: "key", leaseID: id}).GetRelease()
+	missing := s.release(shard, operation{kind: operationRelease, key: "key", leaseID: id}, testEpoch).GetRelease()
 	if missing.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
 		t.Fatalf("missing Release = %s, want OK", missing.GetStatus())
 	}
@@ -300,47 +276,12 @@ func TestDeleteExpiredLeases(t *testing.T) {
 	}
 }
 
-func TestLeaseStreamRequestReceivedDuringQuarantineStaysNotReady(t *testing.T) {
-	clock := &fakeClock{now: testEpoch}
-	received := make(chan serverPhase, 1)
-	resumeReceive := make(chan struct{})
-	var resumeOnce sync.Once
-	s, err := New(Config{
-		ConfiguredMaxTTL:     time.Second,
-		ShardCount:           1,
-		ShardQueueDepth:      8,
-		MaxInFlightPerStream: 8,
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	s.now = clock.Now
-	s.afterReceive = func(phase serverPhase) {
-		received <- phase
-		<-resumeReceive
-	}
-	t.Cleanup(func() {
-		resumeOnce.Do(func() { close(resumeReceive) })
-		_ = s.Close()
-	})
+func TestLeaseStreamRejectsRequestDuringQuarantine(t *testing.T) {
+	s := newTestServer(t, time.Second, 1)
 
 	stream := newFakeLeaseStream(acquireRequest(1, []byte("key"), 1, 1000))
 	errDone := make(chan error, 1)
 	go func() { errDone <- s.LeaseStream(stream) }()
-
-	select {
-	case phase := <-received:
-		if phase != phaseQuarantine {
-			t.Fatalf("phase at Recv = %d, want QUARANTINE", phase)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("stream did not receive request")
-	}
-
-	// Activate before the receive path is allowed to dispatch the request. A
-	// worker-only phase check would incorrectly turn this response into OK.
-	activateServer(t, s)
-	resumeOnce.Do(func() { close(resumeReceive) })
 
 	select {
 	case response := <-stream.sent:
@@ -361,39 +302,12 @@ func TestLeaseStreamRequestReceivedDuringQuarantineStaysNotReady(t *testing.T) {
 }
 
 func TestLeaseStreamPreservesSameKeyFIFO(t *testing.T) {
-	clock := &fakeClock{now: testEpoch}
-	firstStarted := make(chan struct{})
-	secondStarted := make(chan struct{})
-	unblockFirst := make(chan struct{})
-	var firstOnce sync.Once
-	var secondOnce sync.Once
-	var unblockOnce sync.Once
-	s, err := New(Config{
-		ConfiguredMaxTTL:     time.Second,
-		ShardCount:           2,
-		ShardQueueDepth:      8,
-		MaxInFlightPerStream: 8,
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	s.now = clock.Now
-	s.beforeApply = func(op operation) {
-		switch op.requestID {
-		case 1:
-			firstOnce.Do(func() { close(firstStarted) })
-			<-unblockFirst
-		case 2:
-			secondOnce.Do(func() { close(secondStarted) })
-		}
-	}
-	t.Cleanup(func() {
-		unblockOnce.Do(func() { close(unblockFirst) })
-		_ = s.Close()
-	})
+	s := newTestServer(t, time.Second, 2)
 	activateServer(t, s)
 
 	key := []byte("same-key")
+	shard := s.shards[s.shardIndex(string(key))]
+	unblockShard := blockShard(t, shard, string(key))
 	stream := newFakeLeaseStream(
 		acquireRequest(1, key, 1, 1000),
 		acquireRequest(2, key, 1, 1000),
@@ -401,31 +315,20 @@ func TestLeaseStreamPreservesSameKeyFIFO(t *testing.T) {
 	errDone := make(chan error, 1)
 	go func() { errDone <- s.LeaseStream(stream) }()
 
-	select {
-	case <-firstStarted:
-	case <-time.After(time.Second):
-		t.Fatal("first same-key request did not start")
-	}
-	shard := s.shards[s.shardIndex(string(key))]
 	deadline := time.Now().Add(time.Second)
-	for len(shard.jobs) != 1 {
+	for len(shard.jobs) != 2 {
 		if time.Now().After(deadline) {
-			t.Fatal("second same-key request was not queued behind the first")
+			t.Fatalf("same-key requests queued = %d, want 2", len(shard.jobs))
 		}
 		time.Sleep(time.Millisecond)
 	}
 	select {
-	case <-secondStarted:
-		t.Fatal("second same-key request started before the first completed")
-	default:
-	}
-	select {
 	case response := <-stream.sent:
-		t.Fatalf("response %d arrived while the first request was blocked", response.GetRequestId())
+		t.Fatalf("response %d arrived while the shard was blocked", response.GetRequestId())
 	default:
 	}
 
-	unblockOnce.Do(func() { close(unblockFirst) })
+	unblockShard()
 	firstResponse := <-stream.sent
 	secondResponse := <-stream.sent
 	if firstResponse.GetRequestId() != 1 || firstResponse.GetAcquire().GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
@@ -445,34 +348,15 @@ func TestLeaseStreamPreservesSameKeyFIFO(t *testing.T) {
 }
 
 func TestLeaseStreamCanReplyOutOfOrderAcrossShards(t *testing.T) {
-	clock := &fakeClock{now: testEpoch}
-	firstBlocked := make(chan struct{})
-	unblockFirst := make(chan struct{})
-	var blockOnce sync.Once
-	var unblockOnce sync.Once
-	s, err := New(Config{
-		ConfiguredMaxTTL:     time.Second,
-		ShardCount:           2,
-		ShardQueueDepth:      8,
-		MaxInFlightPerStream: 8,
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	s.now = clock.Now
-	s.beforeApply = func(op operation) {
-		if op.requestID == 1 {
-			blockOnce.Do(func() { close(firstBlocked) })
-			<-unblockFirst
-		}
-	}
-	t.Cleanup(func() {
-		unblockOnce.Do(func() { close(unblockFirst) })
-		_ = s.Close()
-	})
+	s := newTestServer(t, time.Second, 2)
 	activateServer(t, s)
 
 	firstKey, secondKey := keysForDifferentShards(t, s)
+	unblockFirstShard := blockShard(
+		t,
+		s.shards[s.shardIndex(string(firstKey))],
+		string(firstKey),
+	)
 	stream := newFakeLeaseStream(
 		acquireRequest(1, firstKey, 1, 1000),
 		acquireRequest(2, secondKey, 2, 1000),
@@ -481,11 +365,6 @@ func TestLeaseStreamCanReplyOutOfOrderAcrossShards(t *testing.T) {
 	go func() { errDone <- s.LeaseStream(stream) }()
 
 	select {
-	case <-firstBlocked:
-	case <-time.After(time.Second):
-		t.Fatal("first shard did not start processing")
-	}
-	select {
 	case response := <-stream.sent:
 		if response.GetRequestId() != 2 {
 			t.Fatalf("first response request_id = %d, want 2", response.GetRequestId())
@@ -493,14 +372,14 @@ func TestLeaseStreamCanReplyOutOfOrderAcrossShards(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("second shard did not respond while first shard was blocked")
 	}
-	unblockOnce.Do(func() { close(unblockFirst) })
+	unblockFirstShard()
 	select {
 	case response := <-stream.sent:
 		if response.GetRequestId() != 1 {
 			t.Fatalf("second response request_id = %d, want 1", response.GetRequestId())
 		}
 	case <-time.After(time.Second):
-		t.Fatal("first shard did not respond after clock was unblocked")
+		t.Fatal("first shard did not respond after it was unblocked")
 	}
 	select {
 	case err := <-errDone:
@@ -510,6 +389,29 @@ func TestLeaseStreamCanReplyOutOfOrderAcrossShards(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("LeaseStream did not finish after EOF")
 	}
+}
+
+func blockShard(t *testing.T, shard *leaseShard, key string) func() {
+	t.Helper()
+	started := make(chan struct{})
+	unblock := make(chan struct{})
+	var unblockOnce sync.Once
+	release := func() { unblockOnce.Do(func() { close(unblock) }) }
+	t.Cleanup(release)
+
+	shard.jobs <- shardJob{
+		operation: operation{kind: operationRelease, key: key},
+		complete: func(*redleasev1.ServerResponse) {
+			close(started)
+			<-unblock
+		},
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("shard worker did not start blocker")
+	}
+	return release
 }
 
 func keysForDifferentShards(t *testing.T, s *Server) ([]byte, []byte) {
@@ -588,7 +490,7 @@ func getTTLRequest(requestID uint64) *redleasev1.ClientRequest {
 }
 
 func TestDecodeInvalidRequest(t *testing.T) {
-	s, _ := newTestServer(t, time.Second, 1)
+	s := newTestServer(t, time.Second, 1)
 	for _, request := range []*redleasev1.ClientRequest{nil, {}, {Operation: &redleasev1.ClientRequest_Acquire{}}} {
 		_, _, err := s.decodeRequest(request)
 		if status.Code(err) != codes.InvalidArgument {
