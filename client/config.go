@@ -6,11 +6,6 @@ import (
 	"google.golang.org/grpc"
 )
 
-const (
-	// ServerCount is fixed by the RedLease 3/5 quorum architecture.
-	ServerCount = 5
-)
-
 // ServerConfig identifies one independent lock-server.
 //
 // DialOptions must include the transport credentials appropriate for the

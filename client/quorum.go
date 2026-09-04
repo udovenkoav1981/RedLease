@@ -8,6 +8,8 @@ import (
 )
 
 const (
+	// ServerCount is fixed by the RedLease 3/5 quorum architecture.
+	ServerCount  = 5
 	quorumSize   = 3
 	safetyMargin = 100 * time.Millisecond
 )
