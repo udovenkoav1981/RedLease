@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -27,9 +28,9 @@ type launcherConfig struct {
 	listenAddress        string
 	configuredMaxTTLMS   uint64
 	maxKeys              uint64
-	shardCount           int
-	shardQueueDepth      int
-	maxInFlightPerStream int
+	shardCount           uint32
+	shardQueueDepth      uint32
+	maxInFlightPerStream uint32
 }
 
 func main() {
@@ -128,22 +129,22 @@ func parseFlags(args []string, output io.Writer) (launcherConfig, error) {
 		server.DefaultMaxKeys,
 		"maximum resident lease keys (0 uses the library default)",
 	)
-	flags.IntVar(
+	uint32Flag(
+		flags,
 		&config.shardCount,
 		"shard-count",
-		0,
 		"server shard count (0 uses the library default)",
 	)
-	flags.IntVar(
+	uint32Flag(
+		flags,
 		&config.shardQueueDepth,
 		"shard-queue-depth",
-		0,
 		"jobs buffered per shard (0 uses the library default)",
 	)
-	flags.IntVar(
+	uint32Flag(
+		flags,
 		&config.maxInFlightPerStream,
 		"max-in-flight-per-stream",
-		0,
 		"maximum requests in flight per stream (0 uses the library default)",
 	)
 	flags.Usage = func() {
@@ -159,6 +160,17 @@ func parseFlags(args []string, output io.Writer) (launcherConfig, error) {
 		return launcherConfig{}, fmt.Errorf("unexpected positional arguments: %v", flags.Args())
 	}
 	return config, nil
+}
+
+func uint32Flag(flags *flag.FlagSet, target *uint32, name, usage string) {
+	flags.Func(name, usage, func(raw string) error {
+		value, err := strconv.ParseUint(raw, 10, 32)
+		if err != nil {
+			return err
+		}
+		*target = uint32(value)
+		return nil
+	})
 }
 
 func (c launcherConfig) serverConfig() (server.Config, error) {

@@ -19,7 +19,7 @@ import (
 
 var testEpoch = time.Date(2026, time.January, 2, 3, 4, 5, 123456789, time.UTC)
 
-func newTestServer(t *testing.T, maxTTL time.Duration, shardCount int) *Server {
+func newTestServer(t *testing.T, maxTTL time.Duration, shardCount uint32) *Server {
 	t.Helper()
 	s, err := New(Config{
 		ConfiguredMaxTTL:     maxTTL,
@@ -58,9 +58,6 @@ func TestConfigValidate(t *testing.T) {
 		{name: "negative TTL", config: Config{ConfiguredMaxTTL: -time.Millisecond}, wantErr: true},
 		{name: "over protocol maximum", config: Config{ConfiguredMaxTTL: ProtocolMaxTTL + time.Millisecond}, wantErr: true},
 		{name: "sub-millisecond", config: Config{ConfiguredMaxTTL: time.Millisecond + time.Nanosecond}, wantErr: true},
-		{name: "negative shards", config: Config{ConfiguredMaxTTL: time.Second, ShardCount: -1}, wantErr: true},
-		{name: "negative queue", config: Config{ConfiguredMaxTTL: time.Second, ShardQueueDepth: -1}, wantErr: true},
-		{name: "negative inflight", config: Config{ConfiguredMaxTTL: time.Second, MaxInFlightPerStream: -1}, wantErr: true},
 	}
 
 	for _, tt := range tests {

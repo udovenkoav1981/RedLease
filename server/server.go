@@ -33,9 +33,9 @@ type Config struct {
 	ConfiguredMaxTTL time.Duration
 	MaxKeys          uint64
 
-	ShardCount           int
-	ShardQueueDepth      int
-	MaxInFlightPerStream int
+	ShardCount           uint32
+	ShardQueueDepth      uint32
+	MaxInFlightPerStream uint32
 }
 
 // Validate checks values explicitly supplied by the caller. A configured TTL
@@ -48,12 +48,6 @@ func (c Config) Validate() error {
 		return fmt.Errorf("configured max TTL must not exceed %s", ProtocolMaxTTL)
 	case c.ConfiguredMaxTTL%time.Millisecond != 0:
 		return errors.New("configured max TTL must be a whole number of milliseconds")
-	case c.ShardCount < 0:
-		return errors.New("shard count must not be negative")
-	case c.ShardQueueDepth < 0:
-		return errors.New("shard queue depth must not be negative")
-	case c.MaxInFlightPerStream < 0:
-		return errors.New("maximum in-flight requests per stream must not be negative")
 	default:
 		return nil
 	}
@@ -62,9 +56,9 @@ func (c Config) Validate() error {
 type resolvedConfig struct {
 	configuredMaxTTLMS uint64
 	maxKeys            uint64
-	shardCount         int
-	shardQueueDepth    int
-	maxInFlight        int
+	shardCount         uint32
+	shardQueueDepth    uint32
+	maxInFlight        uint32
 }
 
 func resolveConfig(c Config) (resolvedConfig, error) {
