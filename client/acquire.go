@@ -45,8 +45,9 @@ type acquireReplicaResult struct {
 	err      error
 }
 
-// Acquire attempts to establish a currently valid lease quorum on any three
-// of the five configured lock-servers.
+// Acquire makes one attempt to establish a currently valid lease quorum on any
+// three of the five configured lock-servers. The caller owns retry policy;
+// every new call uses a new lease ID.
 func (c *Client) Acquire(
 	ctx context.Context,
 	key []byte,

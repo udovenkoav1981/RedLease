@@ -147,7 +147,10 @@ background healing.
 частично установлен на одном или двух серверах, клиент немедленно отправляет
 Release с тем же `leaseID` всем пяти серверам.
 
-Повторная попытка Acquire использует новый `leaseID` и randomized backoff.
+Один вызов `Client.Acquire` выполняет ровно одну quorum-попытку. После cleanup
+он возвращает приложению `ErrNotAcquired` и сам не начинает новый Acquire.
+Повторную попытку и randomized backoff организует вызывающее приложение. Каждый
+новый вызов `Client.Acquire` создаёт новый `leaseID`.
 
 ### 5.3. Background healing и client-side Attach
 
