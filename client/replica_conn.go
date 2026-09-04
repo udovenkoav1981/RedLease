@@ -52,16 +52,9 @@ func (f *grpcStreamFactory) close() error {
 	return f.connection.Close()
 }
 
-type replicaConnConfig struct {
-	factory streamFactory
-	backoff exponentialBackoff
-	timer   backoffTimer
-}
-
 type replicaConn struct {
 	factory streamFactory
 	backoff exponentialBackoff
-	timer   backoffTimer
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -79,19 +72,10 @@ type replicaConn struct {
 }
 
 func newReplicaConn(factory streamFactory) *replicaConn {
-	return newReplicaConnWithConfig(replicaConnConfig{
-		factory: factory,
-		backoff: defaultReconnectBackoff(),
-		timer:   systemBackoffTimer{},
-	})
-}
-
-func newReplicaConnWithConfig(config replicaConnConfig) *replicaConn {
 	ctx, cancel := context.WithCancel(context.Background())
 	connection := &replicaConn{
-		factory: config.factory,
-		backoff: config.backoff,
-		timer:   config.timer,
+		factory: factory,
+		backoff: defaultReconnectBackoff(),
 		ctx:     ctx,
 		cancel:  cancel,
 		changed: make(chan struct{}),
@@ -200,7 +184,7 @@ func (c *replicaConn) manage() {
 }
 
 func (c *replicaConn) waitBeforeRetry(attempt uint) bool {
-	return c.timer.wait(c.ctx, c.backoff.duration(attempt))
+	return waitBackoff(c.ctx, c.backoff.duration(attempt))
 }
 
 func (c *replicaConn) publish(generation *streamGeneration) bool {

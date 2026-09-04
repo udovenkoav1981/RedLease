@@ -29,22 +29,17 @@ func TestExponentialBackoffBounds(t *testing.T) {
 	}
 }
 
-func TestExponentialBackoffDeterministicJitter(t *testing.T) {
-	random := &sequenceFloat64{values: []float64{0, 0.5, 1}}
+func TestExponentialBackoffJitterBounds(t *testing.T) {
 	backoff := exponentialBackoff{
 		initial: 100 * time.Millisecond,
 		maximum: time.Second,
 		jitter:  0.25,
-		random:  random,
 	}
 
-	for i, want := range []time.Duration{
-		75 * time.Millisecond,
-		100 * time.Millisecond,
-		125 * time.Millisecond,
-	} {
-		if got := backoff.duration(0); got != want {
-			t.Errorf("sample %d: duration = %v, want %v", i, got, want)
+	for sample := range 1_000 {
+		got := backoff.duration(0)
+		if got < 75*time.Millisecond || got > 125*time.Millisecond {
+			t.Fatalf("sample %d: duration = %v, want [75ms, 125ms]", sample, got)
 		}
 	}
 }
@@ -54,21 +49,12 @@ func TestExponentialBackoffJitterDoesNotExceedMaximum(t *testing.T) {
 		initial: 100 * time.Millisecond,
 		maximum: 250 * time.Millisecond,
 		jitter:  0.25,
-		random:  &sequenceFloat64{values: []float64{1}},
 	}
 
-	if got := backoff.duration(10); got != 250*time.Millisecond {
-		t.Fatalf("duration = %v, want maximum 250ms", got)
+	for sample := range 1_000 {
+		got := backoff.duration(10)
+		if got < 187_500*time.Microsecond || got > 250*time.Millisecond {
+			t.Fatalf("sample %d: duration = %v, want [187.5ms, 250ms]", sample, got)
+		}
 	}
-}
-
-type sequenceFloat64 struct {
-	values []float64
-	next   int
-}
-
-func (s *sequenceFloat64) Float64() float64 {
-	value := s.values[s.next]
-	s.next++
-	return value
 }

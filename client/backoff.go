@@ -12,15 +12,10 @@ const (
 	defaultReconnectJitter         = 0.2
 )
 
-type float64Source interface {
-	Float64() float64
-}
-
 type exponentialBackoff struct {
 	initial time.Duration
 	maximum time.Duration
 	jitter  float64
-	random  float64Source
 }
 
 func defaultReconnectBackoff() exponentialBackoff {
@@ -28,7 +23,6 @@ func defaultReconnectBackoff() exponentialBackoff {
 		initial: defaultReconnectInitialBackoff,
 		maximum: defaultReconnectMaxBackoff,
 		jitter:  defaultReconnectJitter,
-		random:  rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -49,11 +43,11 @@ func (b exponentialBackoff) duration(attempt uint) time.Duration {
 		base *= 2
 	}
 
-	if b.jitter <= 0 || b.random == nil || base <= 0 {
+	if b.jitter <= 0 || base <= 0 {
 		return base
 	}
 
-	factor := 1 - b.jitter + 2*b.jitter*b.random.Float64()
+	factor := 1 - b.jitter + 2*b.jitter*rand.Float64()
 	delay := time.Duration(float64(base) * factor)
 	if delay < 0 {
 		return 0
@@ -64,13 +58,7 @@ func (b exponentialBackoff) duration(attempt uint) time.Duration {
 	return delay
 }
 
-type backoffTimer interface {
-	wait(context.Context, time.Duration) bool
-}
-
-type systemBackoffTimer struct{}
-
-func (systemBackoffTimer) wait(ctx context.Context, delay time.Duration) bool {
+func waitBackoff(ctx context.Context, delay time.Duration) bool {
 	if delay <= 0 {
 		select {
 		case <-ctx.Done():

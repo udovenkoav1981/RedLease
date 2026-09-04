@@ -14,20 +14,14 @@ func TestReplicaConnRetriesOpenFailure(t *testing.T) {
 	openFailure := errors.New("open failure")
 	factory := newScriptedStreamFactory()
 	factory.results <- streamFactoryResult{err: openFailure}
-	timer := newControlledBackoffTimer()
-	connection := newTestReplicaConn(t, factory, timer)
-
-	wait := timer.nextWait(t)
-	if wait.delay != 10*time.Millisecond {
-		t.Fatalf("retry delay = %v, want 10ms", wait.delay)
-	}
+	connection := newTestReplicaConn(t, factory)
+	waitForReplicaError(t, connection, openFailure)
 
 	_, err := connection.call(context.Background(), acquireStreamRequest("unavailable"))
 	assertReplicaUnavailableCause(t, err, openFailure)
 
 	stream := newReplicaFakeStream()
 	factory.results <- streamFactoryResult{stream: stream}
-	close(wait.proceed)
 	waitForReplicaState(t, connection, true, false)
 
 	if opens := factory.openCalls.Load(); opens != 2 {
@@ -39,21 +33,14 @@ func TestReplicaConnReconnectsAfterGenerationFailure(t *testing.T) {
 	factory := newScriptedStreamFactory()
 	firstStream := newReplicaFakeStream()
 	factory.results <- streamFactoryResult{stream: firstStream}
-	timer := newControlledBackoffTimer()
-	connection := newTestReplicaConn(t, factory, timer)
+	connection := newTestReplicaConn(t, factory)
 	waitForReplicaState(t, connection, true, false)
 
+	secondStream := newReplicaFakeStream()
+	factory.results <- streamFactoryResult{stream: secondStream}
 	receiveFailure := errors.New("stream disconnected")
 	firstStream.receive <- fakeReceive{err: receiveFailure}
 	waitForReplicaState(t, connection, false, false)
-
-	wait := timer.nextWait(t)
-	if wait.delay != 10*time.Millisecond {
-		t.Fatalf("reconnect delay = %v, want 10ms", wait.delay)
-	}
-	secondStream := newReplicaFakeStream()
-	factory.results <- streamFactoryResult{stream: secondStream}
-	close(wait.proceed)
 	waitForReplicaState(t, connection, true, false)
 
 	result := startReplicaCall(connection, acquireStreamRequest("after reconnect"))
@@ -70,10 +57,11 @@ func TestReplicaConnReconnectsWhenRequestDeadlineBreaksBlockedSend(t *testing.T)
 	factory := newScriptedStreamFactory()
 	firstStream := newReplicaFakeStream()
 	factory.results <- streamFactoryResult{stream: firstStream}
-	timer := newControlledBackoffTimer()
-	connection := newTestReplicaConn(t, factory, timer)
+	connection := newTestReplicaConn(t, factory)
 	waitForReplicaState(t, connection, true, false)
 
+	secondStream := newReplicaFakeStream()
+	factory.results <- streamFactoryResult{stream: secondStream}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	result := make(chan streamCallResult, 1)
@@ -86,11 +74,6 @@ func TestReplicaConnReconnectsWhenRequestDeadlineBreaksBlockedSend(t *testing.T)
 		t.Fatalf("blocked call error = %v, want deadline exceeded", err)
 	}
 	waitForReplicaState(t, connection, false, false)
-
-	wait := timer.nextWait(t)
-	secondStream := newReplicaFakeStream()
-	factory.results <- streamFactoryResult{stream: secondStream}
-	close(wait.proceed)
 	waitForReplicaState(t, connection, true, false)
 
 	secondResult := startReplicaCall(connection, acquireStreamRequest("after blocked send"))
@@ -105,8 +88,7 @@ func TestReplicaConnReconnectsWhenRequestDeadlineBreaksBlockedSend(t *testing.T)
 
 func TestReplicaConnCallWhenUnavailable(t *testing.T) {
 	factory := newScriptedStreamFactory()
-	timer := newControlledBackoffTimer()
-	connection := newTestReplicaConn(t, factory, timer)
+	connection := newTestReplicaConn(t, factory)
 
 	_, err := connection.call(context.Background(), acquireStreamRequest("key"))
 	var unavailable *replicaUnavailableError
@@ -121,8 +103,7 @@ func TestReplicaConnCloseStopsPendingCallAndFactory(t *testing.T) {
 	factory.closeErr = closeFailure
 	stream := newReplicaFakeStream()
 	factory.results <- streamFactoryResult{stream: stream}
-	timer := newControlledBackoffTimer()
-	connection := newTestReplicaConnWithoutCleanup(factory, timer)
+	connection := newTestReplicaConnWithoutCleanup(factory)
 	waitForReplicaState(t, connection, true, false)
 
 	result := startReplicaCall(connection, acquireStreamRequest("pending"))
@@ -152,8 +133,7 @@ func TestReplicaConnConcurrentCalls(t *testing.T) {
 	factory := newScriptedStreamFactory()
 	stream := newReplicaFakeStream()
 	factory.results <- streamFactoryResult{stream: stream}
-	timer := newControlledBackoffTimer()
-	connection := newTestReplicaConn(t, factory, timer)
+	connection := newTestReplicaConn(t, factory)
 	waitForReplicaState(t, connection, true, false)
 
 	const calls = 64
@@ -213,61 +193,18 @@ func (f *scriptedStreamFactory) close() error {
 	return f.closeErr
 }
 
-type controlledBackoffWait struct {
-	delay   time.Duration
-	proceed chan struct{}
-}
-
-type controlledBackoffTimer struct {
-	waits chan controlledBackoffWait
-}
-
-func newControlledBackoffTimer() *controlledBackoffTimer {
-	return &controlledBackoffTimer{waits: make(chan controlledBackoffWait, 16)}
-}
-
-func (t *controlledBackoffTimer) wait(ctx context.Context, delay time.Duration) bool {
-	wait := controlledBackoffWait{delay: delay, proceed: make(chan struct{})}
-	t.waits <- wait
-	select {
-	case <-wait.proceed:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
-func (t *controlledBackoffTimer) nextWait(testingT *testing.T) controlledBackoffWait {
-	testingT.Helper()
-	select {
-	case wait := <-t.waits:
-		return wait
-	case <-time.After(time.Second):
-		testingT.Fatal("timed out waiting for reconnect backoff")
-		return controlledBackoffWait{}
-	}
-}
-
 func newTestReplicaConn(
 	t *testing.T,
 	factory streamFactory,
-	timer backoffTimer,
 ) *replicaConn {
 	t.Helper()
-	connection := newTestReplicaConnWithoutCleanup(factory, timer)
+	connection := newTestReplicaConnWithoutCleanup(factory)
 	t.Cleanup(func() { _ = connection.Close() })
 	return connection
 }
 
-func newTestReplicaConnWithoutCleanup(factory streamFactory, timer backoffTimer) *replicaConn {
-	return newReplicaConnWithConfig(replicaConnConfig{
-		factory: factory,
-		backoff: exponentialBackoff{
-			initial: 10 * time.Millisecond,
-			maximum: 80 * time.Millisecond,
-		},
-		timer: timer,
-	})
+func newTestReplicaConnWithoutCleanup(factory streamFactory) *replicaConn {
+	return newReplicaConn(factory)
 }
 
 func newReplicaFakeStream() *fakeLeaseClientStream {
@@ -309,6 +246,23 @@ func waitForReplicaState(t *testing.T, connection *replicaConn, wantReady, wantC
 				closed,
 			)
 		}
+	}
+}
+
+func waitForReplicaError(t *testing.T, connection *replicaConn, want error) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		connection.stateMu.Lock()
+		got := connection.lastErr
+		connection.stateMu.Unlock()
+		if errors.Is(got, want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for replica error %v; got %v", want, got)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

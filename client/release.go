@@ -74,14 +74,13 @@ func (c *Client) retryReleaseReplica(
 	future *streamFuture,
 ) {
 	backoff := defaultReconnectBackoff()
-	timer := systemBackoffTimer{}
 	var attempt uint
 
 	for {
 		if future != nil && c.releaseResponseOK(ctx, future) {
 			return
 		}
-		if !timer.wait(ctx, backoff.duration(attempt)) {
+		if !waitBackoff(ctx, backoff.duration(attempt)) {
 			return
 		}
 		attempt++

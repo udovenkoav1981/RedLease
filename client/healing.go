@@ -9,7 +9,6 @@ import (
 // locally confirmed lease remains valid. It never changes validUntil.
 func (l *Lease) backgroundHeal() {
 	backoff := defaultReconnectBackoff()
-	timer := systemBackoffTimer{}
 	var attempt uint
 
 	for {
@@ -18,7 +17,7 @@ func (l *Lease) backgroundHeal() {
 			return
 		}
 
-		if !timer.wait(l.ctx, backoff.duration(attempt)) {
+		if !waitBackoff(l.ctx, backoff.duration(attempt)) {
 			return
 		}
 

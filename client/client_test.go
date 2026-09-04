@@ -78,11 +78,7 @@ func newClientWithScriptedReplicasWithoutCleanup() (*Client, [ServerCount]*scrip
 	for index := range client.replicas {
 		factory := newScriptedStreamFactory()
 		factories[index] = factory
-		client.replicas[index] = newReplicaConnWithConfig(replicaConnConfig{
-			factory: factory,
-			backoff: exponentialBackoff{initial: time.Millisecond, maximum: time.Millisecond},
-			timer:   systemBackoffTimer{},
-		})
+		client.replicas[index] = newReplicaConn(factory)
 	}
 	return client, factories
 }
