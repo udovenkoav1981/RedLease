@@ -19,6 +19,8 @@ func TestLeaseStatusNumericContract(t *testing.T) {
 		{name: "BUSY", status: LeaseStatus_LEASE_STATUS_BUSY, want: 2},
 		{name: "STALE", status: LeaseStatus_LEASE_STATUS_STALE, want: 3},
 		{name: "NOT_READY", status: LeaseStatus_LEASE_STATUS_NOT_READY, want: 4},
+		{name: "KEY_LIMIT_REACHED", status: LeaseStatus_LEASE_STATUS_KEY_LIMIT_REACHED, want: 5},
+		{name: "KEY_TOO_LARGE", status: LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE, want: 6},
 	}
 
 	for _, tt := range tests {

@@ -16,6 +16,8 @@ import (
 const (
 	// ProtocolMaxTTL is the maximum configured TTL allowed by the protocol.
 	ProtocolMaxTTL = 5 * time.Second
+	// DefaultMaxKeys is the default maximum number of resident lease keys.
+	DefaultMaxKeys = 10_000
 
 	safetyMargin          = 100 * time.Millisecond
 	restartQuarantineTime = ProtocolMaxTTL + safetyMargin + time.Millisecond
@@ -26,10 +28,11 @@ const (
 	leaseCleanupInterval        = time.Second
 )
 
-// Config controls one in-memory lock-server instance. Zero values for the
-// queue-related fields select implementation defaults.
+// Config controls one in-memory lock-server instance. Zero values for MaxKeys
+// and the queue-related fields select implementation defaults.
 type Config struct {
 	ConfiguredMaxTTL time.Duration
+	MaxKeys          uint64
 
 	ShardCount           int
 	ShardQueueDepth      int
@@ -59,6 +62,7 @@ func (c Config) Validate() error {
 
 type resolvedConfig struct {
 	configuredMaxTTLMS uint64
+	maxKeys            uint64
 	shardCount         int
 	shardQueueDepth    int
 	maxInFlight        int
@@ -71,12 +75,16 @@ func resolveConfig(c Config) (resolvedConfig, error) {
 
 	result := resolvedConfig{
 		configuredMaxTTLMS: uint64(c.ConfiguredMaxTTL / time.Millisecond),
+		maxKeys:            c.MaxKeys,
 		shardCount:         c.ShardCount,
 		shardQueueDepth:    c.ShardQueueDepth,
 		maxInFlight:        c.MaxInFlightPerStream,
 	}
 	if result.shardCount == 0 {
 		result.shardCount = defaultShardCount
+	}
+	if result.maxKeys == 0 {
+		result.maxKeys = DefaultMaxKeys
 	}
 	if result.shardQueueDepth == 0 {
 		result.shardQueueDepth = defaultShardQueueDepth
@@ -104,6 +112,7 @@ type Server struct {
 
 	phase  atomic.Uint32
 	closed atomic.Bool
+	keys   atomic.Uint64
 
 	ctx    context.Context
 	cancel context.CancelFunc

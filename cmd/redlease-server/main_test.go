@@ -22,6 +22,9 @@ func TestParseFlagsDefaults(t *testing.T) {
 	if config.configuredMaxTTLMS != defaultConfiguredMaxTTL {
 		t.Errorf("configured max TTL = %d, want %d", config.configuredMaxTTLMS, defaultConfiguredMaxTTL)
 	}
+	if config.maxKeys != server.DefaultMaxKeys {
+		t.Errorf("max keys = %d, want %d", config.maxKeys, server.DefaultMaxKeys)
+	}
 	if config.shardCount != 0 || config.shardQueueDepth != 0 || config.maxInFlightPerStream != 0 {
 		t.Errorf("implementation tuning defaults = (%d, %d, %d), want (0, 0, 0)",
 			config.shardCount, config.shardQueueDepth, config.maxInFlightPerStream)
@@ -32,6 +35,7 @@ func TestParseFlagsCustomValues(t *testing.T) {
 	config, err := parseFlags([]string{
 		"-listen", "127.0.0.1:15051",
 		"-configured-max-ttl-ms", "1234",
+		"-max-keys", "123",
 		"-shard-count", "8",
 		"-shard-queue-depth", "16",
 		"-max-in-flight-per-stream", "32",
@@ -41,6 +45,7 @@ func TestParseFlagsCustomValues(t *testing.T) {
 	}
 	if config.listenAddress != "127.0.0.1:15051" ||
 		config.configuredMaxTTLMS != 1234 ||
+		config.maxKeys != 123 ||
 		config.shardCount != 8 ||
 		config.shardQueueDepth != 16 ||
 		config.maxInFlightPerStream != 32 {
@@ -84,6 +89,9 @@ func TestServerConfigConvertsMillisecondsAfterBoundsCheck(t *testing.T) {
 			if !tt.wantErr && config.ConfiguredMaxTTL != tt.wantTTL {
 				t.Fatalf("configured max TTL = %s, want %s", config.ConfiguredMaxTTL, tt.wantTTL)
 			}
+			if !tt.wantErr && config.MaxKeys != server.DefaultMaxKeys {
+				t.Fatalf("max keys = %d, want %d", config.MaxKeys, server.DefaultMaxKeys)
+			}
 		})
 	}
 }
@@ -91,6 +99,7 @@ func TestServerConfigConvertsMillisecondsAfterBoundsCheck(t *testing.T) {
 func TestServerConfigPassesImplementationTuning(t *testing.T) {
 	config, err := (launcherConfig{
 		configuredMaxTTLMS:   1000,
+		maxKeys:              123,
 		shardCount:           8,
 		shardQueueDepth:      16,
 		maxInFlightPerStream: 32,
@@ -98,7 +107,7 @@ func TestServerConfigPassesImplementationTuning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("serverConfig: %v", err)
 	}
-	if config.ShardCount != 8 || config.ShardQueueDepth != 16 || config.MaxInFlightPerStream != 32 {
+	if config.MaxKeys != 123 || config.ShardCount != 8 || config.ShardQueueDepth != 16 || config.MaxInFlightPerStream != 32 {
 		t.Fatalf("unexpected server config: %+v", config)
 	}
 }

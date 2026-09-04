@@ -67,6 +67,8 @@ enum LeaseStatus {
   LEASE_STATUS_BUSY = 2;
   LEASE_STATUS_STALE = 3;
   LEASE_STATUS_NOT_READY = 4;
+  LEASE_STATUS_KEY_LIMIT_REACHED = 5;
+  LEASE_STATUS_KEY_TOO_LARGE = 6;
 }
 
 message AcquireResponse {

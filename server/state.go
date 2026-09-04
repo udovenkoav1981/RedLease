@@ -65,22 +65,28 @@ func (s *Server) runShard(shard *leaseShard) {
 			}
 			job.complete(s.apply(shard, job.operation))
 		case <-cleanup.C:
-			deleteExpiredLeases(shard, time.Now().Round(0))
+			s.releaseKeys(deleteExpiredLeases(shard, time.Now().Round(0)))
 		}
 	}
 }
 
-func deleteExpiredLeases(shard *leaseShard, now time.Time) {
+func deleteExpiredLeases(shard *leaseShard, now time.Time) uint64 {
+	var deleted uint64
 	for key, current := range shard.leases {
 		if !current.deadline.After(now) {
 			delete(shard.leases, key)
+			deleted++
 		}
 	}
+	return deleted
 }
 
 func (s *Server) apply(shard *leaseShard, op operation) *redleasev1.ServerResponse {
 	if !s.active() {
 		return notReadyResponse(op)
+	}
+	if len(op.key) > redleasev1.MaxKeyBytes {
+		return statusResponse(op, redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE)
 	}
 
 	now := time.Now().Round(0)
@@ -98,19 +104,30 @@ func (s *Server) apply(shard *leaseShard, op operation) *redleasev1.ServerRespon
 
 func (s *Server) acquire(shard *leaseShard, op operation, now time.Time) *redleasev1.ServerResponse {
 	current, exists := shard.leases[op.key]
-	if !exists || !current.deadline.After(now) {
-		effectiveTTLMS := min(op.requestedTTLMS, s.config.configuredMaxTTLMS)
-		shard.leases[op.key] = lease{
-			id:       op.leaseID,
-			deadline: now.Add(time.Duration(effectiveTTLMS) * time.Millisecond),
-		}
-		return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK, effectiveTTLMS)
-	}
-	if current.id == op.leaseID {
+	if exists && current.deadline.After(now) && current.id == op.leaseID {
 		return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED,
 			remainingTTLMS(current.deadline, now, s.config.configuredMaxTTLMS))
 	}
-	return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_BUSY, 0)
+	if exists && current.deadline.After(now) {
+		return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_BUSY, 0)
+	}
+	if exists {
+		delete(shard.leases, op.key)
+		s.releaseKeys(1)
+	}
+
+	effectiveTTLMS := min(op.requestedTTLMS, s.config.configuredMaxTTLMS)
+	if effectiveTTLMS == 0 {
+		return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK, 0)
+	}
+	if !s.reserveKey() {
+		return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_KEY_LIMIT_REACHED, 0)
+	}
+	shard.leases[op.key] = lease{
+		id:       op.leaseID,
+		deadline: now.Add(time.Duration(effectiveTTLMS) * time.Millisecond),
+	}
+	return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK, effectiveTTLMS)
 }
 
 func (s *Server) renew(shard *leaseShard, op operation, now time.Time) *redleasev1.ServerResponse {
@@ -120,6 +137,7 @@ func (s *Server) renew(shard *leaseShard, op operation, now time.Time) *redlease
 	}
 	if !current.deadline.After(now) {
 		delete(shard.leases, op.key)
+		s.releaseKeys(1)
 		return renewResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_STALE, 0)
 	}
 	if current.id != op.leaseID {
@@ -140,6 +158,7 @@ func (s *Server) release(shard *leaseShard, op operation, now time.Time) *redlea
 	current, exists := shard.leases[op.key]
 	if exists && (!current.deadline.After(now) || current.id == op.leaseID) {
 		delete(shard.leases, op.key)
+		s.releaseKeys(1)
 	}
 	return releaseResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK)
 }
@@ -183,15 +202,43 @@ func releaseResponse(requestID uint64, status redleasev1.LeaseStatus) *redleasev
 }
 
 func notReadyResponse(op operation) *redleasev1.ServerResponse {
+	return statusResponse(op, redleasev1.LeaseStatus_LEASE_STATUS_NOT_READY)
+}
+
+func statusResponse(op operation, status redleasev1.LeaseStatus) *redleasev1.ServerResponse {
 	switch op.kind {
 	case operationAcquire:
-		return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_NOT_READY, 0)
+		return acquireResponse(op.requestID, status, 0)
 	case operationRenew:
-		return renewResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_NOT_READY, 0)
+		return renewResponse(op.requestID, status, 0)
 	case operationRelease:
-		return releaseResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_NOT_READY)
+		return releaseResponse(op.requestID, status)
 	default:
 		panic("server: unknown operation kind")
+	}
+}
+
+func (s *Server) reserveKey() bool {
+	for {
+		current := s.keys.Load()
+		if current >= s.config.maxKeys {
+			return false
+		}
+		if s.keys.CompareAndSwap(current, current+1) {
+			return true
+		}
+	}
+}
+
+func (s *Server) releaseKeys(count uint64) {
+	for count != 0 {
+		current := s.keys.Load()
+		if count > current {
+			panic("server: lease key count underflow")
+		}
+		if s.keys.CompareAndSwap(current, current-count) {
+			return
+		}
 	}
 }
 

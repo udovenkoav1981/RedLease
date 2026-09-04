@@ -104,7 +104,8 @@ func (c *Client) releaseResponseOK(ctx context.Context, future *streamFuture) bo
 	// without applying any lease mutation. There is nothing from the previous
 	// process incarnation left to clean on that replica.
 	return status == redleasev1.LeaseStatus_LEASE_STATUS_OK ||
-		status == redleasev1.LeaseStatus_LEASE_STATUS_NOT_READY
+		status == redleasev1.LeaseStatus_LEASE_STATUS_NOT_READY ||
+		status == redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE
 }
 
 func releaseRetryWindow(responseTimeout time.Duration) time.Duration {

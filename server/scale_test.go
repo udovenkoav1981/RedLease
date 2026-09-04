@@ -23,6 +23,26 @@ func TestServerHandlesTenThousandActiveLeases(t *testing.T) {
 		leaseCount,
 		redleasev1.LeaseStatus_LEASE_STATUS_OK,
 	)
+	if got := s.keys.Load(); got != leaseCount {
+		t.Fatalf("resident keys = %d, want %d", got, leaseCount)
+	}
+
+	if !s.dispatch(context.Background().Done(), shardJob{
+		operation: operation{
+			kind:           operationAcquire,
+			key:            "over-limit",
+			leaseID:        leaseID{clientID: 3, bootID: 3, leaseSeq: 1},
+			requestedTTLMS: uint64(ProtocolMaxTTL / time.Millisecond),
+		},
+		complete: func(response *redleasev1.ServerResponse) {
+			responses <- response
+		},
+	}) {
+		t.Fatal("dispatch over-limit Acquire")
+	}
+	if status := (<-responses).GetAcquire().GetStatus(); status != redleasev1.LeaseStatus_LEASE_STATUS_KEY_LIMIT_REACHED {
+		t.Fatalf("10,001st Acquire = %s, want KEY_LIMIT_REACHED", status)
+	}
 
 	// Every key must still be owned simultaneously: a different lease ID is
 	// rejected for all ten thousand keys.

@@ -24,11 +24,13 @@ const (
 type LeaseStatus int32
 
 const (
-	LeaseStatus_LEASE_STATUS_OK            LeaseStatus = 0
-	LeaseStatus_LEASE_STATUS_ALREADY_OWNED LeaseStatus = 1
-	LeaseStatus_LEASE_STATUS_BUSY          LeaseStatus = 2
-	LeaseStatus_LEASE_STATUS_STALE         LeaseStatus = 3
-	LeaseStatus_LEASE_STATUS_NOT_READY     LeaseStatus = 4
+	LeaseStatus_LEASE_STATUS_OK                LeaseStatus = 0
+	LeaseStatus_LEASE_STATUS_ALREADY_OWNED     LeaseStatus = 1
+	LeaseStatus_LEASE_STATUS_BUSY              LeaseStatus = 2
+	LeaseStatus_LEASE_STATUS_STALE             LeaseStatus = 3
+	LeaseStatus_LEASE_STATUS_NOT_READY         LeaseStatus = 4
+	LeaseStatus_LEASE_STATUS_KEY_LIMIT_REACHED LeaseStatus = 5
+	LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE     LeaseStatus = 6
 )
 
 // Enum value maps for LeaseStatus.
@@ -39,13 +41,17 @@ var (
 		2: "LEASE_STATUS_BUSY",
 		3: "LEASE_STATUS_STALE",
 		4: "LEASE_STATUS_NOT_READY",
+		5: "LEASE_STATUS_KEY_LIMIT_REACHED",
+		6: "LEASE_STATUS_KEY_TOO_LARGE",
 	}
 	LeaseStatus_value = map[string]int32{
-		"LEASE_STATUS_OK":            0,
-		"LEASE_STATUS_ALREADY_OWNED": 1,
-		"LEASE_STATUS_BUSY":          2,
-		"LEASE_STATUS_STALE":         3,
-		"LEASE_STATUS_NOT_READY":     4,
+		"LEASE_STATUS_OK":                0,
+		"LEASE_STATUS_ALREADY_OWNED":     1,
+		"LEASE_STATUS_BUSY":              2,
+		"LEASE_STATUS_STALE":             3,
+		"LEASE_STATUS_NOT_READY":         4,
+		"LEASE_STATUS_KEY_LIMIT_REACHED": 5,
+		"LEASE_STATUS_KEY_TOO_LARGE":     6,
 	}
 )
 
@@ -829,13 +835,15 @@ const file_redlease_v1_redlease_proto_rawDesc = "" +
 	"\x0fReleaseResponse\x120\n" +
 	"\x06status\x18\x01 \x01(\x0e2\x18.redlease.v1.LeaseStatusR\x06status\"C\n" +
 	"\x0eGetTTLResponse\x121\n" +
-	"\x15configured_max_ttl_ms\x18\x01 \x01(\x04R\x12configuredMaxTtlMs*\x8d\x01\n" +
+	"\x15configured_max_ttl_ms\x18\x01 \x01(\x04R\x12configuredMaxTtlMs*\xd1\x01\n" +
 	"\vLeaseStatus\x12\x13\n" +
 	"\x0fLEASE_STATUS_OK\x10\x00\x12\x1e\n" +
 	"\x1aLEASE_STATUS_ALREADY_OWNED\x10\x01\x12\x15\n" +
 	"\x11LEASE_STATUS_BUSY\x10\x02\x12\x16\n" +
 	"\x12LEASE_STATUS_STALE\x10\x03\x12\x1a\n" +
-	"\x16LEASE_STATUS_NOT_READY\x10\x042V\n" +
+	"\x16LEASE_STATUS_NOT_READY\x10\x04\x12\"\n" +
+	"\x1eLEASE_STATUS_KEY_LIMIT_REACHED\x10\x05\x12\x1e\n" +
+	"\x1aLEASE_STATUS_KEY_TOO_LARGE\x10\x062V\n" +
 	"\bRedLease\x12J\n" +
 	"\vLeaseStream\x12\x1a.redlease.v1.ClientRequest\x1a\x1b.redlease.v1.ServerResponse(\x010\x01BAZ?github.com/udovenkoav1981/RedLease/proto/redlease/v1;redleasev1b\x06proto3"
 

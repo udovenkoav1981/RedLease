@@ -5,6 +5,7 @@ import (
 	"io"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -71,6 +72,16 @@ func TestConfigValidate(t *testing.T) {
 	}
 }
 
+func TestConfigDefaultsMaxKeys(t *testing.T) {
+	config, err := resolveConfig(Config{ConfiguredMaxTTL: time.Second})
+	if err != nil {
+		t.Fatalf("resolveConfig: %v", err)
+	}
+	if config.maxKeys != DefaultMaxKeys {
+		t.Fatalf("max keys = %d, want %d", config.maxKeys, DefaultMaxKeys)
+	}
+}
+
 func TestQuarantineAndGetTTL(t *testing.T) {
 	s := newTestServer(t, 2*time.Second, 1)
 	shard := s.shards[0]
@@ -133,9 +144,107 @@ func TestAcquireZeroTTLHasNoPositiveValidity(t *testing.T) {
 	if response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK || response.GetTtlMs() != 0 {
 		t.Fatalf("zero Acquire = (%s, %d), want (OK, 0)", response.GetStatus(), response.GetTtlMs())
 	}
+	if got := s.keys.Load(); got != 0 {
+		t.Fatalf("zero-TTL Acquire reserved %d keys, want 0", got)
+	}
+	if _, exists := s.shards[0].leases["key"]; exists {
+		t.Fatal("zero-TTL Acquire stored an immediately expired key")
+	}
 	response = s.acquire(s.shards[0], operation{kind: operationAcquire, key: "key", leaseID: second, requestedTTLMS: 1}, testEpoch).GetAcquire()
 	if response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
 		t.Fatalf("Acquire after zero TTL = %s, want OK", response.GetStatus())
+	}
+}
+
+func TestAcquireEnforcesKeyLimitAndRestoresCapacity(t *testing.T) {
+	s, err := New(Config{
+		ConfiguredMaxTTL: time.Second,
+		MaxKeys:          1,
+		ShardCount:       1,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	shard := s.shards[0]
+	firstID := leaseID{clientID: 1, bootID: 1, leaseSeq: 1}
+	secondID := leaseID{clientID: 2, bootID: 2, leaseSeq: 2}
+
+	first := s.acquire(shard, operation{kind: operationAcquire, key: "first", leaseID: firstID, requestedTTLMS: 1000}, testEpoch).GetAcquire()
+	if first.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+		t.Fatalf("first Acquire = %s, want OK", first.GetStatus())
+	}
+	repeated := s.acquire(shard, operation{kind: operationAcquire, key: "first", leaseID: firstID, requestedTTLMS: 1000}, testEpoch).GetAcquire()
+	if repeated.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED {
+		t.Fatalf("repeated Acquire at limit = %s, want ALREADY_OWNED", repeated.GetStatus())
+	}
+	limited := s.acquire(shard, operation{kind: operationAcquire, key: "second", leaseID: secondID, requestedTTLMS: 1000}, testEpoch).GetAcquire()
+	if limited.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_KEY_LIMIT_REACHED {
+		t.Fatalf("Acquire above key limit = %s, want KEY_LIMIT_REACHED", limited.GetStatus())
+	}
+
+	s.release(shard, operation{kind: operationRelease, key: "first", leaseID: firstID}, testEpoch)
+	if got := s.keys.Load(); got != 0 {
+		t.Fatalf("key count after Release = %d, want 0", got)
+	}
+	afterRelease := s.acquire(shard, operation{kind: operationAcquire, key: "second", leaseID: secondID, requestedTTLMS: 1000}, testEpoch).GetAcquire()
+	if afterRelease.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+		t.Fatalf("Acquire after Release = %s, want OK", afterRelease.GetStatus())
+	}
+
+	thirdID := leaseID{clientID: 3, bootID: 3, leaseSeq: 3}
+	afterLazyExpiry := s.acquire(shard, operation{kind: operationAcquire, key: "second", leaseID: thirdID, requestedTTLMS: 1000}, testEpoch.Add(time.Second)).GetAcquire()
+	if afterLazyExpiry.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+		t.Fatalf("Acquire after lazy expiry = %s, want OK", afterLazyExpiry.GetStatus())
+	}
+	if got := s.keys.Load(); got != 1 {
+		t.Fatalf("key count after lazy expiry replacement = %d, want 1", got)
+	}
+
+	s.releaseKeys(deleteExpiredLeases(shard, testEpoch.Add(2*time.Second)))
+	if got := s.keys.Load(); got != 0 {
+		t.Fatalf("key count after background-style cleanup = %d, want 0", got)
+	}
+}
+
+func TestServerRejectsKeysLargerThanProtocolLimit(t *testing.T) {
+	s := newTestServer(t, time.Second, 1)
+	activateServer(t, s)
+	id := leaseID{clientID: 1, bootID: 1, leaseSeq: 1}
+	tooLarge := strings.Repeat("x", redleasev1.MaxKeyBytes+1)
+
+	for _, op := range []operation{
+		{kind: operationAcquire, key: tooLarge, leaseID: id, requestedTTLMS: 1000},
+		{kind: operationRenew, key: tooLarge, leaseID: id, requestedTTLMS: 1000},
+		{kind: operationRelease, key: tooLarge, leaseID: id},
+	} {
+		response := s.apply(s.shards[0], op)
+		var status redleasev1.LeaseStatus
+		switch op.kind {
+		case operationAcquire:
+			status = response.GetAcquire().GetStatus()
+		case operationRenew:
+			status = response.GetRenew().GetStatus()
+		case operationRelease:
+			status = response.GetRelease().GetStatus()
+		}
+		if status != redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE {
+			t.Fatalf("operation %d oversized key status = %s, want KEY_TOO_LARGE", op.kind, status)
+		}
+	}
+	if got := s.keys.Load(); got != 0 {
+		t.Fatalf("oversized operations reserved %d keys, want 0", got)
+	}
+
+	boundary := strings.Repeat("x", redleasev1.MaxKeyBytes)
+	response := s.apply(s.shards[0], operation{
+		kind:           operationAcquire,
+		key:            boundary,
+		leaseID:        id,
+		requestedTTLMS: 1000,
+	}).GetAcquire()
+	if response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+		t.Fatalf("%d-byte key Acquire = %s, want OK", redleasev1.MaxKeyBytes, response.GetStatus())
 	}
 }
 
@@ -212,6 +321,9 @@ func TestRenewStaleAndExpiry(t *testing.T) {
 	if _, exists := shard.leases["key"]; exists {
 		t.Fatal("expired Renew did not lazily delete lease")
 	}
+	if got := s.keys.Load(); got != 0 {
+		t.Fatalf("key count after expired Renew = %d, want 0", got)
+	}
 }
 
 func TestReleaseIsIdempotentAndDeletesOnlyMatchingLease(t *testing.T) {
@@ -228,6 +340,9 @@ func TestReleaseIsIdempotentAndDeletesOnlyMatchingLease(t *testing.T) {
 	if _, exists := shard.leases["key"]; !exists {
 		t.Fatal("foreign Release deleted lease")
 	}
+	if got := s.keys.Load(); got != 1 {
+		t.Fatalf("foreign Release changed key count to %d, want 1", got)
+	}
 
 	matching := s.release(shard, operation{kind: operationRelease, key: "key", leaseID: id}, testEpoch).GetRelease()
 	if matching.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
@@ -235,6 +350,9 @@ func TestReleaseIsIdempotentAndDeletesOnlyMatchingLease(t *testing.T) {
 	}
 	if _, exists := shard.leases["key"]; exists {
 		t.Fatal("matching Release did not delete lease")
+	}
+	if got := s.keys.Load(); got != 0 {
+		t.Fatalf("matching Release left key count at %d, want 0", got)
 	}
 
 	missing := s.release(shard, operation{kind: operationRelease, key: "key", leaseID: id}, testEpoch).GetRelease()
@@ -263,7 +381,9 @@ func TestDeleteExpiredLeases(t *testing.T) {
 		"active":   {deadline: testEpoch.Add(time.Millisecond)},
 	}}
 
-	deleteExpiredLeases(shard, testEpoch)
+	if deleted := deleteExpiredLeases(shard, testEpoch); deleted != 2 {
+		t.Fatalf("deleted leases = %d, want 2", deleted)
+	}
 
 	if _, exists := shard.leases["expired"]; exists {
 		t.Fatal("expired lease was not deleted")

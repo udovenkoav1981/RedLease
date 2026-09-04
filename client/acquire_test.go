@@ -87,6 +87,46 @@ func TestClientAcquireZeroTTLDoesCleanupOnAllFive(t *testing.T) {
 	harness.receiveAndRespondToCleanup(t, requests)
 }
 
+func TestClientAcquireRejectsOversizedKeyBeforeFanout(t *testing.T) {
+	harness := newAcquireHarness(t)
+	key := make([]byte, MaxKeyBytes+1)
+
+	lease, err := harness.client.Acquire(context.Background(), key, 1_000)
+	if lease != nil {
+		t.Fatal("oversized Acquire returned a lease")
+	}
+	if !errors.Is(err, ErrNotAcquired) || !errors.Is(err, ErrKeyTooLarge) {
+		t.Fatalf("oversized Acquire error = %v, want ErrNotAcquired and ErrKeyTooLarge", err)
+	}
+	for replica, stream := range harness.streams {
+		select {
+		case request := <-stream.sent:
+			t.Fatalf("replica %d received oversized request: %+v", replica, request)
+		default:
+		}
+	}
+}
+
+func TestClientAcquireReportsServerKeyLimit(t *testing.T) {
+	harness := newAcquireHarness(t)
+	result := startClientAcquire(harness.client, context.Background(), []byte("limited"), 1_000)
+	requests := harness.receiveAcquireRequests(t)
+	for replica, request := range requests {
+		harness.respondAcquire(
+			replica,
+			request,
+			redleasev1.LeaseStatus_LEASE_STATUS_KEY_LIMIT_REACHED,
+			0,
+		)
+	}
+
+	failed := receiveAcquireCallResult(t, result)
+	if !errors.Is(failed.err, ErrNotAcquired) || !errors.Is(failed.err, ErrKeyLimitReached) {
+		t.Fatalf("limited Acquire error = %v, want ErrNotAcquired and ErrKeyLimitReached", failed.err)
+	}
+	harness.receiveAndRespondToCleanup(t, requests)
+}
+
 func TestClientAcquireExpiredQuorumDoesCleanupOnAllFive(t *testing.T) {
 	harness := newAcquireHarness(t)
 	result := startClientAcquire(harness.client, context.Background(), []byte("expired"), 1_000)

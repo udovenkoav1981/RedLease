@@ -14,6 +14,15 @@ import (
 // currently valid 3/5 quorum.
 var ErrNotAcquired = errors.New("RedLease lease not acquired")
 
+var (
+	// ErrKeyLimitReached means at least one server reported that its resident
+	// lease-key limit was reached during an unsuccessful Acquire.
+	ErrKeyLimitReached = errors.New("RedLease server key limit reached")
+
+	// ErrKeyTooLarge means the supplied key exceeds MaxKeyBytes.
+	ErrKeyTooLarge = errors.New("RedLease key is too large")
+)
+
 type notAcquiredError struct {
 	cause error
 }
@@ -55,6 +64,9 @@ func (c *Client) Acquire(
 ) (*Lease, error) {
 	if c.ctx.Err() != nil {
 		return nil, &notAcquiredError{cause: ErrClientClosed}
+	}
+	if len(key) > MaxKeyBytes {
+		return nil, &notAcquiredError{cause: ErrKeyTooLarge}
 	}
 
 	id := c.idGenerator.next()
@@ -101,6 +113,8 @@ func (c *Client) Acquire(
 		candidates   [ServerCount]time.Time
 		successful   [ServerCount]bool
 		firstFailure error
+		keyLimitSeen bool
+		largeKeySeen bool
 		received     int
 	)
 
@@ -141,6 +155,13 @@ func (c *Client) Acquire(
 					)
 					return lease, nil
 				}
+			} else if result.response != nil {
+				switch result.response.GetStatus() {
+				case redleasev1.LeaseStatus_LEASE_STATUS_KEY_LIMIT_REACHED:
+					keyLimitSeen = true
+				case redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE:
+					largeKeySeen = true
+				}
 			}
 
 			if !acquireQuorumStillPossible(
@@ -164,6 +185,12 @@ func (c *Client) Acquire(
 	cancelCollection()
 	lease.cancel()
 	c.cleanupFailedAcquire(lease.key, id)
+	if keyLimitSeen {
+		firstFailure = errors.Join(firstFailure, ErrKeyLimitReached)
+	}
+	if largeKeySeen {
+		firstFailure = errors.Join(firstFailure, ErrKeyTooLarge)
+	}
 	return nil, &notAcquiredError{cause: firstFailure}
 }
 

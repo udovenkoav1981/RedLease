@@ -26,6 +26,7 @@ const (
 type launcherConfig struct {
 	listenAddress        string
 	configuredMaxTTLMS   uint64
+	maxKeys              uint64
 	shardCount           int
 	shardQueueDepth      int
 	maxInFlightPerStream int
@@ -68,8 +69,9 @@ func run(args []string, flagOutput io.Writer, logger *log.Logger) error {
 	leaseServer.Register(grpcServer)
 
 	logger.Printf(
-		"state=QUARANTINE configured_max_ttl_ms=%d; activation is managed by the server library",
+		"state=QUARANTINE configured_max_ttl_ms=%d max_keys=%d; activation is managed by the server library",
 		config.configuredMaxTTLMS,
+		serverConfig.MaxKeys,
 	)
 	logger.Printf("listening on %s with plaintext gRPC (local testing only)", listener.Addr())
 
@@ -120,6 +122,12 @@ func parseFlags(args []string, output io.Writer) (launcherConfig, error) {
 		defaultConfiguredMaxTTL,
 		"maximum lease TTL in whole milliseconds (1..5000)",
 	)
+	flags.Uint64Var(
+		&config.maxKeys,
+		"max-keys",
+		server.DefaultMaxKeys,
+		"maximum resident lease keys (0 uses the library default)",
+	)
 	flags.IntVar(
 		&config.shardCount,
 		"shard-count",
@@ -168,8 +176,13 @@ func (c launcherConfig) serverConfig() (server.Config, error) {
 		)
 	}
 
+	maxKeys := c.maxKeys
+	if maxKeys == 0 {
+		maxKeys = server.DefaultMaxKeys
+	}
 	result := server.Config{
 		ConfiguredMaxTTL:     time.Duration(c.configuredMaxTTLMS) * time.Millisecond,
+		MaxKeys:              maxKeys,
 		ShardCount:           c.shardCount,
 		ShardQueueDepth:      c.shardQueueDepth,
 		MaxInFlightPerStream: c.maxInFlightPerStream,

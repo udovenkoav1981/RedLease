@@ -18,6 +18,8 @@ Servers                    5 independent lock-servers
 Quorum                     3 of 5
 Storage                    RAM only
 Disk persistence           none
+Default per-server maxKeys 10 000
+Maximum key size           2048 bytes
 Protocol maximum TTL       5 s
 Per-server configuredMaxTTL <= Protocol maximum TTL
 Typical Renew interval     1 s
@@ -67,6 +69,14 @@ type Lease struct {
 
 Операции над одним ключом выполняются локально атомарно. 
 
+Каждый server имеет общий для всех shards лимит `maxKeys`. Нулевое значение
+`maxKeys` в library config означает implementation default 10 000. Перед
+созданием нового положительно действующего lease shard атомарно резервирует
+место в общем счётчике. Поэтому параллельные
+Acquire в разных shards не могут превысить лимит. Release, lazy expiry и
+background cleanup возвращают место. Acquire с эффективным TTL 0 ничего не
+хранит и место не занимает.
+
 Истёкшие записи могут удаляться лениво при обращении и/или фоновым механизмом.
 Точная memory-management strategy будет определена при реализации.
 
@@ -108,6 +118,10 @@ GetTTL()
 нет. Нулевой `requestedTTL` допустим: новый lease с таким TTL не даёт клиенту
 положительной validity, а Renew не сокращает уже существующий deadline.
 
+Максимальный размер key во всех lease-операциях равен 2048 байтам. Сервер
+проверяет это ограничение независимо от клиента и возвращает
+`KEY_TOO_LARGE`. Клиентская библиотека отклоняет oversized key до fan-out.
+
 ### 5.1. Acquire
 
 Клиент создаёт новый `leaseID`, фиксирует локальное время начала операции и
@@ -120,14 +134,21 @@ GetTTL()
 effectiveTTL = min(requestedTTL, configuredMaxTTL)
 now = localNow
 
-if key отсутствует or deadline <= now:
-    установить leaseID
-    deadline = now + effectiveTTL
-    return OK(ttl = deadline - now)
-if current.leaseID == requested.leaseID:
+if key существует and deadline > now and current.leaseID == requested.leaseID:
     deadline не изменять
     return ALREADY_OWNED(ttl = deadline - now)
-return BUSY
+if key существует and deadline > now:
+    return BUSY
+
+удалить истёкшую запись, если она была
+if effectiveTTL == 0:
+    return OK(ttl = 0)
+if невозможно зарезервировать место в maxKeys:
+    return KEY_LIMIT_REACHED
+
+установить leaseID
+deadline = now + effectiveTTL
+return OK(ttl = effectiveTTL)
 ```
 
 `OK` и `ALREADY_OWNED` подтверждают наличие запрошенного `leaseID` на сервере и
@@ -135,6 +156,12 @@ return BUSY
 Acquire идемпотентным, но не продлевает server deadline: продление выполняется
 только через Renew. Поле `ttl` успешного ответа содержит оставшееся время до
 server deadline на момент формирования ответа.
+
+`KEY_LIMIT_REACHED` относится только к созданию нового key. Уже существующий
+активный key при заполненном server продолжает возвращать `ALREADY_OWNED` или
+`BUSY`, а Renew существующего lease не требует новой reservation. Клиент может
+собрать quorum на других серверах; если 3/5 недостижимы, действуют обычные
+правила failed Acquire и cleanup.
 
 Клиент устанавливает владение после трёх успешных реплик, если рассчитанный для
 них `quorumValidUntil` ещё не достигнут, и сразу возвращает успех приложению.
