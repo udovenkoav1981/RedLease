@@ -49,30 +49,3 @@ func (c Config) Validate() error {
 	}
 	return nil
 }
-
-type resolvedClientConfig struct {
-	clientID        uint32
-	servers         [ServerCount]ServerConfig
-	responseTimeout time.Duration
-}
-
-func resolveClientConfig(config Config) (resolvedClientConfig, error) {
-	if err := config.Validate(); err != nil {
-		return resolvedClientConfig{}, err
-	}
-
-	resolved := resolvedClientConfig{
-		clientID:        config.ClientID,
-		responseTimeout: config.ResponseTimeout,
-	}
-	if resolved.responseTimeout == 0 {
-		resolved.responseTimeout = defaultResponseTimeout
-	}
-	for index, server := range config.Servers {
-		resolved.servers[index] = ServerConfig{
-			Target:      server.Target,
-			DialOptions: append([]grpc.DialOption(nil), server.DialOptions...),
-		}
-	}
-	return resolved, nil
-}

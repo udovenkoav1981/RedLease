@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 func TestConfigRequiresAllFiveTargets(t *testing.T) {
@@ -27,24 +28,34 @@ func TestConfigRejectsNegativeResponseTimeout(t *testing.T) {
 	}
 }
 
-func TestResolveClientConfigAppliesDefaultsAndCopiesOptions(t *testing.T) {
+func TestNewAppliesDefaultsAndCopiesOptions(t *testing.T) {
 	config := validClientConfig()
-	config.Servers[0].DialOptions = []grpc.DialOption{grpc.WithNoProxy()}
+	for index := range config.Servers {
+		config.Servers[index].DialOptions = []grpc.DialOption{
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		}
+	}
+	config.Servers[0].DialOptions = append(config.Servers[0].DialOptions, grpc.WithNoProxy())
 
-	resolved, err := resolveClientConfig(config)
+	client, err := New(config)
 	if err != nil {
-		t.Fatalf("resolve config: %v", err)
+		t.Fatalf("New: %v", err)
 	}
-	if resolved.responseTimeout != defaultResponseTimeout {
-		t.Fatalf("response timeout = %v, want %v", resolved.responseTimeout, defaultResponseTimeout)
+	t.Cleanup(func() { _ = client.Close() })
+
+	if client.clientID != config.ClientID {
+		t.Fatalf("client ID = %d, want %d", client.clientID, config.ClientID)
 	}
-	if len(resolved.servers[0].DialOptions) != 1 {
-		t.Fatalf("resolved dial options = %d, want 1", len(resolved.servers[0].DialOptions))
+	if client.responseTimeout != defaultResponseTimeout {
+		t.Fatalf("response timeout = %v, want %v", client.responseTimeout, defaultResponseTimeout)
+	}
+	if len(client.servers[0].DialOptions) != 2 {
+		t.Fatalf("client dial options = %d, want 2", len(client.servers[0].DialOptions))
 	}
 
 	config.Servers[0].DialOptions = nil
-	if len(resolved.servers[0].DialOptions) != 1 {
-		t.Fatal("resolved dial options alias input slice")
+	if len(client.servers[0].DialOptions) != 2 {
+		t.Fatal("client dial options alias input slice")
 	}
 }
 

@@ -17,11 +17,14 @@ var ErrClientClosed = errors.New("RedLease client closed")
 // Client owns one persistent reconnecting stream to each of the five
 // configured lock-servers.
 type Client struct {
+	clientID        uint32
+	servers         [ServerCount]ServerConfig
+	responseTimeout time.Duration
+
 	replicas [ServerCount]*replicaConn
 
-	idGenerator     *leaseIDGenerator
-	responseTimeout time.Duration
-	now             func() time.Time
+	idGenerator *leaseIDGenerator
+	now         func() time.Time
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -34,25 +37,36 @@ type Client struct {
 // wait for a quorum; callers that need an explicit startup barrier can call
 // WaitReady.
 func New(config Config) (*Client, error) {
-	resolved, err := resolveClientConfig(config)
-	if err != nil {
+	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	idGenerator, err := newLeaseIDGenerator(resolved.clientID)
+
+	client := &Client{
+		clientID:        config.ClientID,
+		responseTimeout: config.ResponseTimeout,
+		now:             time.Now,
+	}
+	if client.responseTimeout == 0 {
+		client.responseTimeout = defaultResponseTimeout
+	}
+	for index, server := range config.Servers {
+		client.servers[index] = ServerConfig{
+			Target:      server.Target,
+			DialOptions: append([]grpc.DialOption(nil), server.DialOptions...),
+		}
+	}
+
+	idGenerator, err := newLeaseIDGenerator(client.clientID)
 	if err != nil {
 		return nil, err
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	client := &Client{
-		idGenerator:     idGenerator,
-		responseTimeout: resolved.responseTimeout,
-		now:             time.Now,
-		ctx:             ctx,
-		cancel:          cancel,
-	}
+	client.idGenerator = idGenerator
+	client.ctx = ctx
+	client.cancel = cancel
 
-	for index, server := range resolved.servers {
+	for index, server := range client.servers {
 		connection, openErr := grpc.NewClient(server.Target, server.DialOptions...)
 		if openErr != nil {
 			cancel()
