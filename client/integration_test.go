@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 )
 
 func TestClientAndServersEndToEnd(t *testing.T) {
+	t.Parallel()
 	cluster := newIntegrationCluster(t)
 	defer cluster.close()
 
@@ -29,7 +31,7 @@ func TestClientAndServersEndToEnd(t *testing.T) {
 
 	// Exercise the real restart-quarantine timer instead of exposing a
 	// production switch that could bypass this safety invariant.
-	time.Sleep(redleaseserver.ProtocolMaxTTL + 250*time.Millisecond)
+	waitForServerActivation()
 
 	key := []byte("integration-key")
 	operationContext, cancelOperation := context.WithTimeout(context.Background(), 2*time.Second)
@@ -71,38 +73,182 @@ func TestClientAndServersEndToEnd(t *testing.T) {
 	secondLease.Release()
 }
 
+func TestClientAcquiresWithTwoUnavailableServersEndToEnd(t *testing.T) {
+	t.Parallel()
+	cluster := newIntegrationCluster(t)
+	defer cluster.close()
+
+	client := cluster.newClient(t, 1)
+	defer client.Close()
+	waitReady(t, client)
+	waitForServerActivation()
+
+	cluster.stopReplica(3)
+	cluster.stopReplica(4)
+
+	operationContext, cancelOperation := context.WithTimeout(context.Background(), 2*time.Second)
+	lease, err := client.Acquire(operationContext, []byte("three-of-five"), 5_000)
+	cancelOperation()
+	if err != nil {
+		t.Fatalf("Acquire with two unavailable servers: %v", err)
+	}
+	if !lease.Valid() {
+		t.Fatal("Acquire with two unavailable servers returned an invalid lease")
+	}
+	lease.Release()
+}
+
+func TestClientUsesHeterogeneousServerTTLsEndToEnd(t *testing.T) {
+	t.Parallel()
+	cluster := newIntegrationClusterWithTTLs(t, [redleaseclient.ServerCount]time.Duration{
+		1 * time.Second,
+		2 * time.Second,
+		3 * time.Second,
+		4 * time.Second,
+		5 * time.Second,
+	})
+	defer cluster.close()
+
+	client := cluster.newClient(t, 1)
+	defer client.Close()
+	waitReady(t, client)
+	waitForServerActivation()
+
+	operationContext, cancelOperation := context.WithTimeout(context.Background(), 2*time.Second)
+	lease, err := client.Acquire(operationContext, []byte("heterogeneous-ttl"), 5_000)
+	cancelOperation()
+	if err != nil {
+		t.Fatalf("Acquire with heterogeneous TTLs: %v", err)
+	}
+	remaining := time.Until(lease.ValidUntil())
+	if remaining <= 0 {
+		t.Fatalf("heterogeneous TTL quorum is already invalid: %v", remaining)
+	}
+	// No quorum of three can have a minimum TTL above the third-largest
+	// configured value (3s), less the fixed 100ms safety margin.
+	if remaining > 2_900*time.Millisecond {
+		t.Fatalf("heterogeneous TTL validity = %v, want at most 2.9s", remaining)
+	}
+	lease.Release()
+}
+
+func TestLeaseHealsAfterServerRestartEndToEnd(t *testing.T) {
+	t.Parallel()
+	cluster := newIntegrationCluster(t)
+	defer cluster.close()
+
+	client := cluster.newClient(t, 1)
+	defer client.Close()
+	waitReady(t, client)
+	waitForServerActivation()
+
+	operationContext, cancelOperation := context.WithTimeout(context.Background(), 2*time.Second)
+	lease, err := client.Acquire(operationContext, []byte("restart-healing"), 5_000)
+	cancelOperation()
+	if err != nil {
+		t.Fatalf("Acquire before restart: %v", err)
+	}
+
+	cluster.restartReplica(t, 3)
+	cluster.restartReplica(t, 4)
+
+	// The original three replicas keep the lease alive while the restarted
+	// replicas pass through their real quarantine period.
+	renewTicker := time.NewTicker(time.Second)
+	quarantine := time.NewTimer(redleaseserver.ProtocolMaxTTL + 250*time.Millisecond)
+renewDuringQuarantine:
+	for {
+		select {
+		case <-renewTicker.C:
+			renewLease(t, lease)
+		case <-quarantine.C:
+			break renewDuringQuarantine
+		}
+	}
+	renewTicker.Stop()
+	quarantine.Stop()
+
+	// Leave only one original replica. Renew can succeed again only after
+	// background healing has restored the lease on both restarted servers.
+	cluster.stopReplica(1)
+	cluster.stopReplica(2)
+	renewEventually(t, lease, 4*time.Second)
+	lease.Release()
+}
+
+func TestFullClusterRestartDoesNotRestoreOldLeaseEndToEnd(t *testing.T) {
+	t.Parallel()
+	cluster := newIntegrationCluster(t)
+	defer cluster.close()
+
+	firstClient := cluster.newClient(t, 1)
+	defer firstClient.Close()
+	secondClient := cluster.newClient(t, 2)
+	defer secondClient.Close()
+	waitReady(t, firstClient)
+	waitReady(t, secondClient)
+	waitForServerActivation()
+
+	operationContext, cancelOperation := context.WithTimeout(context.Background(), 2*time.Second)
+	oldLease, err := firstClient.Acquire(operationContext, []byte("full-restart"), 5_000)
+	cancelOperation()
+	if err != nil {
+		t.Fatalf("Acquire before full restart: %v", err)
+	}
+
+	for index := range redleaseclient.ServerCount {
+		cluster.restartReplica(t, index)
+	}
+
+	operationContext, cancelOperation = context.WithTimeout(context.Background(), 2*time.Second)
+	leaseDuringQuarantine, err := secondClient.Acquire(operationContext, []byte("full-restart"), 5_000)
+	cancelOperation()
+	if !errors.Is(err, redleaseclient.ErrNotAcquired) {
+		t.Fatalf("Acquire during full-restart quarantine error = %v, want ErrNotAcquired", err)
+	}
+	if leaseDuringQuarantine != nil {
+		t.Fatal("Acquire during full-restart quarantine returned a lease")
+	}
+
+	waitForServerActivation()
+	if oldLease.Valid() {
+		t.Fatal("old lease remained locally valid after full restart quarantine")
+	}
+
+	newLease := acquireEventually(t, secondClient, []byte("full-restart"), 5_000, 3*time.Second)
+	if oldLease.ID() == newLease.ID() {
+		t.Fatal("lease ID was reused after full cluster restart")
+	}
+	newLease.Release()
+}
+
 type integrationCluster struct {
+	mu          sync.RWMutex
 	listeners   [redleaseclient.ServerCount]*bufconn.Listener
 	grpcServers [redleaseclient.ServerCount]*grpc.Server
 	lockServers [redleaseclient.ServerCount]*redleaseserver.Server
+	ttls        [redleaseclient.ServerCount]time.Duration
 }
 
 func newIntegrationCluster(t *testing.T) *integrationCluster {
 	t.Helper()
+	var ttls [redleaseclient.ServerCount]time.Duration
+	for index := range ttls {
+		ttls[index] = redleaseserver.ProtocolMaxTTL
+	}
+	return newIntegrationClusterWithTTLs(t, ttls)
+}
+
+func newIntegrationClusterWithTTLs(
+	t *testing.T,
+	ttls [redleaseclient.ServerCount]time.Duration,
+) *integrationCluster {
+	t.Helper()
 	cluster := &integrationCluster{}
+	cluster.ttls = ttls
 
 	for index := range redleaseclient.ServerCount {
-		lockServer, err := redleaseserver.New(redleaseserver.Config{
-			ConfiguredMaxTTL:     redleaseserver.ProtocolMaxTTL,
-			ShardCount:           4,
-			ShardQueueDepth:      64,
-			MaxInFlightPerStream: 64,
-		})
-		if err != nil {
-			cluster.close()
-			t.Fatalf("create lock-server %d: %v", index, err)
-		}
-
-		listener := bufconn.Listen(1024 * 1024)
-		grpcServer := grpc.NewServer()
-		lockServer.Register(grpcServer)
-		cluster.listeners[index] = listener
-		cluster.grpcServers[index] = grpcServer
-		cluster.lockServers[index] = lockServer
-
-		go func() {
-			_ = grpcServer.Serve(listener)
-		}()
+		cluster.startReplica(t, index)
 	}
 	return cluster
 }
@@ -113,14 +259,14 @@ func (c *integrationCluster) newClient(t *testing.T, clientID uint32) *redleasec
 		ClientID:        clientID,
 		ResponseTimeout: 500,
 	}
-	for index, listener := range c.listeners {
-		listener := listener
+	for index := range c.listeners {
+		index := index
 		config.Servers[index] = redleaseclient.ServerConfig{
 			Target: fmt.Sprintf("passthrough:///redlease-%d", index),
 			DialOptions: []grpc.DialOption{
 				grpc.WithTransportCredentials(insecure.NewCredentials()),
 				grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-					return listener.DialContext(ctx)
+					return c.dialReplica(ctx, index)
 				}),
 			},
 		}
@@ -134,21 +280,75 @@ func (c *integrationCluster) newClient(t *testing.T, clientID uint32) *redleasec
 }
 
 func (c *integrationCluster) close() {
-	for _, lockServer := range c.lockServers {
-		if lockServer != nil {
-			_ = lockServer.Close()
-		}
+	for index := range redleaseclient.ServerCount {
+		c.stopReplica(index)
 	}
-	for _, grpcServer := range c.grpcServers {
-		if grpcServer != nil {
-			grpcServer.Stop()
-		}
+}
+
+func (c *integrationCluster) startReplica(t *testing.T, index int) {
+	t.Helper()
+	lockServer, err := redleaseserver.New(redleaseserver.Config{
+		ConfiguredMaxTTL:     c.ttls[index],
+		ShardCount:           4,
+		ShardQueueDepth:      64,
+		MaxInFlightPerStream: 64,
+	})
+	if err != nil {
+		c.close()
+		t.Fatalf("create lock-server %d: %v", index, err)
 	}
-	for _, listener := range c.listeners {
-		if listener != nil {
-			_ = listener.Close()
-		}
+
+	listener := bufconn.Listen(1024 * 1024)
+	grpcServer := grpc.NewServer()
+	lockServer.Register(grpcServer)
+
+	c.mu.Lock()
+	c.listeners[index] = listener
+	c.grpcServers[index] = grpcServer
+	c.lockServers[index] = lockServer
+	c.mu.Unlock()
+
+	go func() { _ = grpcServer.Serve(listener) }()
+}
+
+func (c *integrationCluster) stopReplica(index int) {
+	c.mu.Lock()
+	listener := c.listeners[index]
+	grpcServer := c.grpcServers[index]
+	lockServer := c.lockServers[index]
+	c.listeners[index] = nil
+	c.grpcServers[index] = nil
+	c.lockServers[index] = nil
+	c.mu.Unlock()
+
+	if grpcServer != nil {
+		grpcServer.Stop()
 	}
+	if lockServer != nil {
+		_ = lockServer.Close()
+	}
+	if listener != nil {
+		_ = listener.Close()
+	}
+}
+
+func (c *integrationCluster) restartReplica(t *testing.T, index int) {
+	t.Helper()
+	c.stopReplica(index)
+	c.startReplica(t, index)
+}
+
+func (c *integrationCluster) dialReplica(
+	ctx context.Context,
+	index int,
+) (net.Conn, error) {
+	c.mu.RLock()
+	listener := c.listeners[index]
+	c.mu.RUnlock()
+	if listener == nil {
+		return nil, fmt.Errorf("replica %d is unavailable", index)
+	}
+	return listener.DialContext(ctx)
 }
 
 func waitReady(t *testing.T, client *redleaseclient.Client) {
@@ -157,6 +357,40 @@ func waitReady(t *testing.T, client *redleaseclient.Client) {
 	defer cancel()
 	if err := client.WaitReady(ctx); err != nil {
 		t.Fatalf("WaitReady: %v", err)
+	}
+}
+
+func waitForServerActivation() {
+	// The server deliberately exposes no way to bypass this safety invariant.
+	time.Sleep(redleaseserver.ProtocolMaxTTL + 250*time.Millisecond)
+}
+
+func renewLease(t *testing.T, lease *redleaseclient.Lease) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := lease.Renew(ctx, 5_000); err != nil {
+		t.Fatalf("Renew: %v", err)
+	}
+}
+
+func renewEventually(t *testing.T, lease *redleaseclient.Lease, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		err := lease.Renew(ctx, 5_000)
+		cancel()
+		if err == nil {
+			return
+		}
+		if !errors.Is(err, redleaseclient.ErrNotRenewed) {
+			t.Fatalf("Renew after healing: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Renew did not recover after restart healing: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
