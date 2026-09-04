@@ -13,7 +13,6 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
-	"time"
 
 	"github.com/udovenkoav1981/RedLease/server"
 	"google.golang.org/grpc"
@@ -174,26 +173,12 @@ func uint32Flag(flags *flag.FlagSet, target *uint32, name, usage string) {
 }
 
 func (c launcherConfig) serverConfig() (server.Config, error) {
-	protocolMaxTTLMS := uint64(server.ProtocolMaxTTL / time.Millisecond)
-	if c.configuredMaxTTLMS == 0 {
-		return server.Config{}, errors.New("configured max TTL must be positive")
-	}
-	// Compare in the wire type before converting to time.Duration. This keeps
-	// even math.MaxUint64 from overflowing the signed duration representation.
-	if c.configuredMaxTTLMS > protocolMaxTTLMS {
-		return server.Config{}, fmt.Errorf(
-			"configured max TTL %dms exceeds protocol maximum %dms",
-			c.configuredMaxTTLMS,
-			protocolMaxTTLMS,
-		)
-	}
-
 	maxKeys := c.maxKeys
 	if maxKeys == 0 {
 		maxKeys = server.DefaultMaxKeys
 	}
 	result := server.Config{
-		ConfiguredMaxTTL:     time.Duration(c.configuredMaxTTLMS) * time.Millisecond,
+		MaxTTL:               c.configuredMaxTTLMS,
 		MaxKeys:              maxKeys,
 		ShardCount:           c.shardCount,
 		ShardQueueDepth:      c.shardQueueDepth,

@@ -157,7 +157,7 @@ func (s *Server) apply(shard *leaseShard, op operation) *redleasev1.ServerRespon
 }
 
 func (s *Server) acquire(shard *leaseShard, op operation, now time.Time) *redleasev1.ServerResponse {
-	effectiveTTLMS := min(op.requestedTTLMS, s.config.configuredMaxTTLMS)
+	effectiveTTLMS := min(op.requestedTTLMS, s.config.MaxTTL)
 	cleanupAttempted := false
 	for {
 		shard.mu.Lock()
@@ -166,7 +166,7 @@ func (s *Server) acquire(shard *leaseShard, op operation, now time.Time) *redlea
 			response := acquireResponse(
 				op.requestID,
 				redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED,
-				remainingTTLMS(current.deadline, now, s.config.configuredMaxTTLMS),
+				remainingTTLMS(current.deadline, now, s.config.MaxTTL),
 			)
 			shard.mu.Unlock()
 			return response
@@ -220,14 +220,14 @@ func (s *Server) renew(shard *leaseShard, op operation, now time.Time) *redlease
 		return renewResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_STALE, 0)
 	}
 
-	effectiveTTLMS := min(op.requestedTTLMS, s.config.configuredMaxTTLMS)
+	effectiveTTLMS := min(op.requestedTTLMS, s.config.MaxTTL)
 	candidate := now.Add(time.Duration(effectiveTTLMS) * time.Millisecond)
 	if candidate.After(current.deadline) {
 		current.deadline = candidate
 		heap.Fix(&shard.deadlines, current.heapIndex)
 	}
 	return renewResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK,
-		remainingTTLMS(current.deadline, now, s.config.configuredMaxTTLMS))
+		remainingTTLMS(current.deadline, now, s.config.MaxTTL))
 }
 
 func (s *Server) release(shard *leaseShard, op operation, now time.Time) *redleasev1.ServerResponse {
@@ -300,7 +300,7 @@ func statusResponse(op operation, status redleasev1.LeaseStatus) *redleasev1.Ser
 func (s *Server) reserveKey() bool {
 	for {
 		current := s.keys.Load()
-		if current >= s.config.maxKeys {
+		if current >= s.config.MaxKeys {
 			return false
 		}
 		if s.keys.CompareAndSwap(current, current+1) {

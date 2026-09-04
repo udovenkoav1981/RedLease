@@ -35,8 +35,8 @@ func (s *Server) LeaseStream(stream grpc.BidiStreamingServer[redleasev1.ClientRe
 	session := &streamSession{
 		server:    s,
 		ctx:       ctx,
-		responses: make(chan *redleasev1.ServerResponse, s.config.maxInFlight),
-		slots:     make(chan struct{}, s.config.maxInFlight),
+		responses: make(chan *redleasev1.ServerResponse, s.config.MaxInFlightPerStream),
+		slots:     make(chan struct{}, s.config.MaxInFlightPerStream),
 		recvDone:  make(chan error, 1),
 	}
 	go session.receive(stream)
@@ -199,7 +199,7 @@ func (s *Server) decodeRequest(request *redleasev1.ClientRequest) (operation, *r
 		return operation{}, &redleasev1.ServerResponse{
 			RequestId: request.RequestId,
 			Result: &redleasev1.ServerResponse_GetTtl{GetTtl: &redleasev1.GetTTLResponse{
-				ConfiguredMaxTtlMs: s.config.configuredMaxTTLMS,
+				ConfiguredMaxTtlMs: s.config.MaxTTL,
 			}},
 		}, nil
 

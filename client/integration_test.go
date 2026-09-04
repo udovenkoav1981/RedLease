@@ -408,7 +408,7 @@ func (c *integrationCluster) close() {
 func (c *integrationCluster) startReplica(t *testing.T, index int) {
 	t.Helper()
 	lockServer, err := redleaseserver.New(redleaseserver.Config{
-		ConfiguredMaxTTL:     c.ttls[index],
+		MaxTTL:               uint64(c.ttls[index] / time.Millisecond),
 		MaxKeys:              c.maxKeys,
 		ShardCount:           4,
 		ShardQueueDepth:      64,

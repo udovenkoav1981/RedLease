@@ -22,7 +22,7 @@ var testEpoch = time.Date(2026, time.January, 2, 3, 4, 5, 123456789, time.UTC)
 func newTestServer(t *testing.T, maxTTL time.Duration, shardCount uint32) *Server {
 	t.Helper()
 	s, err := New(Config{
-		ConfiguredMaxTTL:     maxTTL,
+		MaxTTL:               uint64(maxTTL / time.Millisecond),
 		ShardCount:           shardCount,
 		ShardQueueDepth:      8,
 		MaxInFlightPerStream: 8,
@@ -52,12 +52,10 @@ func TestConfigValidate(t *testing.T) {
 		config  Config
 		wantErr bool
 	}{
-		{name: "minimum", config: Config{ConfiguredMaxTTL: time.Millisecond}},
-		{name: "protocol maximum", config: Config{ConfiguredMaxTTL: ProtocolMaxTTL}},
+		{name: "minimum", config: Config{MaxTTL: 1}},
+		{name: "protocol maximum", config: Config{MaxTTL: uint64(ProtocolMaxTTL / time.Millisecond)}},
 		{name: "zero TTL", config: Config{}, wantErr: true},
-		{name: "negative TTL", config: Config{ConfiguredMaxTTL: -time.Millisecond}, wantErr: true},
-		{name: "over protocol maximum", config: Config{ConfiguredMaxTTL: ProtocolMaxTTL + time.Millisecond}, wantErr: true},
-		{name: "sub-millisecond", config: Config{ConfiguredMaxTTL: time.Millisecond + time.Nanosecond}, wantErr: true},
+		{name: "over protocol maximum", config: Config{MaxTTL: uint64(ProtocolMaxTTL/time.Millisecond) + 1}, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -71,12 +69,12 @@ func TestConfigValidate(t *testing.T) {
 }
 
 func TestConfigDefaultsMaxKeys(t *testing.T) {
-	config, err := resolveConfig(Config{ConfiguredMaxTTL: time.Second})
+	config, err := resolveConfig(Config{MaxTTL: 1_000})
 	if err != nil {
 		t.Fatalf("resolveConfig: %v", err)
 	}
-	if config.maxKeys != DefaultMaxKeys {
-		t.Fatalf("max keys = %d, want %d", config.maxKeys, DefaultMaxKeys)
+	if config.MaxKeys != DefaultMaxKeys {
+		t.Fatalf("max keys = %d, want %d", config.MaxKeys, DefaultMaxKeys)
 	}
 }
 
@@ -156,9 +154,9 @@ func TestAcquireZeroTTLHasNoPositiveValidity(t *testing.T) {
 
 func TestAcquireEnforcesKeyLimitAndRestoresCapacity(t *testing.T) {
 	s, err := New(Config{
-		ConfiguredMaxTTL: time.Second,
-		MaxKeys:          1,
-		ShardCount:       1,
+		MaxTTL:     1_000,
+		MaxKeys:    1,
+		ShardCount: 1,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -208,9 +206,9 @@ func TestAcquireEnforcesKeyLimitAndRestoresCapacity(t *testing.T) {
 
 func TestCapacityCleanupUsesDeadlineOrderAfterRenew(t *testing.T) {
 	s, err := New(Config{
-		ConfiguredMaxTTL: ProtocolMaxTTL,
-		MaxKeys:          2,
-		ShardCount:       1,
+		MaxTTL:     uint64(ProtocolMaxTTL / time.Millisecond),
+		MaxKeys:    2,
+		ShardCount: 1,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -245,9 +243,9 @@ func TestCapacityCleanupUsesDeadlineOrderAfterRenew(t *testing.T) {
 
 func TestCapacityCleanupReclaimsExpiredLeaseFromAnotherShard(t *testing.T) {
 	s, err := New(Config{
-		ConfiguredMaxTTL: time.Second,
-		MaxKeys:          1,
-		ShardCount:       2,
+		MaxTTL:     1_000,
+		MaxKeys:    1,
+		ShardCount: 2,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

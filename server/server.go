@@ -27,65 +27,48 @@ const (
 	defaultMaxInFlightPerStream = 256
 )
 
-// Config controls one in-memory lock-server instance. Zero values for MaxKeys
-// and the queue-related fields select implementation defaults.
+// Config controls one in-memory lock-server instance. MaxTTL is measured in
+// milliseconds. Zero values for MaxKeys and the queue-related fields select
+// implementation defaults.
 type Config struct {
-	ConfiguredMaxTTL time.Duration
-	MaxKeys          uint64
+	MaxTTL  uint64
+	MaxKeys uint64
 
 	ShardCount           uint32
 	ShardQueueDepth      uint32
 	MaxInFlightPerStream uint32
 }
 
-// Validate checks values explicitly supplied by the caller. A configured TTL
-// must have exact millisecond representation because that is the wire unit.
+// Validate checks values explicitly supplied by the caller.
 func (c Config) Validate() error {
 	switch {
-	case c.ConfiguredMaxTTL <= 0:
-		return errors.New("configured max TTL must be positive")
-	case c.ConfiguredMaxTTL > ProtocolMaxTTL:
-		return fmt.Errorf("configured max TTL must not exceed %s", ProtocolMaxTTL)
-	case c.ConfiguredMaxTTL%time.Millisecond != 0:
-		return errors.New("configured max TTL must be a whole number of milliseconds")
+	case c.MaxTTL == 0:
+		return errors.New("max TTL must be positive")
+	case c.MaxTTL > uint64(ProtocolMaxTTL/time.Millisecond):
+		return fmt.Errorf("max TTL must not exceed %s", ProtocolMaxTTL)
 	default:
 		return nil
 	}
 }
 
-type resolvedConfig struct {
-	configuredMaxTTLMS uint64
-	maxKeys            uint64
-	shardCount         uint32
-	shardQueueDepth    uint32
-	maxInFlight        uint32
-}
-
-func resolveConfig(c Config) (resolvedConfig, error) {
+func resolveConfig(c Config) (Config, error) {
 	if err := c.Validate(); err != nil {
-		return resolvedConfig{}, err
+		return Config{}, err
 	}
 
-	result := resolvedConfig{
-		configuredMaxTTLMS: uint64(c.ConfiguredMaxTTL / time.Millisecond),
-		maxKeys:            c.MaxKeys,
-		shardCount:         c.ShardCount,
-		shardQueueDepth:    c.ShardQueueDepth,
-		maxInFlight:        c.MaxInFlightPerStream,
+	if c.ShardCount == 0 {
+		c.ShardCount = defaultShardCount
 	}
-	if result.shardCount == 0 {
-		result.shardCount = defaultShardCount
+	if c.MaxKeys == 0 {
+		c.MaxKeys = DefaultMaxKeys
 	}
-	if result.maxKeys == 0 {
-		result.maxKeys = DefaultMaxKeys
+	if c.ShardQueueDepth == 0 {
+		c.ShardQueueDepth = defaultShardQueueDepth
 	}
-	if result.shardQueueDepth == 0 {
-		result.shardQueueDepth = defaultShardQueueDepth
+	if c.MaxInFlightPerStream == 0 {
+		c.MaxInFlightPerStream = defaultMaxInFlightPerStream
 	}
-	if result.maxInFlight == 0 {
-		result.maxInFlight = defaultMaxInFlightPerStream
-	}
-	return result, nil
+	return c, nil
 }
 
 type serverPhase uint32
@@ -101,7 +84,7 @@ const (
 type Server struct {
 	redleasev1.UnimplementedRedLeaseServer
 
-	config resolvedConfig
+	config Config
 
 	phase  atomic.Uint32
 	closed atomic.Bool
@@ -133,14 +116,14 @@ func New(c Config) (*Server, error) {
 		config: config,
 		ctx:    ctx,
 		cancel: cancel,
-		shards: make([]*leaseShard, config.shardCount),
+		shards: make([]*leaseShard, config.ShardCount),
 	}
 	s.phase.Store(uint32(phaseQuarantine))
 
 	for i := range s.shards {
 		shard := &leaseShard{
 			leases: make(map[string]*lease),
-			jobs:   make(chan shardJob, config.shardQueueDepth),
+			jobs:   make(chan shardJob, config.ShardQueueDepth),
 		}
 		s.shards[i] = shard
 		s.wg.Add(1)

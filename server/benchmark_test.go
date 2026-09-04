@@ -10,7 +10,7 @@ import (
 )
 
 func BenchmarkServerAcquireReleaseQueue(b *testing.B) {
-	s, err := New(Config{ConfiguredMaxTTL: ProtocolMaxTTL})
+	s, err := New(Config{MaxTTL: uint64(ProtocolMaxTTL / time.Millisecond)})
 	if err != nil {
 		b.Fatalf("New: %v", err)
 	}

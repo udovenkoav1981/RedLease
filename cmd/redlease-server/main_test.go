@@ -6,7 +6,6 @@ import (
 	"math"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/udovenkoav1981/RedLease/server"
 )
@@ -66,15 +65,15 @@ func TestParseFlagsHelpDescribesLocalPlaintextLauncher(t *testing.T) {
 	}
 }
 
-func TestServerConfigConvertsMillisecondsAfterBoundsCheck(t *testing.T) {
+func TestServerConfigValidatesMaxTTL(t *testing.T) {
 	tests := []struct {
 		name    string
 		ttlMS   uint64
-		wantTTL time.Duration
+		wantTTL uint64
 		wantErr bool
 	}{
-		{name: "one millisecond", ttlMS: 1, wantTTL: time.Millisecond},
-		{name: "protocol maximum", ttlMS: 5000, wantTTL: server.ProtocolMaxTTL},
+		{name: "one millisecond", ttlMS: 1, wantTTL: 1},
+		{name: "protocol maximum", ttlMS: 5000, wantTTL: 5000},
 		{name: "zero", ttlMS: 0, wantErr: true},
 		{name: "over protocol maximum", ttlMS: 5001, wantErr: true},
 		{name: "maximum uint64", ttlMS: math.MaxUint64, wantErr: true},
@@ -86,8 +85,8 @@ func TestServerConfigConvertsMillisecondsAfterBoundsCheck(t *testing.T) {
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("serverConfig error = %v, wantErr %t", err, tt.wantErr)
 			}
-			if !tt.wantErr && config.ConfiguredMaxTTL != tt.wantTTL {
-				t.Fatalf("configured max TTL = %s, want %s", config.ConfiguredMaxTTL, tt.wantTTL)
+			if !tt.wantErr && config.MaxTTL != tt.wantTTL {
+				t.Fatalf("max TTL = %d, want %d", config.MaxTTL, tt.wantTTL)
 			}
 			if !tt.wantErr && config.MaxKeys != server.DefaultMaxKeys {
 				t.Fatalf("max keys = %d, want %d", config.MaxKeys, server.DefaultMaxKeys)
