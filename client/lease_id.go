@@ -50,6 +50,6 @@ func (g *leaseIDGenerator) next() leaseID {
 	return leaseID{
 		clientID: g.clientID,
 		bootID:   g.bootID,
-		sequence: g.nextSequence.Add(1) - 1,
+		sequence: g.nextSequence.Add(1),
 	}
 }

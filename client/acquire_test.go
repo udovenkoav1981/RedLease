@@ -32,7 +32,7 @@ func TestClientAcquireThreeOKEstablishesValidity(t *testing.T) {
 	if !acquired.lease.Valid() {
 		t.Fatal("newly acquired lease is not valid")
 	}
-	if id := acquired.lease.ID(); id.ClientID != 19 || id.BootID != 0x01020304 || id.LeaseSeq != 0 {
+	if id := acquired.lease.ID(); id.ClientID != 19 || id.BootID != 0x01020304 || id.LeaseSeq != 1 {
 		t.Fatalf("unexpected lease ID: %+v", id)
 	}
 

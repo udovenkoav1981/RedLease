@@ -14,11 +14,11 @@ func TestLeaseIDGeneratorAndProtobufConversion(t *testing.T) {
 
 	first := generator.next()
 	second := generator.next()
-	if first.clientID != 42 || first.bootID != 0x01020304 || first.sequence != 0 {
+	if first.clientID != 42 || first.bootID != 0x01020304 || first.sequence != 1 {
 		t.Fatalf("unexpected first lease ID: %+v", first)
 	}
-	if second.sequence != 1 {
-		t.Fatalf("second sequence = %d, want 1", second.sequence)
+	if second.sequence != 2 {
+		t.Fatalf("second sequence = %d, want 2", second.sequence)
 	}
 
 	protobuf := first.protobuf()
