@@ -24,6 +24,20 @@ func TestLeaseValidUsesWallClockAndValidityBoundary(t *testing.T) {
 	}
 }
 
+func TestLeaseConfirmationCannotBeShortenedByOlderResponse(t *testing.T) {
+	clock := &fixedWallClock{time: time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)}
+	client := &Client{now: clock.now, ctx: context.Background()}
+	lease := newLease(client, leaseID{}, []byte("key"), 1_000)
+	later := clock.now().Add(2 * time.Second)
+
+	lease.markConfirmed(0, later)
+	lease.markConfirmed(0, clock.now().Add(time.Second))
+
+	if got := lease.confirmedUntil[0]; !got.Equal(later) {
+		t.Fatalf("confirmed until = %v, want %v", got, later)
+	}
+}
+
 func TestLeaseImmutableGettersAndConcurrentState(t *testing.T) {
 	clock := &fixedWallClock{time: time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)}
 	client := &Client{now: clock.now, ctx: context.Background()}

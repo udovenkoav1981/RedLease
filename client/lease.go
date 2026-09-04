@@ -100,7 +100,9 @@ func (l *Lease) setAcquireValidity(validUntil time.Time) {
 
 func (l *Lease) markConfirmed(replica int, confirmedUntil time.Time) {
 	l.stateMu.Lock()
-	if l.lifecycle == leaseActive && l.now().Round(0).Before(confirmedUntil) {
+	if l.lifecycle == leaseActive &&
+		l.now().Round(0).Before(confirmedUntil) &&
+		confirmedUntil.After(l.confirmedUntil[replica]) {
 		l.confirmedUntil[replica] = confirmedUntil.Round(0)
 	}
 	l.stateMu.Unlock()
@@ -133,6 +135,16 @@ func (l *Lease) beginSubmitBatch() bool {
 	l.stateMu.Lock()
 	defer l.stateMu.Unlock()
 	if l.lifecycle != leaseActive {
+		return false
+	}
+	l.submitBatches.Add(1)
+	return true
+}
+
+func (l *Lease) beginHealingBatch() bool {
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
+	if l.lifecycle != leaseActive || !l.now().Round(0).Before(l.validUntil) {
 		return false
 	}
 	l.submitBatches.Add(1)

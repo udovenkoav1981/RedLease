@@ -216,7 +216,6 @@ func (c *Client) collectRemainingAcquireResults(
 	results <-chan acquireReplicaResult,
 	remaining int,
 ) {
-	defer cancelCollection()
 	for range remaining {
 		result := <-results
 		if result.err == nil &&
@@ -231,6 +230,8 @@ func (c *Client) collectRemainingAcquireResults(
 			}
 		}
 	}
+	cancelCollection()
+	lease.backgroundHeal()
 }
 
 func acquireQuorumStillPossible(
