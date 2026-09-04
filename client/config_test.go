@@ -19,22 +19,8 @@ func TestConfigRequiresAllFiveTargets(t *testing.T) {
 	}
 }
 
-func TestConfigRejectsNegativeResponseTimeout(t *testing.T) {
-	config := validClientConfig()
-	config.ResponseTimeout = -time.Millisecond
-
-	if err := config.Validate(); err == nil {
-		t.Fatal("negative response timeout accepted")
-	}
-}
-
 func TestNewAppliesDefaultsAndCopiesOptions(t *testing.T) {
-	config := validClientConfig()
-	for index := range config.Servers {
-		config.Servers[index].DialOptions = []grpc.DialOption{
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-		}
-	}
+	config := connectableClientConfig()
 	config.Servers[0].DialOptions = append(config.Servers[0].DialOptions, grpc.WithNoProxy())
 
 	client, err := New(config)
@@ -59,10 +45,35 @@ func TestNewAppliesDefaultsAndCopiesOptions(t *testing.T) {
 	}
 }
 
+func TestNewConvertsResponseTimeoutFromMilliseconds(t *testing.T) {
+	config := connectableClientConfig()
+	config.ResponseTimeout = 1250
+
+	client, err := New(config)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	if client.responseTimeout != 1250*time.Millisecond {
+		t.Fatalf("response timeout = %v, want 1250ms", client.responseTimeout)
+	}
+}
+
 func validClientConfig() Config {
 	var config Config
 	for index := range config.Servers {
 		config.Servers[index].Target = "test-target"
+	}
+	return config
+}
+
+func connectableClientConfig() Config {
+	config := validClientConfig()
+	for index := range config.Servers {
+		config.Servers[index].DialOptions = []grpc.DialOption{
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		}
 	}
 	return config
 }

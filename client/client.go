@@ -11,6 +11,8 @@ import (
 	"google.golang.org/grpc"
 )
 
+const defaultResponseTimeout = time.Second
+
 // ErrClientClosed is returned when an operation is attempted after Close.
 var ErrClientClosed = errors.New("RedLease client closed")
 
@@ -42,12 +44,13 @@ func New(config Config) (*Client, error) {
 	}
 
 	client := &Client{
-		clientID:        config.ClientID,
-		responseTimeout: config.ResponseTimeout,
-		now:             time.Now,
+		clientID: config.ClientID,
+		now:      time.Now,
 	}
-	if client.responseTimeout == 0 {
+	if config.ResponseTimeout == 0 {
 		client.responseTimeout = defaultResponseTimeout
+	} else {
+		client.responseTimeout = time.Duration(config.ResponseTimeout) * time.Millisecond
 	}
 	for index, server := range config.Servers {
 		client.servers[index] = ServerConfig{

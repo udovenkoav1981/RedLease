@@ -1,9 +1,7 @@
 package client
 
 import (
-	"errors"
 	"fmt"
-	"time"
 
 	"google.golang.org/grpc"
 )
@@ -11,8 +9,6 @@ import (
 const (
 	// ServerCount is fixed by the RedLease 3/5 quorum architecture.
 	ServerCount = 5
-
-	defaultResponseTimeout = time.Second
 )
 
 // ServerConfig identifies one independent lock-server.
@@ -31,17 +27,14 @@ type Config struct {
 	ClientID uint32
 	Servers  [ServerCount]ServerConfig
 
-	// ResponseTimeout bounds each individual server response. Zero selects the
-	// implementation default.
-	ResponseTimeout time.Duration
+	// ResponseTimeout bounds each individual server response in milliseconds.
+	// Zero selects the implementation default.
+	ResponseTimeout uint32
 }
 
 // Validate checks local values needed to construct a usable client. Cluster
 // membership and ID uniqueness remain deployment responsibilities.
 func (c Config) Validate() error {
-	if c.ResponseTimeout < 0 {
-		return errors.New("response timeout must not be negative")
-	}
 	for index, server := range c.Servers {
 		if server.Target == "" {
 			return fmt.Errorf("server %d target is empty", index)
