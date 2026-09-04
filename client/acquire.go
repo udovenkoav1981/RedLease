@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -19,7 +20,7 @@ var (
 	// lease-key limit was reached during an unsuccessful Acquire.
 	ErrKeyLimitReached = errors.New("RedLease server key limit reached")
 
-	// ErrKeyTooLarge means the supplied key exceeds MaxKeyBytes.
+	// ErrKeyTooLarge means the supplied key exceeds protocol.MaxKeyBytes.
 	ErrKeyTooLarge = errors.New("RedLease key is too large")
 )
 
@@ -65,7 +66,7 @@ func (c *Client) Acquire(
 	if c.ctx.Err() != nil {
 		return nil, &notAcquiredError{cause: ErrClientClosed}
 	}
-	if len(key) > MaxKeyBytes {
+	if len(key) > protocol.MaxKeyBytes {
 		return nil, &notAcquiredError{cause: ErrKeyTooLarge}
 	}
 

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	redleaseclient "github.com/udovenkoav1981/RedLease/client"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 	redleaseserver "github.com/udovenkoav1981/RedLease/server"
 	"google.golang.org/grpc"
@@ -315,10 +316,10 @@ func TestServerKeySizeLimitOverGRPC(t *testing.T) {
 		return response.GetAcquire().GetStatus()
 	}
 
-	if status := acquire(1, bytes.Repeat([]byte{'x'}, redleaseclient.MaxKeyBytes+1)); status != redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE {
+	if status := acquire(1, bytes.Repeat([]byte{'x'}, protocol.MaxKeyBytes+1)); status != redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE {
 		t.Fatalf("oversized Acquire = %s, want KEY_TOO_LARGE", status)
 	}
-	if status := acquire(2, bytes.Repeat([]byte{'x'}, redleaseclient.MaxKeyBytes)); status != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+	if status := acquire(2, bytes.Repeat([]byte{'x'}, protocol.MaxKeyBytes)); status != redleasev1.LeaseStatus_LEASE_STATUS_OK {
 		t.Fatalf("boundary-size Acquire = %s, want OK", status)
 	}
 }

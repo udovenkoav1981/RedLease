@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -89,7 +90,7 @@ func TestClientAcquireZeroTTLDoesCleanupOnAllFive(t *testing.T) {
 
 func TestClientAcquireRejectsOversizedKeyBeforeFanout(t *testing.T) {
 	harness := newAcquireHarness(t)
-	key := make([]byte, MaxKeyBytes+1)
+	key := make([]byte, protocol.MaxKeyBytes+1)
 
 	lease, err := harness.client.Acquire(context.Background(), key, 1_000)
 	if lease != nil {
