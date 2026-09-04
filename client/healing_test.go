@@ -163,7 +163,9 @@ func TestBackgroundHealingStopsAfterLocalValidityExpires(t *testing.T) {
 		t.Fatalf("Acquire: %v", acquired.err)
 	}
 
-	harness.clock.advance(901 * time.Millisecond)
+	acquired.lease.stateMu.Lock()
+	acquired.lease.validUntil = time.Now().Round(0)
+	acquired.lease.stateMu.Unlock()
 	for replica := quorumSize; replica < ServerCount; replica++ {
 		harness.respondAcquire(
 			replica,

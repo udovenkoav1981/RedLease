@@ -26,7 +26,6 @@ type Client struct {
 	replicas [ServerCount]*replicaConn
 
 	idGenerator *leaseIDGenerator
-	clock       func() time.Time
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -45,7 +44,6 @@ func New(config Config) (*Client, error) {
 
 	client := &Client{
 		clientID: config.ClientID,
-		clock:    time.Now,
 	}
 	if config.ResponseTimeout == 0 {
 		client.responseTimeout = defaultResponseTimeout

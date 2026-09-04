@@ -1,6 +1,9 @@
 package client
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // backgroundHeal keeps trying to place this lease on every replica while the
 // locally confirmed lease remains valid. It never changes validUntil.
@@ -32,7 +35,7 @@ func (l *Lease) backgroundHeal() {
 }
 
 func (l *Lease) healingTargets() ([]int, bool) {
-	now := l.client.clock().Round(0)
+	now := time.Now().Round(0)
 	l.stateMu.RLock()
 	defer l.stateMu.RUnlock()
 
@@ -97,7 +100,7 @@ func (l *Lease) healReplicas(replicas []int) int {
 			operationStart,
 			Milliseconds(result.response.GetTtlMs()),
 		)
-		if l.client.clock().Round(0).Before(candidate) {
+		if time.Now().Round(0).Before(candidate) {
 			l.markConfirmed(result.replica, candidate)
 			confirmed++
 		}

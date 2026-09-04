@@ -112,7 +112,7 @@ func (c *Client) Acquire(
 					firstFailure = result.err
 				}
 			} else if result.response != nil && isSuccessfulAcquire(result.response.GetStatus()) {
-				now := c.clock().Round(0)
+				now := time.Now().Round(0)
 				successful[result.replica] = true
 				candidates[result.replica] = candidateValidUntil(
 					operationStart,
@@ -146,7 +146,7 @@ func (c *Client) Acquire(
 				candidates,
 				successful,
 				ServerCount-received,
-				c.clock().Round(0),
+				time.Now().Round(0),
 			) {
 				received = ServerCount
 			}
@@ -225,7 +225,7 @@ func (c *Client) collectRemainingAcquireResults(
 				operationStart,
 				Milliseconds(result.response.GetTtlMs()),
 			)
-			if c.clock().Round(0).Before(candidate) {
+			if time.Now().Round(0).Before(candidate) {
 				lease.markConfirmed(result.replica, candidate)
 			}
 		}

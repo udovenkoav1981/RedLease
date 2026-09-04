@@ -120,7 +120,7 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 				result.response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
 				l.clearConfirmed(result.replica)
 			} else {
-				now := l.client.clock().Round(0)
+				now := time.Now().Round(0)
 				successful[result.replica] = true
 				candidates[result.replica] = candidateValidUntil(
 					operationStart,
@@ -158,7 +158,7 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 				candidates,
 				successful,
 				ServerCount-received,
-				l.client.clock().Round(0),
+				time.Now().Round(0),
 			) {
 				collecting = false
 			}
@@ -238,7 +238,7 @@ func (l *Lease) collectRemainingRenewResults(
 			operationStart,
 			Milliseconds(result.response.GetTtlMs()),
 		)
-		if l.client.clock().Round(0).Before(candidate) {
+		if time.Now().Round(0).Before(candidate) {
 			l.markConfirmed(result.replica, candidate)
 		} else {
 			l.clearConfirmed(result.replica)

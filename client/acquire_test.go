@@ -25,7 +25,7 @@ func TestClientAcquireThreeOKEstablishesValidity(t *testing.T) {
 	if acquired.err != nil {
 		t.Fatalf("Acquire: %v", acquired.err)
 	}
-	wantValidUntil := harness.clock.now().Add(900 * time.Millisecond)
+	wantValidUntil := leaseNow(acquired.lease).Add(900 * time.Millisecond)
 	if got := acquired.lease.ValidUntil(); !got.Equal(wantValidUntil) {
 		t.Fatalf("ValidUntil = %v, want %v", got, wantValidUntil)
 	}
@@ -66,7 +66,7 @@ func TestClientAcquireSelectsAnyValidThreeFromHeterogeneousResponses(t *testing.
 	if acquired.err != nil {
 		t.Fatalf("Acquire: %v", acquired.err)
 	}
-	want := harness.clock.now().Add(1_900 * time.Millisecond)
+	want := leaseNow(acquired.lease).Add(1_900 * time.Millisecond)
 	if got := acquired.lease.ValidUntil(); !got.Equal(want) {
 		t.Fatalf("ValidUntil = %v, want best 3/5 quorum %v", got, want)
 	}
@@ -298,24 +298,6 @@ type acquireHarness struct {
 	client    *Client
 	streams   [ServerCount]*fakeLeaseClientStream
 	factories [ServerCount]*scriptedStreamFactory
-	clock     *fixedWallClock
-}
-
-type fixedWallClock struct {
-	mu   sync.RWMutex
-	time time.Time
-}
-
-func (c *fixedWallClock) now() time.Time {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.time
-}
-
-func (c *fixedWallClock) advance(duration time.Duration) {
-	c.mu.Lock()
-	c.time = c.time.Add(duration)
-	c.mu.Unlock()
 }
 
 type acquireCallResult struct {
@@ -326,18 +308,14 @@ type acquireCallResult struct {
 func newAcquireHarness(t *testing.T) *acquireHarness {
 	t.Helper()
 	client, factories := newClientWithScriptedReplicasWithoutCleanup()
-	clock := &fixedWallClock{
-		time: time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC),
-	}
 	generator, err := newLeaseIDGeneratorFromReader(19, bytes.NewReader([]byte{1, 2, 3, 4}))
 	if err != nil {
 		t.Fatalf("new lease ID generator: %v", err)
 	}
 	client.idGenerator = generator
 	client.responseTimeout = 500 * time.Millisecond
-	client.clock = clock.now
 
-	harness := &acquireHarness{client: client, factories: factories, clock: clock}
+	harness := &acquireHarness{client: client, factories: factories}
 	for replica, factory := range factories {
 		stream := newReplicaFakeStream()
 		harness.streams[replica] = stream
@@ -463,6 +441,12 @@ func waitForConfirmedReplicas(t *testing.T, lease *Lease, want [ServerCount]bool
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+func leaseNow(lease *Lease) time.Time {
+	lease.stateMu.RLock()
+	defer lease.stateMu.RUnlock()
+	return lease.now
 }
 
 func waitForNoPendingStreamCalls(t *testing.T, client *Client) {

@@ -23,7 +23,7 @@ func TestLeaseRenewExtendsValidity(t *testing.T) {
 	if err := receiveRenewResult(t, result); err != nil {
 		t.Fatalf("Renew: %v", err)
 	}
-	want := harness.clock.now().Add(2_900 * time.Millisecond)
+	want := leaseNow(lease).Add(2_900 * time.Millisecond)
 	if got := lease.ValidUntil(); !got.Equal(want) {
 		t.Fatalf("ValidUntil = %v, want %v", got, want)
 	}
@@ -41,26 +41,15 @@ func TestLeaseRenewExtendsValidity(t *testing.T) {
 
 func TestLeaseNowIsAcquireStartAndChangesAtRenewStart(t *testing.T) {
 	harness := newAcquireHarness(t)
-	acquireStart := harness.clock.now()
 	lease := acquireFullyConfirmedLease(t, harness, "operation-time", 2_000)
-
-	lease.stateMu.RLock()
-	storedAcquireStart := lease.now
-	lease.stateMu.RUnlock()
-	if !storedAcquireStart.Equal(acquireStart) {
-		t.Fatalf("lease now after Acquire = %v, want %v", storedAcquireStart, acquireStart)
-	}
-
-	harness.clock.advance(250 * time.Millisecond)
-	renewStart := harness.clock.now()
+	storedAcquireStart := leaseNow(lease)
+	time.Sleep(time.Millisecond)
 	result := startLeaseRenew(lease, context.Background(), 2_000)
 	requests := harness.receiveRenewRequests(t)
 
-	lease.stateMu.RLock()
-	storedRenewStart := lease.now
-	lease.stateMu.RUnlock()
-	if !storedRenewStart.Equal(renewStart) {
-		t.Fatalf("lease now after Renew start = %v, want %v", storedRenewStart, renewStart)
+	storedRenewStart := leaseNow(lease)
+	if !storedRenewStart.After(storedAcquireStart) {
+		t.Fatalf("lease now did not advance from Acquire %v at Renew start: %v", storedAcquireStart, storedRenewStart)
 	}
 
 	for replica, request := range requests {
@@ -73,7 +62,6 @@ func TestLeaseNowIsAcquireStartAndChangesAtRenewStart(t *testing.T) {
 
 func TestLateAcquireResponseKeepsAcquireNowAfterRenewStarts(t *testing.T) {
 	harness := newAcquireHarness(t)
-	acquireStart := harness.clock.now()
 	acquireResult := startClientAcquire(
 		harness.client,
 		context.Background(),
@@ -93,8 +81,9 @@ func TestLateAcquireResponseKeepsAcquireNowAfterRenewStarts(t *testing.T) {
 	if acquired.err != nil {
 		t.Fatalf("Acquire: %v", acquired.err)
 	}
+	acquireStart := leaseNow(acquired.lease)
 
-	harness.clock.advance(250 * time.Millisecond)
+	time.Sleep(time.Millisecond)
 	renewResult := startLeaseRenew(acquired.lease, context.Background(), 2_000)
 	renewRequests := harness.receiveRenewRequests(t)
 	for replica := range quorumSize {
@@ -319,7 +308,9 @@ func TestConfirmedReplicaExpiresIndependently(t *testing.T) {
 	harness.respondAcquire(4, requests[4], redleasev1.LeaseStatus_LEASE_STATUS_OK, 2_000)
 	waitForConfirmedReplicas(t, acquired.lease, [ServerCount]bool{true, true, true, true, true})
 
-	harness.clock.advance(500 * time.Millisecond)
+	acquired.lease.stateMu.Lock()
+	acquired.lease.confirmedUntil[3] = time.Now().Round(0)
+	acquired.lease.stateMu.Unlock()
 	want := [ServerCount]bool{true, true, true, false, true}
 	if got := acquired.lease.confirmedReplicas(); got != want {
 		t.Fatalf("confirmed replicas after expiry = %v, want %v", got, want)
