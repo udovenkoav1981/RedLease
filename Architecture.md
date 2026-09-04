@@ -273,6 +273,13 @@ operationStart := time.Now().Round(0)
 elapsed := time.Now().Round(0).Sub(operationStart)
 ```
 
+В состоянии client-side `Lease` этот `operationStart` хранится в единственном
+поле `now`. Оно устанавливается перед начальным fan-out Acquire и заменяется
+один раз в начале каждого нового Renew. Background healing использует текущее
+значение `Lease.now`, но само его не изменяет. Каждый запущенный fan-out
+захватывает snapshot своего значения: поздний ответ предыдущего Acquire или
+Renew не должен быть пересчитан относительно более нового `now`.
+
 Вызов `Round(0)` удаляет monotonic-компоненту из `time.Time`. Server deadlines,
 клиентские `operationStart`, `candidateValidUntil` и `validUntil` используют
 локальное wall-clock время. Благодаря этому время, проведённое OS или VM в

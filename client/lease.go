@@ -29,7 +29,7 @@ type Lease struct {
 	id           leaseID
 	key          []byte
 	requestedTTL Milliseconds
-	now          func() time.Time
+	now          time.Time
 	ctx          context.Context
 	cancel       context.CancelFunc
 
@@ -52,7 +52,7 @@ func newLease(client *Client, id leaseID, key []byte, requestedTTL Milliseconds)
 		id:           id,
 		key:          bytes.Clone(key),
 		requestedTTL: requestedTTL,
-		now:          client.now,
+		now:          client.clock().Round(0),
 		ctx:          ctx,
 		cancel:       cancel,
 		lifecycle:    leaseActive,
@@ -87,7 +87,7 @@ func (l *Lease) Valid() bool {
 	validUntil := l.validUntil
 	active := l.lifecycle == leaseActive
 	l.stateMu.RUnlock()
-	return active && l.now().Round(0).Before(validUntil)
+	return active && l.client.clock().Round(0).Before(validUntil)
 }
 
 func (l *Lease) setAcquireValidity(validUntil time.Time) {
@@ -101,7 +101,7 @@ func (l *Lease) setAcquireValidity(validUntil time.Time) {
 func (l *Lease) markConfirmed(replica int, confirmedUntil time.Time) {
 	l.stateMu.Lock()
 	if l.lifecycle == leaseActive &&
-		l.now().Round(0).Before(confirmedUntil) &&
+		l.client.clock().Round(0).Before(confirmedUntil) &&
 		confirmedUntil.After(l.confirmedUntil[replica]) {
 		l.confirmedUntil[replica] = confirmedUntil.Round(0)
 	}
@@ -109,7 +109,7 @@ func (l *Lease) markConfirmed(replica int, confirmedUntil time.Time) {
 }
 
 func (l *Lease) confirmedReplicas() [ServerCount]bool {
-	now := l.now().Round(0)
+	now := l.client.clock().Round(0)
 	l.stateMu.RLock()
 	defer l.stateMu.RUnlock()
 
@@ -131,24 +131,25 @@ func (l *Lease) clearConfirmed(replica int) {
 	l.stateMu.Unlock()
 }
 
-func (l *Lease) beginSubmitBatch() bool {
+func (l *Lease) beginRenewBatch() (time.Time, bool) {
 	l.stateMu.Lock()
 	defer l.stateMu.Unlock()
 	if l.lifecycle != leaseActive {
-		return false
+		return time.Time{}, false
 	}
+	l.now = l.client.clock().Round(0)
 	l.submitBatches.Add(1)
-	return true
+	return l.now, true
 }
 
-func (l *Lease) beginHealingBatch() bool {
+func (l *Lease) beginHealingBatch() (time.Time, bool) {
 	l.stateMu.Lock()
 	defer l.stateMu.Unlock()
-	if l.lifecycle != leaseActive || !l.now().Round(0).Before(l.validUntil) {
-		return false
+	if l.lifecycle != leaseActive || !l.client.clock().Round(0).Before(l.validUntil) {
+		return time.Time{}, false
 	}
 	l.submitBatches.Add(1)
-	return true
+	return l.now, true
 }
 
 func (l *Lease) endSubmitBatch() {

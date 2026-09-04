@@ -39,6 +39,93 @@ func TestLeaseRenewExtendsValidity(t *testing.T) {
 	}
 }
 
+func TestLeaseNowIsAcquireStartAndChangesAtRenewStart(t *testing.T) {
+	harness := newAcquireHarness(t)
+	acquireStart := harness.clock.now()
+	lease := acquireFullyConfirmedLease(t, harness, "operation-time", 2_000)
+
+	lease.stateMu.RLock()
+	storedAcquireStart := lease.now
+	lease.stateMu.RUnlock()
+	if !storedAcquireStart.Equal(acquireStart) {
+		t.Fatalf("lease now after Acquire = %v, want %v", storedAcquireStart, acquireStart)
+	}
+
+	harness.clock.advance(250 * time.Millisecond)
+	renewStart := harness.clock.now()
+	result := startLeaseRenew(lease, context.Background(), 2_000)
+	requests := harness.receiveRenewRequests(t)
+
+	lease.stateMu.RLock()
+	storedRenewStart := lease.now
+	lease.stateMu.RUnlock()
+	if !storedRenewStart.Equal(renewStart) {
+		t.Fatalf("lease now after Renew start = %v, want %v", storedRenewStart, renewStart)
+	}
+
+	for replica, request := range requests {
+		harness.respondRenew(replica, request, redleasev1.LeaseStatus_LEASE_STATUS_OK, 2_000)
+	}
+	if err := receiveRenewResult(t, result); err != nil {
+		t.Fatalf("Renew: %v", err)
+	}
+}
+
+func TestLateAcquireResponseKeepsAcquireNowAfterRenewStarts(t *testing.T) {
+	harness := newAcquireHarness(t)
+	acquireStart := harness.clock.now()
+	acquireResult := startClientAcquire(
+		harness.client,
+		context.Background(),
+		[]byte("late-operation-time"),
+		2_000,
+	)
+	acquireRequests := harness.receiveAcquireRequests(t)
+	for replica := range quorumSize {
+		harness.respondAcquire(
+			replica,
+			acquireRequests[replica],
+			redleasev1.LeaseStatus_LEASE_STATUS_OK,
+			2_000,
+		)
+	}
+	acquired := receiveAcquireCallResult(t, acquireResult)
+	if acquired.err != nil {
+		t.Fatalf("Acquire: %v", acquired.err)
+	}
+
+	harness.clock.advance(250 * time.Millisecond)
+	renewResult := startLeaseRenew(acquired.lease, context.Background(), 2_000)
+	renewRequests := harness.receiveRenewRequests(t)
+	for replica := range quorumSize {
+		harness.respondRenew(
+			replica,
+			renewRequests[replica],
+			redleasev1.LeaseStatus_LEASE_STATUS_OK,
+			2_000,
+		)
+	}
+	if err := receiveRenewResult(t, renewResult); err != nil {
+		t.Fatalf("Renew: %v", err)
+	}
+
+	harness.respondAcquire(
+		3,
+		acquireRequests[3],
+		redleasev1.LeaseStatus_LEASE_STATUS_OK,
+		1_000,
+	)
+	harness.respondAcquire(
+		4,
+		acquireRequests[4],
+		redleasev1.LeaseStatus_LEASE_STATUS_BUSY,
+		0,
+	)
+
+	want := acquireStart.Add(900 * time.Millisecond)
+	waitForReplicaConfirmedUntil(t, acquired.lease, 3, want)
+}
+
 func TestLeaseFailedRenewKeepsPreviousValidity(t *testing.T) {
 	harness := newAcquireHarness(t)
 	lease := acquireFullyConfirmedLease(t, harness, "failed-renew", 2_000)
@@ -338,5 +425,22 @@ func waitForLeaseReleased(t *testing.T, lease *Lease) {
 	case <-lease.releaseDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for asynchronous Release")
+	}
+}
+
+func waitForReplicaConfirmedUntil(t *testing.T, lease *Lease, replica int, want time.Time) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		lease.stateMu.RLock()
+		confirmedUntil := lease.confirmedUntil[replica]
+		lease.stateMu.RUnlock()
+		if confirmedUntil.Equal(want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("replica %d confirmed until = %v, want %v", replica, confirmedUntil, want)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

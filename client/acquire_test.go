@@ -335,7 +335,7 @@ func newAcquireHarness(t *testing.T) *acquireHarness {
 	}
 	client.idGenerator = generator
 	client.responseTimeout = 500 * time.Millisecond
-	client.now = clock.now
+	client.clock = clock.now
 
 	harness := &acquireHarness{client: client, factories: factories, clock: clock}
 	for replica, factory := range factories {

@@ -32,7 +32,7 @@ func (l *Lease) backgroundHeal() {
 }
 
 func (l *Lease) healingTargets() ([]int, bool) {
-	now := l.now().Round(0)
+	now := l.client.clock().Round(0)
 	l.stateMu.RLock()
 	defer l.stateMu.RUnlock()
 
@@ -50,7 +50,8 @@ func (l *Lease) healingTargets() ([]int, bool) {
 }
 
 func (l *Lease) healReplicas(replicas []int) int {
-	if !l.beginHealingBatch() {
+	operationStart, started := l.beginHealingBatch()
+	if !started {
 		return 0
 	}
 	batchActive := true
@@ -60,7 +61,6 @@ func (l *Lease) healReplicas(replicas []int) int {
 		}
 	}()
 
-	operationStart := l.now().Round(0)
 	submitContext, cancelSubmissions := context.WithTimeout(l.ctx, l.client.responseTimeout)
 	results := make(chan acquireReplicaResult, len(replicas))
 	submissions := make(chan acquireSubmission, len(replicas))
@@ -97,7 +97,7 @@ func (l *Lease) healReplicas(replicas []int) int {
 			operationStart,
 			Milliseconds(result.response.GetTtlMs()),
 		)
-		if l.now().Round(0).Before(candidate) {
+		if l.client.clock().Round(0).Before(candidate) {
 			l.markConfirmed(result.replica, candidate)
 			confirmed++
 		}

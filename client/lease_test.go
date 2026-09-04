@@ -9,7 +9,7 @@ import (
 
 func TestLeaseValidUsesWallClockAndValidityBoundary(t *testing.T) {
 	clock := &fixedWallClock{time: time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)}
-	client := &Client{now: clock.now, ctx: context.Background()}
+	client := &Client{clock: clock.now, ctx: context.Background()}
 	lease := newLease(client, leaseID{}, []byte("key"), 1_000)
 	lease.setAcquireValidity(clock.now().Add(time.Second))
 
@@ -26,7 +26,7 @@ func TestLeaseValidUsesWallClockAndValidityBoundary(t *testing.T) {
 
 func TestLeaseConfirmationCannotBeShortenedByOlderResponse(t *testing.T) {
 	clock := &fixedWallClock{time: time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)}
-	client := &Client{now: clock.now, ctx: context.Background()}
+	client := &Client{clock: clock.now, ctx: context.Background()}
 	lease := newLease(client, leaseID{}, []byte("key"), 1_000)
 	later := clock.now().Add(2 * time.Second)
 
@@ -40,7 +40,7 @@ func TestLeaseConfirmationCannotBeShortenedByOlderResponse(t *testing.T) {
 
 func TestLeaseImmutableGettersAndConcurrentState(t *testing.T) {
 	clock := &fixedWallClock{time: time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)}
-	client := &Client{now: clock.now, ctx: context.Background()}
+	client := &Client{clock: clock.now, ctx: context.Background()}
 	key := []byte("key")
 	lease := newLease(client, leaseID{clientID: 1, bootID: 2, sequence: 3}, key, 1_000)
 	lease.setAcquireValidity(clock.now().Add(time.Second))
