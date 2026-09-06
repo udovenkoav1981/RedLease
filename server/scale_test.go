@@ -12,7 +12,7 @@ import (
 func TestServerHandlesTenThousandActiveLeases(t *testing.T) {
 	const leaseCount = 10_000
 
-	s := newTestServer(t, ProtocolMaxTTL, defaultShardCount)
+	s := newTestServer(t, uint64(ProtocolMaxTTL/time.Millisecond), defaultShardCount)
 	activateServer(t, s)
 	responses := make(chan *redleasev1.ServerResponse, leaseCount)
 

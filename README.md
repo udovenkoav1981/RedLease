@@ -7,4 +7,7 @@ RedLease предоставляет распределённые краткож�
 
 Все данные хранятся только в RAM.
 
+Client и server поддерживаются только на Linux; для отсчёта lease используется
+монотонный suspend-aware clock `CLOCK_BOOTTIME`.
+
 Не используется Raft/Paxos. Quorum собирается на клиенте.

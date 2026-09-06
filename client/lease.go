@@ -4,7 +4,8 @@ import (
 	"bytes"
 	"context"
 	"sync"
-	"time"
+
+	"github.com/udovenkoav1981/RedLease/internal/boottime"
 )
 
 // LeaseID identifies one lease attempt created by a RedLease client process.
@@ -29,14 +30,14 @@ type Lease struct {
 	id           leaseID
 	key          []byte
 	requestedTTL Milliseconds
-	now          time.Time
+	now          uint64
 	ctx          context.Context
 	cancel       context.CancelFunc
 
 	stateMu        sync.RWMutex
 	lifecycle      leaseLifecycle
-	validUntil     time.Time
-	confirmedUntil [ServerCount]time.Time
+	validUntil     uint64
+	confirmedUntil [ServerCount]uint64
 	submitBatches  sync.WaitGroup
 
 	renewMu sync.Mutex
@@ -52,7 +53,7 @@ func newLease(client *Client, id leaseID, key []byte, requestedTTL Milliseconds)
 		id:           id,
 		key:          bytes.Clone(key),
 		requestedTTL: requestedTTL,
-		now:          time.Now().Round(0),
+		now:          boottime.Now(),
 		ctx:          ctx,
 		cancel:       cancel,
 		lifecycle:    leaseActive,
@@ -74,51 +75,53 @@ func (l *Lease) Key() []byte {
 	return bytes.Clone(l.key)
 }
 
-// ValidUntil returns the current local wall-clock validity bound.
-func (l *Lease) ValidUntil() time.Time {
+// RemainingTTL returns the remaining local validity in milliseconds.
+func (l *Lease) RemainingTTL() Milliseconds {
 	l.stateMu.RLock()
-	defer l.stateMu.RUnlock()
-	return l.validUntil
+	now := boottime.Now()
+	validUntil := l.validUntil
+	active := l.lifecycle == leaseActive
+	l.stateMu.RUnlock()
+	if !active {
+		return 0
+	}
+	return Milliseconds(boottime.Remaining(validUntil, now))
 }
 
 // Valid reports whether a new protected operation may start now.
 func (l *Lease) Valid() bool {
-	l.stateMu.RLock()
-	validUntil := l.validUntil
-	active := l.lifecycle == leaseActive
-	l.stateMu.RUnlock()
-	return active && time.Now().Round(0).Before(validUntil)
+	return l.RemainingTTL() != 0
 }
 
-func (l *Lease) setAcquireValidity(validUntil time.Time) {
+func (l *Lease) setAcquireValidity(validUntil uint64) {
 	l.stateMu.Lock()
 	if l.lifecycle == leaseActive {
-		l.validUntil = validUntil.Round(0)
+		l.validUntil = validUntil
 	}
 	l.stateMu.Unlock()
 }
 
-func (l *Lease) markConfirmed(replica int, confirmedUntil time.Time) {
+func (l *Lease) markConfirmed(replica int, confirmedUntil uint64) {
 	l.stateMu.Lock()
 	if l.lifecycle == leaseActive &&
-		time.Now().Round(0).Before(confirmedUntil) &&
-		confirmedUntil.After(l.confirmedUntil[replica]) {
-		l.confirmedUntil[replica] = confirmedUntil.Round(0)
+		boottime.Now() < confirmedUntil &&
+		confirmedUntil > l.confirmedUntil[replica] {
+		l.confirmedUntil[replica] = confirmedUntil
 	}
 	l.stateMu.Unlock()
 }
 
 func (l *Lease) confirmedReplicas() [ServerCount]bool {
-	now := time.Now().Round(0)
 	l.stateMu.RLock()
 	defer l.stateMu.RUnlock()
+	now := boottime.Now()
 
 	var confirmed [ServerCount]bool
 	if l.lifecycle != leaseActive {
 		return confirmed
 	}
 	for replica, validUntil := range l.confirmedUntil {
-		confirmed[replica] = now.Before(validUntil)
+		confirmed[replica] = now < validUntil
 	}
 	return confirmed
 }
@@ -126,27 +129,27 @@ func (l *Lease) confirmedReplicas() [ServerCount]bool {
 func (l *Lease) clearConfirmed(replica int) {
 	l.stateMu.Lock()
 	if l.lifecycle == leaseActive {
-		l.confirmedUntil[replica] = time.Time{}
+		l.confirmedUntil[replica] = 0
 	}
 	l.stateMu.Unlock()
 }
 
-func (l *Lease) beginRenewBatch() (time.Time, bool) {
+func (l *Lease) beginRenewBatch() (uint64, bool) {
 	l.stateMu.Lock()
 	defer l.stateMu.Unlock()
 	if l.lifecycle != leaseActive {
-		return time.Time{}, false
+		return 0, false
 	}
-	l.now = time.Now().Round(0)
+	l.now = boottime.Now()
 	l.submitBatches.Add(1)
 	return l.now, true
 }
 
-func (l *Lease) beginHealingBatch() (time.Time, bool) {
+func (l *Lease) beginHealingBatch() (uint64, bool) {
 	l.stateMu.Lock()
 	defer l.stateMu.Unlock()
-	if l.lifecycle != leaseActive || !time.Now().Round(0).Before(l.validUntil) {
-		return time.Time{}, false
+	if l.lifecycle != leaseActive || boottime.Now() >= l.validUntil {
+		return 0, false
 	}
 	l.submitBatches.Add(1)
 	return l.now, true
@@ -156,14 +159,14 @@ func (l *Lease) endSubmitBatch() {
 	l.submitBatches.Done()
 }
 
-func (l *Lease) applyRenewValidity(validUntil time.Time) bool {
+func (l *Lease) applyRenewValidity(validUntil uint64) bool {
 	l.stateMu.Lock()
 	defer l.stateMu.Unlock()
 	if l.lifecycle != leaseActive {
 		return false
 	}
-	if validUntil.After(l.validUntil) {
-		l.validUntil = validUntil.Round(0)
+	if validUntil > l.validUntil {
+		l.validUntil = validUntil
 	}
 	return true
 }
@@ -171,8 +174,8 @@ func (l *Lease) applyRenewValidity(validUntil time.Time) bool {
 func (l *Lease) startRelease() {
 	l.stateMu.Lock()
 	l.lifecycle = leaseReleasing
-	l.validUntil = time.Time{}
-	l.confirmedUntil = [ServerCount]time.Time{}
+	l.validUntil = 0
+	l.confirmedUntil = [ServerCount]uint64{}
 	l.stateMu.Unlock()
 	l.cancel()
 }

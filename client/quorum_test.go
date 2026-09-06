@@ -3,57 +3,55 @@ package client
 import (
 	"math"
 	"testing"
-	"time"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
 func TestAcquireQuorumZeroTTLIsExpired(t *testing.T) {
-	start := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
+	const start uint64 = 1_000_000
 	responses := acquireResponses(0, 0, 0)
 
 	validUntil, valid := acquireQuorumValidity(start, start, responses)
 	if valid {
 		t.Fatal("zero-TTL quorum is valid")
 	}
-	want := start.Add(-safetyMargin)
-	if !validUntil.Equal(want) {
-		t.Fatalf("validUntil = %v, want %v", validUntil, want)
+	if validUntil != start {
+		t.Fatalf("validUntil = %d, want %d", validUntil, start)
 	}
 }
 
 func TestAcquireQuorumUsesMinimumHeterogeneousTTL(t *testing.T) {
-	start := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
+	const start uint64 = 1_000_000
 	responses := acquireResponses(2_000, 1_500, 3_000)
 
-	validUntil, valid := acquireQuorumValidity(start, start.Add(200*time.Millisecond), responses)
+	validUntil, valid := acquireQuorumValidity(start, start+200, responses)
 	if !valid {
 		t.Fatal("quorum unexpectedly expired")
 	}
-	want := start.Add(1_400 * time.Millisecond)
-	if !validUntil.Equal(want) {
-		t.Fatalf("validUntil = %v, want %v", validUntil, want)
+	want := start + 1_400
+	if validUntil != want {
+		t.Fatalf("validUntil = %d, want %d", validUntil, want)
 	}
 }
 
 func TestAcquireQuorumAccountsForElapsedOperationTime(t *testing.T) {
-	start := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
+	const start uint64 = 1_000_000
 	responses := acquireResponses(1_500, 1_500, 1_500)
-	now := start.Add(900 * time.Millisecond)
+	now := start + 900
 
 	validUntil, valid := acquireQuorumValidity(start, now, responses)
 	if !valid {
 		t.Fatal("quorum unexpectedly expired")
 	}
-	if remaining := validUntil.Sub(now); remaining != 500*time.Millisecond {
-		t.Fatalf("remaining validity = %v, want 500ms", remaining)
+	if remaining := validUntil - now; remaining != 500 {
+		t.Fatalf("remaining validity = %dms, want 500ms", remaining)
 	}
 }
 
 func TestAcquireQuorumRejectsExpiredValidity(t *testing.T) {
-	start := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
+	const start uint64 = 1_000_000
 	responses := acquireResponses(1_500, 1_500, 1_500)
-	now := start.Add(1_400 * time.Millisecond)
+	now := start + 1_400
 
 	_, valid := acquireQuorumValidity(start, now, responses)
 	if valid {
@@ -62,7 +60,7 @@ func TestAcquireQuorumRejectsExpiredValidity(t *testing.T) {
 }
 
 func TestAcquireQuorumAcceptsAlreadyOwned(t *testing.T) {
-	start := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
+	const start uint64 = 1_000_000
 	responses := acquireResponses(1_000, 1_000, 1_000)
 	responses[1].Status = redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED
 
@@ -73,44 +71,44 @@ func TestAcquireQuorumAcceptsAlreadyOwned(t *testing.T) {
 }
 
 func TestRenewKeepsLaterPreviousValidUntil(t *testing.T) {
-	start := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
-	previous := start.Add(3 * time.Second)
+	const start uint64 = 1_000_000
+	previous := start + 3_000
 	responses := renewResponses(2_000, 2_500, 3_000)
 
 	validUntil, quorumValid := renewQuorumValidity(
 		start,
-		start.Add(500*time.Millisecond),
+		start+500,
 		previous,
 		responses,
 	)
 	if !quorumValid {
 		t.Fatal("Renew quorum unexpectedly expired")
 	}
-	if !validUntil.Equal(previous) {
-		t.Fatalf("validUntil = %v, want previous %v", validUntil, previous)
+	if validUntil != previous {
+		t.Fatalf("validUntil = %d, want previous %d", validUntil, previous)
 	}
 }
 
 func TestRenewUsesLaterQuorumValidUntil(t *testing.T) {
-	start := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
-	previous := start.Add(time.Second)
+	const start uint64 = 1_000_000
+	previous := start + 1_000
 	responses := renewResponses(2_000, 2_500, 3_000)
 
 	validUntil, quorumValid := renewQuorumValidity(start, start, previous, responses)
 	if !quorumValid {
 		t.Fatal("Renew quorum unexpectedly expired")
 	}
-	want := start.Add(1_900 * time.Millisecond)
-	if !validUntil.Equal(want) {
-		t.Fatalf("validUntil = %v, want %v", validUntil, want)
+	want := start + 1_900
+	if validUntil != want {
+		t.Fatalf("validUntil = %d, want %d", validUntil, want)
 	}
 }
 
 func TestCandidateTTLOutOfDurationRangeDoesNotWrap(t *testing.T) {
-	start := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
+	const start uint64 = 1_000_000
 	candidate := candidateValidUntil(start, Milliseconds(math.MaxUint64))
-	if !candidate.After(start) {
-		t.Fatalf("overflowed candidate %v is not after start %v", candidate, start)
+	if candidate <= start {
+		t.Fatalf("overflowed candidate %d is not after start %d", candidate, start)
 	}
 }
 

@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"time"
 
+	"github.com/udovenkoav1981/RedLease/internal/boottime"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -100,7 +100,7 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 	}
 
 	var (
-		candidates   [ServerCount]time.Time
+		candidates   [ServerCount]uint64
 		successful   [ServerCount]bool
 		firstFailure error
 		received     int
@@ -120,20 +120,20 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 				result.response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
 				l.clearConfirmed(result.replica)
 			} else {
-				now := time.Now().Round(0)
+				now := boottime.Now()
 				successful[result.replica] = true
 				candidates[result.replica] = candidateValidUntil(
 					operationStart,
 					Milliseconds(result.response.GetTtlMs()),
 				)
-				if now.Before(candidates[result.replica]) {
+				if now < candidates[result.replica] {
 					l.markConfirmed(result.replica, candidates[result.replica])
 				} else {
 					l.clearConfirmed(result.replica)
 				}
 
 				quorumValidUntil, hasQuorum := bestAcquireQuorum(candidates, successful)
-				if hasQuorum && now.Before(quorumValidUntil) {
+				if hasQuorum && now < quorumValidUntil {
 					if err := l.renewCancellationError(ctx); err != nil {
 						firstFailure = err
 						collecting = false
@@ -158,7 +158,7 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 				candidates,
 				successful,
 				ServerCount-received,
-				time.Now().Round(0),
+				boottime.Now(),
 			) {
 				collecting = false
 			}
@@ -220,7 +220,7 @@ func (l *Lease) submitRenew(
 
 func (l *Lease) collectRemainingRenewResults(
 	cancelCollection context.CancelFunc,
-	operationStart time.Time,
+	operationStart uint64,
 	results <-chan renewReplicaResult,
 	remaining int,
 ) {
@@ -238,7 +238,7 @@ func (l *Lease) collectRemainingRenewResults(
 			operationStart,
 			Milliseconds(result.response.GetTtlMs()),
 		)
-		if time.Now().Round(0).Before(candidate) {
+		if boottime.Now() < candidate {
 			l.markConfirmed(result.replica, candidate)
 		} else {
 			l.clearConfirmed(result.replica)

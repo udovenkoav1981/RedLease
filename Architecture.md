@@ -24,7 +24,7 @@ Protocol maximum TTL       5 s
 Per-server configuredMaxTTL <= Protocol maximum TTL
 Typical Renew interval     1 s
 Safety margin              100 ms (fixed)
-Lease time source          local wall clock (`time.Now().Round(0)`)
+Lease time source          Linux `CLOCK_BOOTTIME`
 Wire TTL representation    uint64 milliseconds
 Leader                     none
 Server-to-server hot path  none
@@ -290,13 +290,16 @@ Quarantine рассчитывается по неизменному `protocolMax
 `configuredMaxTTL`, поэтому безопасны как увеличение, так и уменьшение лимита.
 
 Absolute timestamp и deadline между машинами не сериализуются.
+Client и server поддерживаются только на Linux. Все связанные с validity
+локальные моменты времени представлены как `uint64` миллисекунд
+`CLOCK_BOOTTIME`.
 
 Каждый server устанавливает локальный deadline:
 
 ```go
 effectiveTTL := min(requestedTTL, configuredMaxTTL)
-now := time.Now().Round(0)
-deadline := now.Add(effectiveTTL)
+now := boottime.Now()
+deadline := now + effectiveTTL
 ```
 
 Успешные ответы Acquire и Renew содержат `ttl` — оставшуюся локальную validity
@@ -306,8 +309,8 @@ deadline := now.Add(effectiveTTL)
 Клиент измеряет продолжительность Acquire и Renew локально:
 
 ```go
-operationStart := time.Now().Round(0)
-elapsed := time.Now().Round(0).Sub(operationStart)
+operationStart := boottime.Now()
+elapsed := boottime.Now() - operationStart
 ```
 
 В состоянии client-side `Lease` этот `operationStart` хранится в единственном
@@ -317,12 +320,10 @@ elapsed := time.Now().Round(0).Sub(operationStart)
 захватывает snapshot своего значения: поздний ответ предыдущего Acquire или
 Renew не должен быть пересчитан относительно более нового `now`.
 
-Вызов `Round(0)` удаляет monotonic-компоненту из `time.Time`. Server deadlines,
-клиентские `operationStart`, `candidateValidUntil` и `validUntil` используют
-локальное wall-clock время. Благодаря этому время, проведённое OS или VM в
-suspend, учитывается после resume: server считает lease, чей deadline прошёл за
-время паузы, истёкшим, а клиент не начинает новую защищённую операцию по уже
-истёкшему `validUntil`.
+`CLOCK_BOOTTIME` является монотонным, не зависит от перевода wall clock и
+учитывает время Linux system suspend. После resume server считает lease, чей
+deadline прошёл за время паузы, истёкшим, а клиент не начинает новую защищённую
+операцию по уже истёкшему `validUntil`.
 
 Значения локального времени никогда не сравниваются между машинами и absolute
 timestamp по протоколу не передаётся. 
@@ -354,8 +355,13 @@ validUntil = max(previousValidUntil, quorumValidUntil)
 `validUntil` вперёд. Ответы, пришедшие после выбора quorum и возврата результата,
 могут обновить сведения о репликах, но сами по себе не меняют `validUntil`.
 
-`time.Now().Round(0)` не может остановить уже начатую бизнес-операцию при
-suspend клиентской VM. После resume такая операция может продолжиться уже после
+Публичный `Lease.RemainingTTL()` возвращает оставшуюся локальную validity в
+миллисекундах, а `Lease.Valid()` эквивалентен проверке положительного остатка.
+Абсолютный `validUntil` наружу не выдаётся, поскольку значение
+`CLOCK_BOOTTIME` имеет смысл только на локальной Linux-системе.
+
+`CLOCK_BOOTTIME` не может остановить уже начатую бизнес-операцию при suspend
+клиентской VM. После resume такая операция может продолжиться уже после
 истечения lease; это входит в явно принятое ограничение отсутствия global
 fencing token. Клиент проверяет `validUntil` перед запуском новых защищённых
 операций.

@@ -5,8 +5,8 @@ import (
 	"context"
 	"errors"
 	"sort"
-	"time"
 
+	"github.com/udovenkoav1981/RedLease/internal/boottime"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
@@ -111,7 +111,7 @@ func (c *Client) Acquire(
 	}
 
 	var (
-		candidates   [ServerCount]time.Time
+		candidates   [ServerCount]uint64
 		successful   [ServerCount]bool
 		firstFailure error
 		keyLimitSeen bool
@@ -128,18 +128,18 @@ func (c *Client) Acquire(
 					firstFailure = result.err
 				}
 			} else if result.response != nil && isSuccessfulAcquire(result.response.GetStatus()) {
-				now := time.Now().Round(0)
+				now := boottime.Now()
 				successful[result.replica] = true
 				candidates[result.replica] = candidateValidUntil(
 					operationStart,
 					Milliseconds(result.response.GetTtlMs()),
 				)
-				if now.Before(candidates[result.replica]) {
+				if now < candidates[result.replica] {
 					lease.markConfirmed(result.replica, candidates[result.replica])
 				}
 
 				validUntil, hasQuorum := bestAcquireQuorum(candidates, successful)
-				if hasQuorum && now.Before(validUntil) {
+				if hasQuorum && now < validUntil {
 					if err := c.acquireCancellationError(ctx); err != nil {
 						firstFailure = err
 						received = ServerCount
@@ -169,7 +169,7 @@ func (c *Client) Acquire(
 				candidates,
 				successful,
 				ServerCount-received,
-				time.Now().Round(0),
+				boottime.Now(),
 			) {
 				received = ServerCount
 			}
@@ -241,7 +241,7 @@ func (c *Client) submitAcquire(
 func (c *Client) collectRemainingAcquireResults(
 	cancelCollection context.CancelFunc,
 	lease *Lease,
-	operationStart time.Time,
+	operationStart uint64,
 	results <-chan acquireReplicaResult,
 	remaining int,
 ) {
@@ -254,7 +254,7 @@ func (c *Client) collectRemainingAcquireResults(
 				operationStart,
 				Milliseconds(result.response.GetTtlMs()),
 			)
-			if time.Now().Round(0).Before(candidate) {
+			if boottime.Now() < candidate {
 				lease.markConfirmed(result.replica, candidate)
 			}
 		}
@@ -264,14 +264,14 @@ func (c *Client) collectRemainingAcquireResults(
 }
 
 func acquireQuorumStillPossible(
-	candidates [ServerCount]time.Time,
+	candidates [ServerCount]uint64,
 	successful [ServerCount]bool,
 	remaining int,
-	now time.Time,
+	now uint64,
 ) bool {
 	usable := 0
 	for replica, success := range successful {
-		if success && now.Before(candidates[replica]) {
+		if success && now < candidates[replica] {
 			usable++
 		}
 	}
@@ -283,21 +283,21 @@ func (c *Client) cleanupFailedAcquire(key []byte, id leaseID) {
 }
 
 func bestAcquireQuorum(
-	candidates [ServerCount]time.Time,
+	candidates [ServerCount]uint64,
 	successful [ServerCount]bool,
-) (time.Time, bool) {
-	validities := make([]time.Time, 0, ServerCount)
+) (uint64, bool) {
+	validities := make([]uint64, 0, ServerCount)
 	for replica, success := range successful {
 		if success {
 			validities = append(validities, candidates[replica])
 		}
 	}
 	if len(validities) < quorumSize {
-		return time.Time{}, false
+		return 0, false
 	}
 
 	sort.Slice(validities, func(i, j int) bool {
-		return validities[i].Before(validities[j])
+		return validities[i] < validities[j]
 	})
 	return validities[len(validities)-quorumSize], true
 }

@@ -6,13 +6,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/udovenkoav1981/RedLease/internal/boottime"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
 func TestLeaseRenewExtendsValidity(t *testing.T) {
 	harness := newAcquireHarness(t)
 	lease := acquireFullyConfirmedLease(t, harness, "renew", 1_000)
-	previous := lease.ValidUntil()
+	previous := leaseValidUntil(lease)
 
 	result := startLeaseRenew(lease, context.Background(), 3_000)
 	requests := harness.receiveRenewRequests(t)
@@ -23,12 +24,12 @@ func TestLeaseRenewExtendsValidity(t *testing.T) {
 	if err := receiveRenewResult(t, result); err != nil {
 		t.Fatalf("Renew: %v", err)
 	}
-	want := leaseNow(lease).Add(2_900 * time.Millisecond)
-	if got := lease.ValidUntil(); !got.Equal(want) {
-		t.Fatalf("ValidUntil = %v, want %v", got, want)
+	want := leaseNow(lease) + 2_900
+	if got := leaseValidUntil(lease); got != want {
+		t.Fatalf("validUntil = %d, want %d", got, want)
 	}
-	if !lease.ValidUntil().After(previous) {
-		t.Fatalf("Renew did not extend previous validity %v", previous)
+	if leaseValidUntil(lease) <= previous {
+		t.Fatalf("Renew did not extend previous validity %d", previous)
 	}
 	if lease.requestedTTL != 1_000 {
 		t.Fatalf("Renew changed healing requestedTTL to %d", lease.requestedTTL)
@@ -48,8 +49,8 @@ func TestLeaseNowIsAcquireStartAndChangesAtRenewStart(t *testing.T) {
 	requests := harness.receiveRenewRequests(t)
 
 	storedRenewStart := leaseNow(lease)
-	if !storedRenewStart.After(storedAcquireStart) {
-		t.Fatalf("lease now did not advance from Acquire %v at Renew start: %v", storedAcquireStart, storedRenewStart)
+	if storedRenewStart <= storedAcquireStart {
+		t.Fatalf("lease now did not advance from Acquire %d at Renew start: %d", storedAcquireStart, storedRenewStart)
 	}
 
 	for replica, request := range requests {
@@ -111,14 +112,14 @@ func TestLateAcquireResponseKeepsAcquireNowAfterRenewStarts(t *testing.T) {
 		0,
 	)
 
-	want := acquireStart.Add(900 * time.Millisecond)
+	want := acquireStart + 900
 	waitForReplicaConfirmedUntil(t, acquired.lease, 3, want)
 }
 
 func TestLeaseFailedRenewKeepsPreviousValidity(t *testing.T) {
 	harness := newAcquireHarness(t)
 	lease := acquireFullyConfirmedLease(t, harness, "failed-renew", 2_000)
-	previous := lease.ValidUntil()
+	previous := leaseValidUntil(lease)
 
 	result := startLeaseRenew(lease, context.Background(), 4_000)
 	requests := harness.receiveRenewRequests(t)
@@ -134,8 +135,8 @@ func TestLeaseFailedRenewKeepsPreviousValidity(t *testing.T) {
 	if !errors.Is(err, ErrNotRenewed) {
 		t.Fatalf("Renew error = %v, want ErrNotRenewed", err)
 	}
-	if got := lease.ValidUntil(); !got.Equal(previous) {
-		t.Fatalf("failed Renew changed validity from %v to %v", previous, got)
+	if got := leaseValidUntil(lease); got != previous {
+		t.Fatalf("failed Renew changed validity from %d to %d", previous, got)
 	}
 	if !lease.Valid() {
 		t.Fatal("failed Renew revoked the previous live quorum")
@@ -190,8 +191,8 @@ func TestLeaseConcurrentRenewAndReleasePreservesWireOrderAndNoResurrection(t *te
 	if lease.Valid() {
 		t.Fatal("Release did not invalidate lease immediately")
 	}
-	if !lease.ValidUntil().IsZero() {
-		t.Fatalf("Release left non-zero validity %v", lease.ValidUntil())
+	if remaining := lease.RemainingTTL(); remaining != 0 {
+		t.Fatalf("Release left remaining TTL %d", remaining)
 	}
 
 	// These responses arrive after Release has transitioned the lease out of
@@ -216,7 +217,7 @@ func TestLeaseConcurrentRenewAndReleasePreservesWireOrderAndNoResurrection(t *te
 	}
 	waitForLeaseReleased(t, lease)
 
-	if lease.Valid() || !lease.ValidUntil().IsZero() {
+	if lease.Valid() || lease.RemainingTTL() != 0 {
 		t.Fatal("late Renew resurrected released lease")
 	}
 	if got := lease.confirmedReplicas(); got != [ServerCount]bool{} {
@@ -233,8 +234,8 @@ func TestLeaseReleaseIsImmediateIdempotentAndFansOut(t *testing.T) {
 	if lease.Valid() {
 		t.Fatal("Release did not invalidate lease immediately")
 	}
-	if !lease.ValidUntil().IsZero() {
-		t.Fatalf("Release left non-zero validity %v", lease.ValidUntil())
+	if remaining := lease.RemainingTTL(); remaining != 0 {
+		t.Fatalf("Release left remaining TTL %d", remaining)
 	}
 
 	releases := harness.receiveReleaseRequests(t)
@@ -309,7 +310,7 @@ func TestConfirmedReplicaExpiresIndependently(t *testing.T) {
 	waitForConfirmedReplicas(t, acquired.lease, [ServerCount]bool{true, true, true, true, true})
 
 	acquired.lease.stateMu.Lock()
-	acquired.lease.confirmedUntil[3] = time.Now().Round(0)
+	acquired.lease.confirmedUntil[3] = boottime.Now()
 	acquired.lease.stateMu.Unlock()
 	want := [ServerCount]bool{true, true, true, false, true}
 	if got := acquired.lease.confirmedReplicas(); got != want {
@@ -419,18 +420,18 @@ func waitForLeaseReleased(t *testing.T, lease *Lease) {
 	}
 }
 
-func waitForReplicaConfirmedUntil(t *testing.T, lease *Lease, replica int, want time.Time) {
+func waitForReplicaConfirmedUntil(t *testing.T, lease *Lease, replica int, want uint64) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for {
 		lease.stateMu.RLock()
 		confirmedUntil := lease.confirmedUntil[replica]
 		lease.stateMu.RUnlock()
-		if confirmedUntil.Equal(want) {
+		if confirmedUntil == want {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("replica %d confirmed until = %v, want %v", replica, confirmedUntil, want)
+			t.Fatalf("replica %d confirmed until = %d, want %d", replica, confirmedUntil, want)
 		}
 		time.Sleep(time.Millisecond)
 	}

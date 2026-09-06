@@ -1,9 +1,7 @@
 package client
 
 import (
-	"math"
-	"time"
-
+	"github.com/udovenkoav1981/RedLease/internal/boottime"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -11,27 +9,20 @@ const (
 	// ServerCount is fixed by the RedLease 3/5 quorum architecture.
 	ServerCount  = 5
 	quorumSize   = 3
-	safetyMargin = 100 * time.Millisecond
+	safetyMargin = Milliseconds(100)
 )
 
-func candidateValidUntil(operationStart time.Time, ttlMilliseconds Milliseconds) time.Time {
-	return operationStart.Round(0).
-		Add(millisecondsDuration(ttlMilliseconds)).
-		Add(-safetyMargin)
-}
-
-func millisecondsDuration(milliseconds Milliseconds) time.Duration {
-	const maxMilliseconds = Milliseconds(math.MaxInt64) / Milliseconds(time.Millisecond)
-	if milliseconds > maxMilliseconds {
-		return time.Duration(math.MaxInt64)
+func candidateValidUntil(operationStart uint64, ttlMilliseconds Milliseconds) uint64 {
+	if ttlMilliseconds <= safetyMargin {
+		return operationStart
 	}
-	return time.Duration(milliseconds) * time.Millisecond
+	return boottime.Add(operationStart, uint64(ttlMilliseconds-safetyMargin))
 }
 
-func selectQuorumValidUntil(candidates [quorumSize]time.Time) time.Time {
+func selectQuorumValidUntil(candidates [quorumSize]uint64) uint64 {
 	validUntil := candidates[0]
 	for _, candidate := range candidates[1:] {
-		if candidate.Before(validUntil) {
+		if candidate < validUntil {
 			validUntil = candidate
 		}
 	}
@@ -39,43 +30,43 @@ func selectQuorumValidUntil(candidates [quorumSize]time.Time) time.Time {
 }
 
 func acquireQuorumValidity(
-	operationStart time.Time,
-	now time.Time,
+	operationStart uint64,
+	now uint64,
 	responses [quorumSize]*redleasev1.AcquireResponse,
-) (time.Time, bool) {
-	var candidates [quorumSize]time.Time
+) (uint64, bool) {
+	var candidates [quorumSize]uint64
 	for i, response := range responses {
 		if response == nil || !isSuccessfulAcquire(response.GetStatus()) {
-			return time.Time{}, false
+			return 0, false
 		}
 		candidates[i] = candidateValidUntil(operationStart, Milliseconds(response.GetTtlMs()))
 	}
 
 	validUntil := selectQuorumValidUntil(candidates)
-	return validUntil, now.Round(0).Before(validUntil)
+	return validUntil, now < validUntil
 }
 
 func renewQuorumValidity(
-	operationStart time.Time,
-	now time.Time,
-	previousValidUntil time.Time,
+	operationStart uint64,
+	now uint64,
+	previousValidUntil uint64,
 	responses [quorumSize]*redleasev1.RenewResponse,
-) (time.Time, bool) {
-	var candidates [quorumSize]time.Time
+) (uint64, bool) {
+	var candidates [quorumSize]uint64
 	for i, response := range responses {
 		if response == nil || response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
-			return previousValidUntil.Round(0), false
+			return previousValidUntil, false
 		}
 		candidates[i] = candidateValidUntil(operationStart, Milliseconds(response.GetTtlMs()))
 	}
 
 	quorumValidUntil := selectQuorumValidUntil(candidates)
-	validUntil := previousValidUntil.Round(0)
-	if quorumValidUntil.After(validUntil) {
+	validUntil := previousValidUntil
+	if quorumValidUntil > validUntil {
 		validUntil = quorumValidUntil
 	}
 
-	return validUntil, now.Round(0).Before(quorumValidUntil)
+	return validUntil, now < quorumValidUntil
 }
 
 func isSuccessfulAcquire(status redleasev1.LeaseStatus) bool {

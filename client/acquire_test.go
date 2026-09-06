@@ -26,9 +26,9 @@ func TestClientAcquireThreeOKEstablishesValidity(t *testing.T) {
 	if acquired.err != nil {
 		t.Fatalf("Acquire: %v", acquired.err)
 	}
-	wantValidUntil := leaseNow(acquired.lease).Add(900 * time.Millisecond)
-	if got := acquired.lease.ValidUntil(); !got.Equal(wantValidUntil) {
-		t.Fatalf("ValidUntil = %v, want %v", got, wantValidUntil)
+	wantValidUntil := leaseNow(acquired.lease) + 900
+	if got := leaseValidUntil(acquired.lease); got != wantValidUntil {
+		t.Fatalf("validUntil = %d, want %d", got, wantValidUntil)
 	}
 	if !acquired.lease.Valid() {
 		t.Fatal("newly acquired lease is not valid")
@@ -67,9 +67,9 @@ func TestClientAcquireSelectsAnyValidThreeFromHeterogeneousResponses(t *testing.
 	if acquired.err != nil {
 		t.Fatalf("Acquire: %v", acquired.err)
 	}
-	want := leaseNow(acquired.lease).Add(1_900 * time.Millisecond)
-	if got := acquired.lease.ValidUntil(); !got.Equal(want) {
-		t.Fatalf("ValidUntil = %v, want best 3/5 quorum %v", got, want)
+	want := leaseNow(acquired.lease) + 1_900
+	if got := leaseValidUntil(acquired.lease); got != want {
+		t.Fatalf("validUntil = %d, want best 3/5 quorum %d", got, want)
 	}
 
 	harness.respondAcquire(4, requests[4], redleasev1.LeaseStatus_LEASE_STATUS_BUSY, 0)
@@ -282,14 +282,14 @@ func TestClientAcquireLateResponsesOnlyUpdateConfirmedReplicas(t *testing.T) {
 	if acquired.err != nil {
 		t.Fatalf("Acquire: %v", acquired.err)
 	}
-	originalValidUntil := acquired.lease.ValidUntil()
+	originalValidUntil := leaseValidUntil(acquired.lease)
 
 	harness.respondAcquire(3, requests[3], redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED, 5_000)
 	harness.respondAcquire(4, requests[4], redleasev1.LeaseStatus_LEASE_STATUS_OK, 5_000)
 	waitForConfirmedReplicas(t, acquired.lease, [ServerCount]bool{true, true, true, true, true})
 
-	if got := acquired.lease.ValidUntil(); !got.Equal(originalValidUntil) {
-		t.Fatalf("late responses changed validity from %v to %v", originalValidUntil, got)
+	if got := leaseValidUntil(acquired.lease); got != originalValidUntil {
+		t.Fatalf("late responses changed validity from %d to %d", originalValidUntil, got)
 	}
 }
 
@@ -484,10 +484,16 @@ func waitForConfirmedReplicas(t *testing.T, lease *Lease, want [ServerCount]bool
 	}
 }
 
-func leaseNow(lease *Lease) time.Time {
+func leaseNow(lease *Lease) uint64 {
 	lease.stateMu.RLock()
 	defer lease.stateMu.RUnlock()
 	return lease.now
+}
+
+func leaseValidUntil(lease *Lease) uint64 {
+	lease.stateMu.RLock()
+	defer lease.stateMu.RUnlock()
+	return lease.validUntil
 }
 
 func waitForNoPendingStreamCalls(t *testing.T, client *Client) {

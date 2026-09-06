@@ -17,12 +17,12 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-var testEpoch = time.Date(2026, time.January, 2, 3, 4, 5, 123456789, time.UTC)
+const testEpoch uint64 = 1_000_000
 
-func newTestServer(t *testing.T, maxTTL time.Duration, shardCount uint32) *Server {
+func newTestServer(t *testing.T, maxTTL uint64, shardCount uint32) *Server {
 	t.Helper()
 	s, err := New(Config{
-		MaxTTL:               uint64(maxTTL / time.Millisecond),
+		MaxTTL:               maxTTL,
 		ShardCount:           shardCount,
 		ShardQueueDepth:      8,
 		MaxInFlightPerStream: 8,
@@ -79,7 +79,7 @@ func TestConfigDefaultsMaxKeys(t *testing.T) {
 }
 
 func TestQuarantineAndGetTTL(t *testing.T) {
-	s := newTestServer(t, 2*time.Second, 1)
+	s := newTestServer(t, 2_000, 1)
 	shard := s.shards[0]
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
 
@@ -111,8 +111,8 @@ func TestQuarantineAndGetTTL(t *testing.T) {
 	}
 }
 
-func TestAcquireClampsMaxUint64BeforeDurationConversion(t *testing.T) {
-	s := newTestServer(t, 2*time.Second, 1)
+func TestAcquireClampsMaxUint64(t *testing.T) {
+	s := newTestServer(t, 2_000, 1)
 
 	op := operation{
 		requestID:      1,
@@ -125,14 +125,14 @@ func TestAcquireClampsMaxUint64BeforeDurationConversion(t *testing.T) {
 	if response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK || response.GetTtlMs() != 2000 {
 		t.Fatalf("Acquire = (%s, %d), want (OK, 2000)", response.GetStatus(), response.GetTtlMs())
 	}
-	wantDeadline := testEpoch.Add(2 * time.Second)
-	if got := s.shards[0].leases["key"].deadline; !got.Equal(wantDeadline) {
-		t.Fatalf("deadline = %s, want %s", got, wantDeadline)
+	wantDeadline := testEpoch + 2_000
+	if got := s.shards[0].leases["key"].deadline; got != wantDeadline {
+		t.Fatalf("deadline = %d, want %d", got, wantDeadline)
 	}
 }
 
 func TestAcquireZeroTTLHasNoPositiveValidity(t *testing.T) {
-	s := newTestServer(t, 2*time.Second, 1)
+	s := newTestServer(t, 2_000, 1)
 	first := leaseID{clientID: 1, bootID: 1, leaseSeq: 1}
 	second := leaseID{clientID: 2, bootID: 2, leaseSeq: 2}
 
@@ -189,7 +189,7 @@ func TestAcquireEnforcesKeyLimitAndRestoresCapacity(t *testing.T) {
 	}
 
 	thirdID := leaseID{clientID: 3, bootID: 3, leaseSeq: 3}
-	afterCapacityCleanup := s.acquire(shard, operation{kind: operationAcquire, key: "third", leaseID: thirdID, requestedTTLMS: 1000}, testEpoch.Add(time.Second)).GetAcquire()
+	afterCapacityCleanup := s.acquire(shard, operation{kind: operationAcquire, key: "third", leaseID: thirdID, requestedTTLMS: 1000}, testEpoch+1_000).GetAcquire()
 	if afterCapacityCleanup.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
 		t.Fatalf("Acquire after capacity cleanup = %s, want OK", afterCapacityCleanup.GetStatus())
 	}
@@ -221,9 +221,9 @@ func TestCapacityCleanupUsesDeadlineOrderAfterRenew(t *testing.T) {
 
 	s.acquire(shard, operation{kind: operationAcquire, key: "first", leaseID: firstID, requestedTTLMS: 1000}, testEpoch)
 	s.acquire(shard, operation{kind: operationAcquire, key: "second", leaseID: secondID, requestedTTLMS: 2000}, testEpoch)
-	s.renew(shard, operation{kind: operationRenew, key: "first", leaseID: firstID, requestedTTLMS: 5000}, testEpoch.Add(500*time.Millisecond))
+	s.renew(shard, operation{kind: operationRenew, key: "first", leaseID: firstID, requestedTTLMS: 5000}, testEpoch+500)
 
-	response := s.acquire(shard, operation{kind: operationAcquire, key: "third", leaseID: thirdID, requestedTTLMS: 1000}, testEpoch.Add(2500*time.Millisecond)).GetAcquire()
+	response := s.acquire(shard, operation{kind: operationAcquire, key: "third", leaseID: thirdID, requestedTTLMS: 1000}, testEpoch+2_500).GetAcquire()
 	if response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
 		t.Fatalf("Acquire after deadline-ordered cleanup = %s, want OK", response.GetStatus())
 	}
@@ -278,7 +278,7 @@ func TestCapacityCleanupReclaimsExpiredLeaseFromAnotherShard(t *testing.T) {
 	second := s.acquire(
 		s.shards[secondShard],
 		operation{kind: operationAcquire, key: secondKey, leaseID: secondID, requestedTTLMS: 1000},
-		testEpoch.Add(time.Second),
+		testEpoch+1_000,
 	).GetAcquire()
 	if second.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
 		t.Fatalf("cross-shard Acquire after expiry = %s, want OK", second.GetStatus())
@@ -295,7 +295,7 @@ func TestCapacityCleanupReclaimsExpiredLeaseFromAnotherShard(t *testing.T) {
 }
 
 func TestServerRejectsKeysLargerThanProtocolLimit(t *testing.T) {
-	s := newTestServer(t, time.Second, 1)
+	s := newTestServer(t, 1_000, 1)
 	activateServer(t, s)
 	id := leaseID{clientID: 1, bootID: 1, leaseSeq: 1}
 	tooLarge := strings.Repeat("x", protocol.MaxKeyBytes+1)
@@ -336,19 +336,19 @@ func TestServerRejectsKeysLargerThanProtocolLimit(t *testing.T) {
 }
 
 func TestAcquireAlreadyOwnedDoesNotExtendDeadline(t *testing.T) {
-	s := newTestServer(t, 2*time.Second, 1)
+	s := newTestServer(t, 2_000, 1)
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
 	now := testEpoch
 
 	s.acquire(s.shards[0], operation{kind: operationAcquire, key: "key", leaseID: id, requestedTTLMS: 1000}, now)
 	wantDeadline := s.shards[0].leases["key"].deadline
-	now = now.Add(250 * time.Millisecond)
+	now += 250
 	response := s.acquire(s.shards[0], operation{kind: operationAcquire, key: "key", leaseID: id, requestedTTLMS: 2000}, now).GetAcquire()
 	if response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED || response.GetTtlMs() != 750 {
 		t.Fatalf("repeated Acquire = (%s, %d), want (ALREADY_OWNED, 750)", response.GetStatus(), response.GetTtlMs())
 	}
-	if got := s.shards[0].leases["key"].deadline; !got.Equal(wantDeadline) {
-		t.Fatalf("repeated Acquire changed deadline from %s to %s", wantDeadline, got)
+	if got := s.shards[0].leases["key"].deadline; got != wantDeadline {
+		t.Fatalf("repeated Acquire changed deadline from %d to %d", wantDeadline, got)
 	}
 
 	other := leaseID{clientID: 9, bootID: 9, leaseSeq: 9}
@@ -359,30 +359,30 @@ func TestAcquireAlreadyOwnedDoesNotExtendDeadline(t *testing.T) {
 }
 
 func TestRenewExtendsToConfiguredMaximumAndNeverShortens(t *testing.T) {
-	s := newTestServer(t, 2*time.Second, 1)
+	s := newTestServer(t, 2_000, 1)
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
 	shard := s.shards[0]
 	now := testEpoch
 
 	s.acquire(shard, operation{kind: operationAcquire, key: "key", leaseID: id, requestedTTLMS: 1000}, now)
-	now = now.Add(200 * time.Millisecond)
+	now += 200
 	response := s.renew(shard, operation{kind: operationRenew, key: "key", leaseID: id, requestedTTLMS: math.MaxUint64}, now).GetRenew()
 	if response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK || response.GetTtlMs() != 2000 {
 		t.Fatalf("max Renew = (%s, %d), want (OK, 2000)", response.GetStatus(), response.GetTtlMs())
 	}
-	wantDeadline := now.Add(2 * time.Second)
+	wantDeadline := now + 2_000
 
 	zero := s.renew(shard, operation{kind: operationRenew, key: "key", leaseID: id, requestedTTLMS: 0}, now).GetRenew()
 	if zero.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK || zero.GetTtlMs() != 2000 {
 		t.Fatalf("zero Renew = (%s, %d), want (OK, 2000)", zero.GetStatus(), zero.GetTtlMs())
 	}
-	if got := shard.leases["key"].deadline; !got.Equal(wantDeadline) {
-		t.Fatalf("zero Renew changed deadline from %s to %s", wantDeadline, got)
+	if got := shard.leases["key"].deadline; got != wantDeadline {
+		t.Fatalf("zero Renew changed deadline from %d to %d", wantDeadline, got)
 	}
 }
 
 func TestRenewStaleAndExpiry(t *testing.T) {
-	s := newTestServer(t, time.Second, 1)
+	s := newTestServer(t, 1_000, 1)
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
 	other := leaseID{clientID: 4, bootID: 5, leaseSeq: 6}
 	shard := s.shards[0]
@@ -397,11 +397,11 @@ func TestRenewStaleAndExpiry(t *testing.T) {
 	if foreign.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_STALE {
 		t.Fatalf("foreign Renew = %s, want STALE", foreign.GetStatus())
 	}
-	if got := shard.leases["key"].deadline; !got.Equal(wantDeadline) {
-		t.Fatalf("foreign Renew changed deadline from %s to %s", wantDeadline, got)
+	if got := shard.leases["key"].deadline; got != wantDeadline {
+		t.Fatalf("foreign Renew changed deadline from %d to %d", wantDeadline, got)
 	}
 
-	expired := s.renew(shard, operation{kind: operationRenew, key: "key", leaseID: id, requestedTTLMS: 1000}, testEpoch.Add(time.Second)).GetRenew()
+	expired := s.renew(shard, operation{kind: operationRenew, key: "key", leaseID: id, requestedTTLMS: 1000}, testEpoch+1_000).GetRenew()
 	if expired.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_STALE {
 		t.Fatalf("expired Renew = %s, want STALE", expired.GetStatus())
 	}
@@ -414,7 +414,7 @@ func TestRenewStaleAndExpiry(t *testing.T) {
 }
 
 func TestReleaseIsIdempotentAndDeletesOnlyMatchingLease(t *testing.T) {
-	s := newTestServer(t, time.Second, 1)
+	s := newTestServer(t, 1_000, 1)
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
 	other := leaseID{clientID: 4, bootID: 5, leaseSeq: 6}
 	shard := s.shards[0]
@@ -451,12 +451,12 @@ func TestReleaseIsIdempotentAndDeletesOnlyMatchingLease(t *testing.T) {
 	}
 }
 
-func TestRemainingTTLFloorsAndClamps(t *testing.T) {
+func TestRemainingTTLExpiresAndClamps(t *testing.T) {
 	t.Parallel()
-	if got := remainingTTLMS(testEpoch.Add(time.Millisecond+999*time.Microsecond), testEpoch, 10); got != 1 {
-		t.Fatalf("floored TTL = %d, want 1", got)
+	if got := remainingTTLMS(testEpoch+1, testEpoch, 10); got != 1 {
+		t.Fatalf("remaining TTL = %d, want 1", got)
 	}
-	if got := remainingTTLMS(testEpoch.Add(20*time.Millisecond), testEpoch, 10); got != 10 {
+	if got := remainingTTLMS(testEpoch+20, testEpoch, 10); got != 10 {
 		t.Fatalf("clamped TTL = %d, want 10", got)
 	}
 	if got := remainingTTLMS(testEpoch, testEpoch, 10); got != 0 {
@@ -466,8 +466,8 @@ func TestRemainingTTLFloorsAndClamps(t *testing.T) {
 
 func TestDeleteExpiredLeases(t *testing.T) {
 	shard := &leaseShard{leases: make(map[string]*lease)}
-	shard.addLease("active", leaseID{}, testEpoch.Add(time.Millisecond))
-	shard.addLease("expired", leaseID{}, testEpoch.Add(-time.Millisecond))
+	shard.addLease("active", leaseID{}, testEpoch+1)
+	shard.addLease("expired", leaseID{}, testEpoch-1)
 	shard.addLease("boundary", leaseID{}, testEpoch)
 
 	if deleted := shard.removeExpiredLeases(testEpoch); deleted != 2 {
@@ -489,7 +489,7 @@ func TestDeleteExpiredLeases(t *testing.T) {
 }
 
 func TestLeaseStreamRejectsRequestDuringQuarantine(t *testing.T) {
-	s := newTestServer(t, time.Second, 1)
+	s := newTestServer(t, 1_000, 1)
 
 	stream := newFakeLeaseStream(acquireRequest(1, []byte("key"), 1, 1000))
 	errDone := make(chan error, 1)
@@ -514,7 +514,7 @@ func TestLeaseStreamRejectsRequestDuringQuarantine(t *testing.T) {
 }
 
 func TestLeaseStreamPreservesSameKeyFIFO(t *testing.T) {
-	s := newTestServer(t, time.Second, 2)
+	s := newTestServer(t, 1_000, 2)
 	activateServer(t, s)
 
 	key := []byte("same-key")
@@ -560,7 +560,7 @@ func TestLeaseStreamPreservesSameKeyFIFO(t *testing.T) {
 }
 
 func TestLeaseStreamCanReplyOutOfOrderAcrossShards(t *testing.T) {
-	s := newTestServer(t, time.Second, 2)
+	s := newTestServer(t, 1_000, 2)
 	activateServer(t, s)
 
 	firstKey, secondKey := keysForDifferentShards(t, s)
@@ -702,7 +702,7 @@ func getTTLRequest(requestID uint64) *redleasev1.ClientRequest {
 }
 
 func TestDecodeInvalidRequest(t *testing.T) {
-	s := newTestServer(t, time.Second, 1)
+	s := newTestServer(t, 1_000, 1)
 	for _, request := range []*redleasev1.ClientRequest{nil, {}, {Operation: &redleasev1.ClientRequest_Acquire{}}} {
 		_, _, err := s.decodeRequest(request)
 		if status.Code(err) != codes.InvalidArgument {

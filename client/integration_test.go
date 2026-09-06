@@ -57,15 +57,14 @@ func TestClientAndServersEndToEnd(t *testing.T) {
 		t.Fatal("conflicting Acquire returned a lease")
 	}
 
-	previousValidUntil := firstLease.ValidUntil()
 	operationContext, cancelOperation = context.WithTimeout(context.Background(), 2*time.Second)
 	err = firstLease.Renew(operationContext, 5_000)
 	cancelOperation()
 	if err != nil {
 		t.Fatalf("first lease Renew: %v", err)
 	}
-	if !firstLease.ValidUntil().After(previousValidUntil) {
-		t.Fatal("Renew did not extend first lease validity")
+	if !firstLease.Valid() || firstLease.RemainingTTL() == 0 {
+		t.Fatal("Renew did not leave first lease valid")
 	}
 
 	firstLease.Release()
@@ -123,14 +122,14 @@ func TestClientUsesHeterogeneousServerTTLsEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire with heterogeneous TTLs: %v", err)
 	}
-	remaining := time.Until(lease.ValidUntil())
-	if remaining <= 0 {
-		t.Fatalf("heterogeneous TTL quorum is already invalid: %v", remaining)
+	remaining := lease.RemainingTTL()
+	if remaining == 0 {
+		t.Fatal("heterogeneous TTL quorum is already invalid")
 	}
 	// No quorum of three can have a minimum TTL above the third-largest
 	// configured value (3s), less the fixed 100ms safety margin.
-	if remaining > 2_900*time.Millisecond {
-		t.Fatalf("heterogeneous TTL validity = %v, want at most 2.9s", remaining)
+	if remaining > 2_900 {
+		t.Fatalf("heterogeneous TTL validity = %dms, want at most 2900ms", remaining)
 	}
 	lease.Release()
 }

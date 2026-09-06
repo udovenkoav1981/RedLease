@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/udovenkoav1981/RedLease/internal/boottime"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -27,7 +28,7 @@ func TestBackgroundHealingRetriesMissingReplicasToFiveOfFive(t *testing.T) {
 	if acquired.err != nil {
 		t.Fatalf("Acquire: %v", acquired.err)
 	}
-	originalValidUntil := acquired.lease.ValidUntil()
+	originalValidUntil := leaseValidUntil(acquired.lease)
 
 	for replica := quorumSize; replica < ServerCount; replica++ {
 		harness.respondAcquire(
@@ -60,8 +61,8 @@ func TestBackgroundHealingRetriesMissingReplicasToFiveOfFive(t *testing.T) {
 		[ServerCount]bool{true, true, true, true, true},
 	)
 
-	if got := acquired.lease.ValidUntil(); !got.Equal(originalValidUntil) {
-		t.Fatalf("healing changed validity from %v to %v", originalValidUntil, got)
+	if got := leaseValidUntil(acquired.lease); got != originalValidUntil {
+		t.Fatalf("healing changed validity from %d to %d", originalValidUntil, got)
 	}
 }
 
@@ -81,7 +82,7 @@ func TestBackgroundHealingReattachesReplicaAfterStaleRenew(t *testing.T) {
 	if err := receiveRenewResult(t, renewResult); err != nil {
 		t.Fatalf("Renew: %v", err)
 	}
-	renewedValidUntil := lease.ValidUntil()
+	renewedValidUntil := leaseValidUntil(lease)
 	waitForConfirmedReplicas(
 		t,
 		lease,
@@ -101,8 +102,8 @@ func TestBackgroundHealingReattachesReplicaAfterStaleRenew(t *testing.T) {
 	harness.respondAcquire(4, healing, redleasev1.LeaseStatus_LEASE_STATUS_OK, 2_000)
 	waitForConfirmedReplicas(t, lease, [ServerCount]bool{true, true, true, true, true})
 
-	if got := lease.ValidUntil(); !got.Equal(renewedValidUntil) {
-		t.Fatalf("healing changed renewed validity from %v to %v", renewedValidUntil, got)
+	if got := leaseValidUntil(lease); got != renewedValidUntil {
+		t.Fatalf("healing changed renewed validity from %d to %d", renewedValidUntil, got)
 	}
 }
 
@@ -165,7 +166,7 @@ func TestBackgroundHealingStopsAfterLocalValidityExpires(t *testing.T) {
 	}
 
 	acquired.lease.stateMu.Lock()
-	acquired.lease.validUntil = time.Now().Round(0)
+	acquired.lease.validUntil = boottime.Now()
 	acquired.lease.stateMu.Unlock()
 	for replica := quorumSize; replica < ServerCount; replica++ {
 		harness.respondAcquire(
