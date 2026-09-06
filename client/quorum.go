@@ -5,12 +5,50 @@ import (
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
+// Quorum selects one supported majority configuration.
+type Quorum uint8
+
 const (
-	// ServerCount is fixed by the RedLease 3/5 quorum architecture.
-	ServerCount  = 5
-	quorumSize   = 3
+	// Quorum1Of1 selects one required response from one server.
+	Quorum1Of1 Quorum = iota + 1
+	// Quorum2Of3 selects two required responses from three servers.
+	Quorum2Of3
+	// Quorum3Of5 selects three required responses from five servers.
+	Quorum3Of5
+
 	safetyMargin = Milliseconds(100)
 )
+
+func (q Quorum) String() string {
+	switch q {
+	case Quorum1Of1:
+		return "1/1"
+	case Quorum2Of3:
+		return "2/3"
+	case Quorum3Of5:
+		return "3/5"
+	default:
+		return "unknown"
+	}
+}
+
+func (q Quorum) parameters() (serverCount, quorumSize int, valid bool) {
+	switch q {
+	case Quorum1Of1:
+		return 1, 1, true
+	case Quorum2Of3:
+		return 3, 2, true
+	case Quorum3Of5:
+		return 5, 3, true
+	default:
+		return 0, 0, false
+	}
+}
+
+func (q Quorum) size() int {
+	_, size, _ := q.parameters()
+	return size
+}
 
 func candidateValidUntil(operationStart uint64, ttlMilliseconds Milliseconds) uint64 {
 	if ttlMilliseconds <= safetyMargin {
@@ -19,7 +57,7 @@ func candidateValidUntil(operationStart uint64, ttlMilliseconds Milliseconds) ui
 	return boottime.Add(operationStart, uint64(ttlMilliseconds-safetyMargin))
 }
 
-func selectQuorumValidUntil(candidates [quorumSize]uint64) uint64 {
+func selectQuorumValidUntil(candidates []uint64) uint64 {
 	validUntil := candidates[0]
 	for _, candidate := range candidates[1:] {
 		if candidate < validUntil {
@@ -32,9 +70,9 @@ func selectQuorumValidUntil(candidates [quorumSize]uint64) uint64 {
 func acquireQuorumValidity(
 	operationStart uint64,
 	now uint64,
-	responses [quorumSize]*redleasev1.AcquireResponse,
+	responses []*redleasev1.AcquireResponse,
 ) (uint64, bool) {
-	var candidates [quorumSize]uint64
+	candidates := make([]uint64, len(responses))
 	for i, response := range responses {
 		if response == nil || !isSuccessfulAcquire(response.GetStatus()) {
 			return 0, false
@@ -50,9 +88,9 @@ func renewQuorumValidity(
 	operationStart uint64,
 	now uint64,
 	previousValidUntil uint64,
-	responses [quorumSize]*redleasev1.RenewResponse,
+	responses []*redleasev1.RenewResponse,
 ) (uint64, bool) {
-	var candidates [quorumSize]uint64
+	candidates := make([]uint64, len(responses))
 	for i, response := range responses {
 		if response == nil || response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
 			return previousValidUntil, false

@@ -112,8 +112,60 @@ func TestCandidateTTLOutOfDurationRangeDoesNotWrap(t *testing.T) {
 	}
 }
 
-func acquireResponses(ttls ...uint64) [quorumSize]*redleasev1.AcquireResponse {
-	var responses [quorumSize]*redleasev1.AcquireResponse
+func TestQuorumParameters(t *testing.T) {
+	tests := []struct {
+		quorum         Quorum
+		serverCount    int
+		wantQuorumSize int
+		valid          bool
+	}{
+		{quorum: Quorum1Of1, serverCount: 1, wantQuorumSize: 1, valid: true},
+		{quorum: Quorum2Of3, serverCount: 3, wantQuorumSize: 2, valid: true},
+		{quorum: Quorum3Of5, serverCount: 5, wantQuorumSize: 3, valid: true},
+		{quorum: Quorum(4)},
+	}
+
+	for _, test := range tests {
+		serverCount, quorumSize, valid := test.quorum.parameters()
+		if serverCount != test.serverCount || quorumSize != test.wantQuorumSize || valid != test.valid {
+			t.Fatalf(
+				"quorum %d parameters = (%d, %d, %t), want (%d, %d, %t)",
+				test.quorum,
+				serverCount,
+				quorumSize,
+				valid,
+				test.serverCount,
+				test.wantQuorumSize,
+				test.valid,
+			)
+		}
+	}
+}
+
+func TestBestAcquireQuorumUsesEverySupportedThreshold(t *testing.T) {
+	for _, quorum := range []Quorum{Quorum1Of1, Quorum2Of3, Quorum3Of5} {
+		serverCount, quorumSize, _ := quorum.parameters()
+		candidates := make([]uint64, serverCount)
+		successful := make([]bool, serverCount)
+		for index := range candidates {
+			candidates[index] = uint64(1_000 + index)
+		}
+		for index := range quorumSize - 1 {
+			successful[index] = true
+		}
+		if _, ok := bestAcquireQuorum(candidates, successful, quorumSize); ok {
+			t.Fatalf("quorum %s succeeded below threshold", quorum)
+		}
+
+		successful[quorumSize-1] = true
+		if _, ok := bestAcquireQuorum(candidates, successful, quorumSize); !ok {
+			t.Fatalf("quorum %s did not succeed at threshold", quorum)
+		}
+	}
+}
+
+func acquireResponses(ttls ...uint64) []*redleasev1.AcquireResponse {
+	responses := make([]*redleasev1.AcquireResponse, len(ttls))
 	for i, ttl := range ttls {
 		responses[i] = &redleasev1.AcquireResponse{
 			Status: redleasev1.LeaseStatus_LEASE_STATUS_OK,
@@ -123,8 +175,8 @@ func acquireResponses(ttls ...uint64) [quorumSize]*redleasev1.AcquireResponse {
 	return responses
 }
 
-func renewResponses(ttls ...uint64) [quorumSize]*redleasev1.RenewResponse {
-	var responses [quorumSize]*redleasev1.RenewResponse
+func renewResponses(ttls ...uint64) []*redleasev1.RenewResponse {
+	responses := make([]*redleasev1.RenewResponse, len(ttls))
 	for i, ttl := range ttls {
 		responses[i] = &redleasev1.RenewResponse{
 			Status: redleasev1.LeaseStatus_LEASE_STATUS_OK,

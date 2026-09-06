@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -49,6 +50,75 @@ func TestClientAcquireThreeOKEstablishesValidity(t *testing.T) {
 
 	harness.respondAcquire(3, requests[3], redleasev1.LeaseStatus_LEASE_STATUS_BUSY, 0)
 	harness.respondAcquire(4, requests[4], redleasev1.LeaseStatus_LEASE_STATUS_BUSY, 0)
+}
+
+func TestClientAcquireUsesEverySupportedQuorum(t *testing.T) {
+	for _, quorum := range []Quorum{Quorum1Of1, Quorum2Of3, Quorum3Of5} {
+		t.Run(quorum.String(), func(t *testing.T) {
+			client, factories := newClientForQuorum(quorum)
+			client.responseTimeout = 500 * time.Millisecond
+			generator, err := newLeaseIDGeneratorFromReader(
+				19,
+				bytes.NewReader([]byte{1, 2, 3, 4}),
+			)
+			if err != nil {
+				t.Fatalf("new lease ID generator: %v", err)
+			}
+			client.idGenerator = generator
+			t.Cleanup(func() { _ = client.Close() })
+
+			serverCount, quorumSize, _ := quorum.parameters()
+			streams := make([]*fakeLeaseClientStream, serverCount)
+			for replica, factory := range factories {
+				streams[replica] = newReplicaFakeStream()
+				factory.results <- streamFactoryResult{stream: streams[replica]}
+				waitForReplicaState(t, client.replicas[replica], true, false)
+			}
+
+			result := startClientAcquire(client, context.Background(), []byte("configured-quorum"), 2_000)
+			requests := make([]*redleasev1.ClientRequest, serverCount)
+			for replica, stream := range streams {
+				requests[replica] = receiveAcquireRequest(t, stream)
+			}
+			for replica := range quorumSize - 1 {
+				respondAcquireOnStream(
+					streams[replica],
+					requests[replica],
+					redleasev1.LeaseStatus_LEASE_STATUS_OK,
+					2_000,
+				)
+			}
+			select {
+			case acquired := <-result:
+				t.Fatalf("Acquire returned below quorum: %v", acquired.err)
+			case <-time.After(20 * time.Millisecond):
+			}
+
+			respondAcquireOnStream(
+				streams[quorumSize-1],
+				requests[quorumSize-1],
+				redleasev1.LeaseStatus_LEASE_STATUS_OK,
+				2_000,
+			)
+			acquired := receiveAcquireCallResult(t, result)
+			if acquired.err != nil {
+				t.Fatalf("Acquire at quorum: %v", acquired.err)
+			}
+			if !acquired.lease.Valid() {
+				t.Fatal("Acquire at quorum returned an invalid lease")
+			}
+
+			for replica := quorumSize; replica < serverCount; replica++ {
+				respondAcquireOnStream(
+					streams[replica],
+					requests[replica],
+					redleasev1.LeaseStatus_LEASE_STATUS_OK,
+					2_000,
+				)
+			}
+			waitForNoPendingStreamCalls(t, client)
+		})
+	}
 }
 
 func TestClientAcquireSelectsAnyValidThreeFromHeterogeneousResponses(t *testing.T) {
@@ -166,7 +236,7 @@ func TestClientAcquireCleansImmediatelyWhenQuorumBecomesImpossible(t *testing.T)
 	result := startClientAcquire(harness.client, context.Background(), []byte("impossible"), 2_000)
 	requests := harness.receiveAcquireRequests(t)
 
-	for replica := range quorumSize {
+	for replica := range testQuorumSize {
 		harness.respondAcquire(replica, requests[replica], redleasev1.LeaseStatus_LEASE_STATUS_BUSY, 0)
 	}
 
@@ -205,11 +275,11 @@ func TestClientAcquireWaitsForAllFiveSubmissionBarriers(t *testing.T) {
 	harness.streams[4].waitForSendAttempt(t)
 
 	result := startClientAcquire(harness.client, context.Background(), []byte("barrier"), 2_000)
-	var requests [ServerCount]*redleasev1.ClientRequest
-	for replica := range ServerCount - 1 {
+	var requests [testServerCount]*redleasev1.ClientRequest
+	for replica := range testServerCount - 1 {
 		requests[replica] = receiveAcquireRequest(t, harness.streams[replica])
 	}
-	for replica := range quorumSize {
+	for replica := range testQuorumSize {
 		harness.respondAcquire(replica, requests[replica], redleasev1.LeaseStatus_LEASE_STATUS_OK, 2_000)
 	}
 
@@ -247,11 +317,11 @@ func TestClientAcquireCanUseQuorumAfterUnacceptedSubmitTimesOut(t *testing.T) {
 	harness.streams[4].waitForSendAttempt(t)
 
 	result := startClientAcquire(harness.client, context.Background(), []byte("barrier-timeout"), 2_000)
-	var requests [ServerCount - 1]*redleasev1.ClientRequest
+	var requests [testServerCount - 1]*redleasev1.ClientRequest
 	for replica := range requests {
 		requests[replica] = receiveAcquireRequest(t, harness.streams[replica])
 	}
-	for replica := range quorumSize {
+	for replica := range testQuorumSize {
 		harness.respondAcquire(replica, requests[replica], redleasev1.LeaseStatus_LEASE_STATUS_OK, 2_000)
 	}
 
@@ -265,7 +335,7 @@ func TestClientAcquireCanUseQuorumAfterUnacceptedSubmitTimesOut(t *testing.T) {
 	if _, err := blocker.await(context.Background()); err != nil {
 		t.Fatalf("await blocker: %v", err)
 	}
-	for replica := quorumSize; replica < len(requests); replica++ {
+	for replica := testQuorumSize; replica < len(requests); replica++ {
 		harness.respondAcquire(replica, requests[replica], redleasev1.LeaseStatus_LEASE_STATUS_BUSY, 0)
 	}
 }
@@ -275,7 +345,7 @@ func TestClientAcquireLateResponsesOnlyUpdateConfirmedReplicas(t *testing.T) {
 	result := startClientAcquire(harness.client, context.Background(), []byte("late"), 2_000)
 	requests := harness.receiveAcquireRequests(t)
 
-	for replica := range quorumSize {
+	for replica := range testQuorumSize {
 		harness.respondAcquire(replica, requests[replica], redleasev1.LeaseStatus_LEASE_STATUS_OK, 1_000)
 	}
 	acquired := receiveAcquireCallResult(t, result)
@@ -286,7 +356,7 @@ func TestClientAcquireLateResponsesOnlyUpdateConfirmedReplicas(t *testing.T) {
 
 	harness.respondAcquire(3, requests[3], redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED, 5_000)
 	harness.respondAcquire(4, requests[4], redleasev1.LeaseStatus_LEASE_STATUS_OK, 5_000)
-	waitForConfirmedReplicas(t, acquired.lease, [ServerCount]bool{true, true, true, true, true})
+	waitForConfirmedReplicas(t, acquired.lease, [testServerCount]bool{true, true, true, true, true})
 
 	if got := leaseValidUntil(acquired.lease); got != originalValidUntil {
 		t.Fatalf("late responses changed validity from %d to %d", originalValidUntil, got)
@@ -308,7 +378,7 @@ func TestClientAcquireConcurrentCalls(t *testing.T) {
 	}
 
 	var responders sync.WaitGroup
-	responders.Add(ServerCount)
+	responders.Add(testServerCount)
 	for replica, stream := range harness.streams {
 		go func() {
 			defer responders.Done()
@@ -331,14 +401,14 @@ func TestClientAcquireConcurrentCalls(t *testing.T) {
 			t.Fatalf("duplicate lease sequence %d", sequence)
 		}
 		seen[sequence] = struct{}{}
-		waitForConfirmedReplicas(t, acquired.lease, [ServerCount]bool{true, true, true, true, true})
+		waitForConfirmedReplicas(t, acquired.lease, [testServerCount]bool{true, true, true, true, true})
 	}
 }
 
 type acquireHarness struct {
 	client    *Client
-	streams   [ServerCount]*fakeLeaseClientStream
-	factories [ServerCount]*scriptedStreamFactory
+	streams   [testServerCount]*fakeLeaseClientStream
+	factories [testServerCount]*scriptedStreamFactory
 }
 
 type acquireCallResult struct {
@@ -367,9 +437,9 @@ func newAcquireHarness(t *testing.T) *acquireHarness {
 	return harness
 }
 
-func (h *acquireHarness) receiveAcquireRequests(t *testing.T) [ServerCount]*redleasev1.ClientRequest {
+func (h *acquireHarness) receiveAcquireRequests(t *testing.T) [testServerCount]*redleasev1.ClientRequest {
 	t.Helper()
-	var requests [ServerCount]*redleasev1.ClientRequest
+	var requests [testServerCount]*redleasev1.ClientRequest
 	for replica, stream := range h.streams {
 		requests[replica] = receiveAcquireRequest(t, stream)
 	}
@@ -394,7 +464,7 @@ func (h *acquireHarness) respondAcquire(
 
 func (h *acquireHarness) receiveAndRespondToCleanup(
 	t *testing.T,
-	acquireRequests [ServerCount]*redleasev1.ClientRequest,
+	acquireRequests [testServerCount]*redleasev1.ClientRequest,
 ) {
 	t.Helper()
 	for replica, stream := range h.streams {
@@ -451,6 +521,22 @@ func receiveAcquireRequest(t *testing.T, stream *fakeLeaseClientStream) *redleas
 	return request
 }
 
+func respondAcquireOnStream(
+	stream *fakeLeaseClientStream,
+	request *redleasev1.ClientRequest,
+	status redleasev1.LeaseStatus,
+	ttl uint64,
+) {
+	stream.receive <- fakeReceive{
+		response: &redleasev1.ServerResponse{
+			RequestId: request.GetRequestId(),
+			Result: &redleasev1.ServerResponse_Acquire{
+				Acquire: &redleasev1.AcquireResponse{Status: status, TtlMs: ttl},
+			},
+		},
+	}
+}
+
 func receiveReleaseRequest(t *testing.T, stream *fakeLeaseClientStream) *redleasev1.ClientRequest {
 	t.Helper()
 	request := receiveSentRequest(t, stream)
@@ -470,11 +556,11 @@ func currentReplicaGeneration(t *testing.T, replica *replicaConn) *streamGenerat
 	return replica.generation
 }
 
-func waitForConfirmedReplicas(t *testing.T, lease *Lease, want [ServerCount]bool) {
+func waitForConfirmedReplicas(t *testing.T, lease *Lease, want [testServerCount]bool) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for {
-		if got := lease.confirmedReplicas(); got == want {
+		if got := lease.confirmedReplicas(); slices.Equal(got, want[:]) {
 			return
 		}
 		if time.Now().After(deadline) {

@@ -61,7 +61,7 @@ func newBenchmarkClient(b *testing.B) *Client {
 
 	done := make(chan struct{})
 	var responders sync.WaitGroup
-	responders.Add(ServerCount)
+	responders.Add(testServerCount)
 	for _, factory := range factories {
 		stream := newReplicaFakeStream()
 		factory.results <- streamFactoryResult{stream: stream}

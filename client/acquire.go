@@ -12,7 +12,7 @@ import (
 )
 
 // ErrNotAcquired identifies every Acquire result which did not establish a
-// currently valid 3/5 quorum.
+// currently valid configured quorum.
 var ErrNotAcquired = errors.New("RedLease lease not acquired")
 
 var (
@@ -55,9 +55,8 @@ type acquireReplicaResult struct {
 	err      error
 }
 
-// Acquire makes one attempt to establish a currently valid lease quorum on any
-// three of the five configured lock-servers. The caller owns retry policy;
-// every new call uses a new lease ID.
+// Acquire makes one attempt to establish a currently valid lease quorum. The
+// caller owns retry policy; every new call uses a new lease ID.
 func (c *Client) Acquire(
 	ctx context.Context,
 	key []byte,
@@ -73,6 +72,8 @@ func (c *Client) Acquire(
 	id := c.idGenerator.next()
 	lease := newLease(c, id, key, ttl)
 	operationStart := lease.now
+	serverCount := len(c.replicas)
+	quorumSize := c.quorum.size()
 
 	operationContext, cancelOperation := context.WithTimeout(c.ctx, c.responseTimeout)
 	stopCallerCancellation := context.AfterFunc(ctx, cancelOperation)
@@ -82,8 +83,8 @@ func (c *Client) Acquire(
 	}()
 
 	collectionContext, cancelCollection := context.WithCancel(lease.ctx)
-	submissions := make(chan acquireSubmission, ServerCount)
-	results := make(chan acquireReplicaResult, ServerCount)
+	submissions := make(chan acquireSubmission, serverCount)
+	results := make(chan acquireReplicaResult, serverCount)
 
 	for replica := range c.replicas {
 		request := newAcquireRequest(lease.key, id, ttl)
@@ -99,7 +100,7 @@ func (c *Client) Acquire(
 
 	// A Release cleanup may only be submitted after every Acquire submission
 	// attempt has crossed (or definitively failed before) its stream barrier.
-	for range ServerCount {
+	for range serverCount {
 		<-submissions
 	}
 
@@ -111,15 +112,15 @@ func (c *Client) Acquire(
 	}
 
 	var (
-		candidates   [ServerCount]uint64
-		successful   [ServerCount]bool
+		candidates   = make([]uint64, serverCount)
+		successful   = make([]bool, serverCount)
 		firstFailure error
 		keyLimitSeen bool
 		largeKeySeen bool
 		received     int
 	)
 
-	for received < ServerCount {
+	for received < serverCount {
 		select {
 		case result := <-results:
 			received++
@@ -138,11 +139,15 @@ func (c *Client) Acquire(
 					lease.markConfirmed(result.replica, candidates[result.replica])
 				}
 
-				validUntil, hasQuorum := bestAcquireQuorum(candidates, successful)
+				validUntil, hasQuorum := bestAcquireQuorum(
+					candidates,
+					successful,
+					quorumSize,
+				)
 				if hasQuorum && now < validUntil {
 					if err := c.acquireCancellationError(ctx); err != nil {
 						firstFailure = err
-						received = ServerCount
+						received = serverCount
 						break
 					}
 
@@ -152,7 +157,7 @@ func (c *Client) Acquire(
 						lease,
 						operationStart,
 						results,
-						ServerCount-received,
+						serverCount-received,
 					)
 					return lease, nil
 				}
@@ -168,18 +173,19 @@ func (c *Client) Acquire(
 			if !acquireQuorumStillPossible(
 				candidates,
 				successful,
-				ServerCount-received,
+				serverCount-received,
 				boottime.Now(),
+				quorumSize,
 			) {
-				received = ServerCount
+				received = serverCount
 			}
 
 		case <-ctx.Done():
 			firstFailure = ctx.Err()
-			received = ServerCount
+			received = serverCount
 		case <-c.ctx.Done():
 			firstFailure = ErrClientClosed
-			received = ServerCount
+			received = serverCount
 		}
 	}
 
@@ -264,10 +270,11 @@ func (c *Client) collectRemainingAcquireResults(
 }
 
 func acquireQuorumStillPossible(
-	candidates [ServerCount]uint64,
-	successful [ServerCount]bool,
+	candidates []uint64,
+	successful []bool,
 	remaining int,
 	now uint64,
+	quorumSize int,
 ) bool {
 	usable := 0
 	for replica, success := range successful {
@@ -283,10 +290,11 @@ func (c *Client) cleanupFailedAcquire(key []byte, id leaseID) {
 }
 
 func bestAcquireQuorum(
-	candidates [ServerCount]uint64,
-	successful [ServerCount]bool,
+	candidates []uint64,
+	successful []bool,
+	quorumSize int,
 ) (uint64, bool) {
-	validities := make([]uint64, 0, ServerCount)
+	validities := make([]uint64, 0, len(candidates))
 	for replica, success := range successful {
 		if success {
 			validities = append(validities, candidates[replica])

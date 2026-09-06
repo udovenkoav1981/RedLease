@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -17,7 +18,7 @@ func TestLeaseRenewExtendsValidity(t *testing.T) {
 
 	result := startLeaseRenew(lease, context.Background(), 3_000)
 	requests := harness.receiveRenewRequests(t)
-	for replica := range quorumSize {
+	for replica := range testQuorumSize {
 		harness.respondRenew(replica, requests[replica], redleasev1.LeaseStatus_LEASE_STATUS_OK, 3_000)
 	}
 
@@ -35,7 +36,7 @@ func TestLeaseRenewExtendsValidity(t *testing.T) {
 		t.Fatalf("Renew changed healing requestedTTL to %d", lease.requestedTTL)
 	}
 
-	for replica := quorumSize; replica < ServerCount; replica++ {
+	for replica := testQuorumSize; replica < testServerCount; replica++ {
 		harness.respondRenew(replica, requests[replica], redleasev1.LeaseStatus_LEASE_STATUS_OK, 3_000)
 	}
 }
@@ -70,7 +71,7 @@ func TestLateAcquireResponseKeepsAcquireNowAfterRenewStarts(t *testing.T) {
 		2_000,
 	)
 	acquireRequests := harness.receiveAcquireRequests(t)
-	for replica := range quorumSize {
+	for replica := range testQuorumSize {
 		harness.respondAcquire(
 			replica,
 			acquireRequests[replica],
@@ -87,7 +88,7 @@ func TestLateAcquireResponseKeepsAcquireNowAfterRenewStarts(t *testing.T) {
 	time.Sleep(time.Millisecond)
 	renewResult := startLeaseRenew(acquired.lease, context.Background(), 2_000)
 	renewRequests := harness.receiveRenewRequests(t)
-	for replica := range quorumSize {
+	for replica := range testQuorumSize {
 		harness.respondRenew(
 			replica,
 			renewRequests[replica],
@@ -141,7 +142,7 @@ func TestLeaseFailedRenewKeepsPreviousValidity(t *testing.T) {
 	if !lease.Valid() {
 		t.Fatal("failed Renew revoked the previous live quorum")
 	}
-	waitForConfirmedReplicas(t, lease, [ServerCount]bool{true, true, false, false, false})
+	waitForConfirmedReplicas(t, lease, [testServerCount]bool{true, true, false, false, false})
 }
 
 func TestLeaseRenewCanUseQuorumAfterUnacceptedSubmitTimesOut(t *testing.T) {
@@ -157,7 +158,7 @@ func TestLeaseRenewCanUseQuorumAfterUnacceptedSubmitTimesOut(t *testing.T) {
 	harness.streams[4].waitForSendAttempt(t)
 
 	result := startLeaseRenew(lease, context.Background(), 3_000)
-	var requests [ServerCount - 1]*redleasev1.ClientRequest
+	var requests [testServerCount - 1]*redleasev1.ClientRequest
 	for replica := range requests {
 		request := receiveSentRequest(t, harness.streams[replica])
 		if request.GetRenew() == nil {
@@ -165,7 +166,7 @@ func TestLeaseRenewCanUseQuorumAfterUnacceptedSubmitTimesOut(t *testing.T) {
 		}
 		requests[replica] = request
 	}
-	for replica := range quorumSize {
+	for replica := range testQuorumSize {
 		harness.respondRenew(replica, requests[replica], redleasev1.LeaseStatus_LEASE_STATUS_OK, 3_000)
 	}
 
@@ -220,7 +221,7 @@ func TestLeaseConcurrentRenewAndReleasePreservesWireOrderAndNoResurrection(t *te
 	if lease.Valid() || lease.RemainingTTL() != 0 {
 		t.Fatal("late Renew resurrected released lease")
 	}
-	if got := lease.confirmedReplicas(); got != [ServerCount]bool{} {
+	if got := lease.confirmedReplicas(); !slices.Equal(got, make([]bool, testServerCount)) {
 		t.Fatalf("late Renew restored confirmations: %v", got)
 	}
 }
@@ -272,7 +273,7 @@ func TestFailedAcquireCleanupRetriesAfterReplicaReconnect(t *testing.T) {
 	failed := receiveAcquireCallResult(t, result)
 	assertNotAcquired(t, failed.err)
 
-	for replica := range ServerCount - 1 {
+	for replica := range testServerCount - 1 {
 		release := receiveReleaseRequest(t, harness.streams[replica])
 		harness.respondRelease(replica, release)
 	}
@@ -298,7 +299,7 @@ func TestConfirmedReplicaExpiresIndependently(t *testing.T) {
 	result := startClientAcquire(harness.client, context.Background(), []byte("confirmed-expiry"), 2_000)
 	requests := harness.receiveAcquireRequests(t)
 
-	for replica := range quorumSize {
+	for replica := range testQuorumSize {
 		harness.respondAcquire(replica, requests[replica], redleasev1.LeaseStatus_LEASE_STATUS_OK, 2_000)
 	}
 	acquired := receiveAcquireCallResult(t, result)
@@ -307,13 +308,13 @@ func TestConfirmedReplicaExpiresIndependently(t *testing.T) {
 	}
 	harness.respondAcquire(3, requests[3], redleasev1.LeaseStatus_LEASE_STATUS_OK, 500)
 	harness.respondAcquire(4, requests[4], redleasev1.LeaseStatus_LEASE_STATUS_OK, 2_000)
-	waitForConfirmedReplicas(t, acquired.lease, [ServerCount]bool{true, true, true, true, true})
+	waitForConfirmedReplicas(t, acquired.lease, [testServerCount]bool{true, true, true, true, true})
 
 	acquired.lease.stateMu.Lock()
 	acquired.lease.confirmedUntil[3] = boottime.Now()
 	acquired.lease.stateMu.Unlock()
-	want := [ServerCount]bool{true, true, true, false, true}
-	if got := acquired.lease.confirmedReplicas(); got != want {
+	want := [testServerCount]bool{true, true, true, false, true}
+	if got := acquired.lease.confirmedReplicas(); !slices.Equal(got, want[:]) {
 		t.Fatalf("confirmed replicas after expiry = %v, want %v", got, want)
 	}
 	if !acquired.lease.Valid() {
@@ -341,7 +342,7 @@ func acquireFullyConfirmedLease(
 	if acquired.err != nil {
 		t.Fatalf("Acquire: %v", acquired.err)
 	}
-	waitForConfirmedReplicas(t, acquired.lease, [ServerCount]bool{true, true, true, true, true})
+	waitForConfirmedReplicas(t, acquired.lease, [testServerCount]bool{true, true, true, true, true})
 	return acquired.lease
 }
 
@@ -362,9 +363,9 @@ func receiveRenewResult(t *testing.T, result <-chan renewCallResult) error {
 	}
 }
 
-func (h *acquireHarness) receiveRenewRequests(t *testing.T) [ServerCount]*redleasev1.ClientRequest {
+func (h *acquireHarness) receiveRenewRequests(t *testing.T) [testServerCount]*redleasev1.ClientRequest {
 	t.Helper()
-	var requests [ServerCount]*redleasev1.ClientRequest
+	var requests [testServerCount]*redleasev1.ClientRequest
 	for replica, stream := range h.streams {
 		request := receiveSentRequest(t, stream)
 		if request.GetRenew() == nil {
@@ -391,9 +392,9 @@ func (h *acquireHarness) respondRenew(
 	}
 }
 
-func (h *acquireHarness) receiveReleaseRequests(t *testing.T) [ServerCount]*redleasev1.ClientRequest {
+func (h *acquireHarness) receiveReleaseRequests(t *testing.T) [testServerCount]*redleasev1.ClientRequest {
 	t.Helper()
-	var requests [ServerCount]*redleasev1.ClientRequest
+	var requests [testServerCount]*redleasev1.ClientRequest
 	for replica, stream := range h.streams {
 		requests[replica] = receiveReleaseRequest(t, stream)
 	}

@@ -19,6 +19,8 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 )
 
+const integrationServerCount = 5
+
 func TestClientAndServersEndToEnd(t *testing.T) {
 	t.Parallel()
 	cluster := newIntegrationCluster(t)
@@ -102,7 +104,7 @@ func TestClientAcquiresWithTwoUnavailableServersEndToEnd(t *testing.T) {
 
 func TestClientUsesHeterogeneousServerTTLsEndToEnd(t *testing.T) {
 	t.Parallel()
-	cluster := newIntegrationClusterWithTTLs(t, [redleaseclient.ServerCount]time.Duration{
+	cluster := newIntegrationClusterWithTTLs(t, [integrationServerCount]time.Duration{
 		1 * time.Second,
 		2 * time.Second,
 		3 * time.Second,
@@ -198,7 +200,7 @@ func TestFullClusterRestartDoesNotRestoreOldLeaseEndToEnd(t *testing.T) {
 		t.Fatalf("Acquire before full restart: %v", err)
 	}
 
-	for index := range redleaseclient.ServerCount {
+	for index := range integrationServerCount {
 		cluster.restartReplica(t, index)
 	}
 
@@ -325,16 +327,16 @@ func TestServerKeySizeLimitOverGRPC(t *testing.T) {
 
 type integrationCluster struct {
 	mu          sync.RWMutex
-	listeners   [redleaseclient.ServerCount]*bufconn.Listener
-	grpcServers [redleaseclient.ServerCount]*grpc.Server
-	lockServers [redleaseclient.ServerCount]*redleaseserver.Server
-	ttls        [redleaseclient.ServerCount]time.Duration
+	listeners   [integrationServerCount]*bufconn.Listener
+	grpcServers [integrationServerCount]*grpc.Server
+	lockServers [integrationServerCount]*redleaseserver.Server
+	ttls        [integrationServerCount]time.Duration
 	maxKeys     uint64
 }
 
 func newIntegrationCluster(t *testing.T) *integrationCluster {
 	t.Helper()
-	var ttls [redleaseclient.ServerCount]time.Duration
+	var ttls [integrationServerCount]time.Duration
 	for index := range ttls {
 		ttls[index] = redleaseserver.ProtocolMaxTTL
 	}
@@ -343,7 +345,7 @@ func newIntegrationCluster(t *testing.T) *integrationCluster {
 
 func newIntegrationClusterWithMaxKeys(t *testing.T, maxKeys uint64) *integrationCluster {
 	t.Helper()
-	var ttls [redleaseclient.ServerCount]time.Duration
+	var ttls [integrationServerCount]time.Duration
 	for index := range ttls {
 		ttls[index] = redleaseserver.ProtocolMaxTTL
 	}
@@ -352,7 +354,7 @@ func newIntegrationClusterWithMaxKeys(t *testing.T, maxKeys uint64) *integration
 
 func newIntegrationClusterWithTTLs(
 	t *testing.T,
-	ttls [redleaseclient.ServerCount]time.Duration,
+	ttls [integrationServerCount]time.Duration,
 ) *integrationCluster {
 	t.Helper()
 	return newIntegrationClusterWithConfig(t, ttls, 0)
@@ -360,13 +362,13 @@ func newIntegrationClusterWithTTLs(
 
 func newIntegrationClusterWithConfig(
 	t *testing.T,
-	ttls [redleaseclient.ServerCount]time.Duration,
+	ttls [integrationServerCount]time.Duration,
 	maxKeys uint64,
 ) *integrationCluster {
 	t.Helper()
 	cluster := &integrationCluster{ttls: ttls, maxKeys: maxKeys}
 
-	for index := range redleaseclient.ServerCount {
+	for index := range integrationServerCount {
 		cluster.startReplica(t, index)
 	}
 	return cluster
@@ -376,6 +378,8 @@ func (c *integrationCluster) newClient(t *testing.T, clientID uint32) *redleasec
 	t.Helper()
 	config := redleaseclient.Config{
 		ClientID:        clientID,
+		Quorum:          redleaseclient.Quorum3Of5,
+		Servers:         make([]redleaseclient.ServerConfig, integrationServerCount),
 		ResponseTimeout: 500,
 	}
 	for index := range c.listeners {
@@ -399,7 +403,7 @@ func (c *integrationCluster) newClient(t *testing.T, clientID uint32) *redleasec
 }
 
 func (c *integrationCluster) close() {
-	for index := range redleaseclient.ServerCount {
+	for index := range integrationServerCount {
 		c.stopReplica(index)
 	}
 }

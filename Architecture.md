@@ -14,8 +14,10 @@ RedLease — специализированный quorum-based distributed lease
 Ключевые решения:
 
 ```text
-Servers                    5 independent lock-servers
-Quorum                     3 of 5
+Supported configurations   1/1, 2/3, 3/5 (quorum/servers)
+Configured server count    N = 1, 3 or 5
+Configured quorum size     Q = 1, 2 or 3 respectively
+Failure tolerance          F = N - Q = 0, 1 or 2 respectively
 Storage                    RAM only
 Disk persistence           none
 Default per-server maxKeys 10 000
@@ -28,9 +30,9 @@ Lease time source          Linux `CLOCK_BOOTTIME`
 Wire TTL representation    uint64 milliseconds
 Leader                     none
 Server-to-server hot path  none
-Client transport           5 persistent ordered gRPC streams
-Initial ownership          >= 3/5
-Steady-state target        5/5
+Client transport           N persistent ordered gRPC streams
+Initial ownership          >= Q/N
+Steady-state target        N/N
 Restart protection         quarantine > protocolMaxTTL + safetyMargin
 Forced lease overwrite     forbidden
 Global fencing token       none
@@ -38,23 +40,27 @@ Global fencing token       none
 
 - Архитектура не использует leader-based replicated log. 
 - Серверы не обмениваются сообщениями друг с другом, и ни чего друг о друге не знают
-- Membership статический. Все клиенты используют одну и ту же конфигурацию из пяти серверов.
-- клиент независимо и параллельно обращается ко всем lock-server.
+- Membership статический. Все клиенты используют одну и ту же quorum-конфигурацию
+  и один и тот же набор из `N` серверов.
+- Клиент независимо и параллельно обращается ко всем `N` lock-server.
+
+В публичном client config конфигурация выбирается обязательным enum-полем
+`Quorum`: `Quorum1Of1`, `Quorum2Of3` или `Quorum3Of5`. Поле `Servers` содержит
+ровно `N` элементов. Нулевое или неизвестное значение enum и несовпадающее
+число серверов отклоняются при создании клиента.
 
 ## 2. Топология общения клиент-сервер
 
 В штатном Acquire или Renew клиент делает параллельный fan-out на все серверы:
 
 ```text
-             -> S1
-             -> S2
-client       -> S3
-             -> S4
-             -> S5
+client       -> S1
+             -> ...
+             `-> SN
 ```
 
-Критический путь заканчивается после третьего успешного ответа, поэтому latency
-примерно равна RTT до третьего по скорости сервера.
+Критический путь заканчивается после `Q`-го успешного ответа, поэтому latency
+примерно равна RTT до `Q`-го по скорости сервера.
 
 ## 3. Состояние lock-server
 
@@ -132,8 +138,8 @@ GetTTL()
 ### 5.1. Acquire
 
 Клиент создаёт новый `leaseID`, фиксирует локальное время начала операции и
-одновременно отправляет `Acquire(key, leaseID, requestedTTL)` всем пяти
-серверам.
+одновременно отправляет `Acquire(key, leaseID, requestedTTL)` всем `N`
+серверам выбранной конфигурации.
 
 Каждый server локально атомарно выполняет:
 
@@ -167,19 +173,19 @@ server deadline на момент формирования ответа.
 `KEY_LIMIT_REACHED` относится только к созданию нового key. Уже существующий
 активный key при заполненном server продолжает возвращать `ALREADY_OWNED` или
 `BUSY`, а Renew существующего lease не требует новой reservation. Клиент может
-собрать quorum на других серверах; если 3/5 недостижимы, действуют обычные
+собрать quorum на других серверах; если `Q/N` недостижим, действуют обычные
 правила failed Acquire и cleanup.
 
-Клиент устанавливает владение после трёх успешных реплик, если рассчитанный для
+Клиент устанавливает владение после `Q` успешных реплик, если рассчитанный для
 них `quorumValidUntil` ещё не достигнут, и сразу возвращает успех приложению.
 Оставшиеся запросы не блокируют этот результат и продолжают обрабатываться для
 background healing.
 
 ### 5.2. Cleanup после failed Acquire
 
-Результат меньше 3/5 означает, что клиент не получил lease. Даже если lease
-частично установлен на одном или двух серверах, клиент немедленно отправляет
-Release с тем же `leaseID` всем пяти серверам.
+Результат меньше `Q/N` означает, что клиент не получил lease. Даже если lease
+частично установлен на части серверов, клиент немедленно отправляет Release с
+тем же `leaseID` всем `N` серверам.
 
 Один вызов `Client.Acquire` выполняет ровно одну quorum-попытку. После cleanup
 он возвращает приложению `ErrNotAcquired` и сам не начинает новый Acquire.
@@ -188,12 +194,12 @@ Release с тем же `leaseID` всем пяти серверам.
 
 ### 5.3. Background healing и client-side Attach
 
-После commit threshold 3/5 клиент продолжает в фоне доводить активный lease до
-целевых 5/5 в целях повышения отказоустойчивости свого quorum и снижения вероятности 
-повторного конфликта конкурирующих клиентов:
+После commit threshold `Q/N` клиент продолжает в фоне доводить активный lease до
+целевых `N/N` в целях повышения отказоустойчивости своего quorum и снижения
+вероятности повторного конфликта конкурирующих клиентов:
 
 ```text
-3/5 -> 4/5 -> 5/5
+Q/N -> ... -> N/N
 ```
 
 `Attach` — только название логической операции внутри клиента. Она не является
@@ -214,7 +220,7 @@ restart сервера.
 ### 5.4. Renew
 
 Примерно раз в секунду клиент фиксирует локальное время начала Renew и
-параллельно отправляет `Renew(key, leaseID, requestedTTL)` всем пяти серверам.
+параллельно отправляет `Renew(key, leaseID, requestedTTL)` всем `N` серверам.
 
 Server локально атомарно выполняет:
 
@@ -231,11 +237,11 @@ deadline = max(deadline, now + effectiveTTL)
 return OK(ttl = deadline - now)
 ```
 
-Истёкший lease не воскрешается. После трёх `OK` Renew успешен и клиент обновляет
-`validUntil`. Если quorum не собран, прежний успешно подтверждённый quorum и
-`validUntil` остаются действительными до этого `validUntil`; потеря соединений
-не отзывает lease досрочно. Неуспешный Renew не продлевает `validUntil`, а клиент
-может повторять Renew в оставшемся окне validity.
+Истёкший lease не воскрешается. После `Q` ответов `OK` Renew успешен и клиент
+обновляет `validUntil`. Если quorum не собран, прежний успешно подтверждённый
+quorum и `validUntil` остаются действительными до этого `validUntil`; потеря
+соединений не отзывает lease досрочно. Неуспешный Renew не продлевает
+`validUntil`, а клиент может повторять Renew в оставшемся окне validity.
 
 ### 5.5. Release
 
@@ -334,7 +340,7 @@ timestamp по протоколу не передаётся.
 candidateValidUntil[i] = operationStart + response[i].ttl - safetyMargin
 ```
 
-Для подтверждения операции клиент выбирает quorum `Q` из трёх успешных ответов.
+Для подтверждения операции клиент выбирает quorum из `Q` успешных ответов.
 Локальная validity этого quorum равна минимальной validity его реплик:
 
 ```text
@@ -374,10 +380,8 @@ gRPC stream к каждому lock-server:
 ```text
 client
   |---- stream ---> S1
-  |---- stream ---> S2
-  |---- stream ---> S3
-  |---- stream ---> S4
-  `---- stream ---> S5
+  |---- stream ---> ...
+  `---- stream ---> SN
 ```
 
 Один stream multiplexes операции для множества ключей:
@@ -391,14 +395,14 @@ Acquire
 ```
 
 Streams независимы: slow или disconnected server не создаёт head-of-line
-blocking для остальных четырёх путей.
+blocking для остальных путей.
 
 Persistent streams:
 
 - убирают connection setup из hot path;
 - сохраняют порядок доставки запросов для пары client/server;
 - уменьшают RPC overhead;
-- позволяют обслуживать тысячи активных leases через пять соединений.
+- позволяют обслуживать тысячи активных leases через `N` соединений.
 
 Каждый запрос содержит `requestID`, уникальный в пределах одного stream. Server
 возвращает тот же `requestID` в ответе. Это correlation identifier, а не номер
@@ -470,8 +474,8 @@ REJOIN_DELAY > protocolMaxTTL + safetyMargin
 
 ## 9. Полный restart кластера
 
-При одновременном падении пяти серверов всё lock state теряется. После запуска
-каждый server независимо проходит обязательный quarantine.
+При одновременном падении всех `N` серверов всё lock state теряется. После
+запуска каждый server независимо проходит обязательный quarantine.
 
 Даже если процессы или операционные системы перезапустились быстрее пяти
 секунд, новый quorum не станет доступен раньше, чем истекут все leases,
@@ -493,8 +497,8 @@ restart.
 ## 10. Архитектурные инварианты
 
 ```text
-< 3 successful replicas -> client does not own lease
->=3 successful replicas -> client owns lease
-3/5                     -> commit threshold
-5/5                     -> desired steady state
+< Q successful replicas -> client does not own lease
+>=Q successful replicas -> client owns lease
+Q/N                     -> commit threshold
+N/N                     -> desired steady state
 ```

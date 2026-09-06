@@ -9,13 +9,61 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-func TestConfigRequiresAllFiveTargets(t *testing.T) {
+func TestConfigRequiresEverySelectedServerTarget(t *testing.T) {
 	config := validClientConfig()
 	config.Servers[3].Target = ""
 
 	err := config.Validate()
 	if err == nil || !strings.Contains(err.Error(), "server 3 target") {
 		t.Fatalf("Validate error = %v, want missing server 3 target", err)
+	}
+}
+
+func TestConfigAcceptsSupportedQuorumConfigurations(t *testing.T) {
+	tests := []struct {
+		name        string
+		quorum      Quorum
+		serverCount int
+	}{
+		{name: "one of one", quorum: Quorum1Of1, serverCount: 1},
+		{name: "two of three", quorum: Quorum2Of3, serverCount: 3},
+		{name: "three of five", quorum: Quorum3Of5, serverCount: 5},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := Config{
+				Quorum:  test.quorum,
+				Servers: make([]ServerConfig, test.serverCount),
+			}
+			for index := range config.Servers {
+				config.Servers[index].Target = "test-target"
+			}
+
+			if err := config.Validate(); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+		})
+	}
+}
+
+func TestConfigRejectsUnsupportedQuorum(t *testing.T) {
+	config := Config{
+		Quorum:  Quorum(4),
+		Servers: make([]ServerConfig, 4),
+	}
+
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "unsupported quorum") {
+		t.Fatalf("Validate error = %v, want unsupported quorum", err)
+	}
+}
+
+func TestConfigRejectsServerCountMismatch(t *testing.T) {
+	config := validClientConfig()
+	config.Servers = config.Servers[:len(config.Servers)-1]
+
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "requires 5 servers") {
+		t.Fatalf("Validate error = %v, want server count mismatch", err)
 	}
 }
 
@@ -61,7 +109,10 @@ func TestNewConvertsResponseTimeoutFromMilliseconds(t *testing.T) {
 }
 
 func validClientConfig() Config {
-	var config Config
+	config := Config{
+		Quorum:  testQuorum,
+		Servers: make([]ServerConfig, testServerCount),
+	}
 	for index := range config.Servers {
 		config.Servers[index].Target = "test-target"
 	}

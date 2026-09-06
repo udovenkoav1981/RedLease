@@ -16,7 +16,7 @@ func TestBackgroundHealingRetriesMissingReplicasToFiveOfFive(t *testing.T) {
 	result := startClientAcquire(harness.client, context.Background(), []byte("heal"), 2_000)
 	initial := harness.receiveAcquireRequests(t)
 
-	for replica := range quorumSize {
+	for replica := range testQuorumSize {
 		harness.respondAcquire(
 			replica,
 			initial[replica],
@@ -30,7 +30,7 @@ func TestBackgroundHealingRetriesMissingReplicasToFiveOfFive(t *testing.T) {
 	}
 	originalValidUntil := leaseValidUntil(acquired.lease)
 
-	for replica := quorumSize; replica < ServerCount; replica++ {
+	for replica := testQuorumSize; replica < testServerCount; replica++ {
 		harness.respondAcquire(
 			replica,
 			initial[replica],
@@ -49,7 +49,7 @@ func TestBackgroundHealingRetriesMissingReplicasToFiveOfFive(t *testing.T) {
 	waitForConfirmedReplicas(
 		t,
 		acquired.lease,
-		[ServerCount]bool{true, true, true, true, false},
+		[testServerCount]bool{true, true, true, true, false},
 	)
 
 	secondFifth := receiveAcquireRequest(t, harness.streams[4])
@@ -58,7 +58,7 @@ func TestBackgroundHealingRetriesMissingReplicasToFiveOfFive(t *testing.T) {
 	waitForConfirmedReplicas(
 		t,
 		acquired.lease,
-		[ServerCount]bool{true, true, true, true, true},
+		[testServerCount]bool{true, true, true, true, true},
 	)
 
 	if got := leaseValidUntil(acquired.lease); got != originalValidUntil {
@@ -72,7 +72,7 @@ func TestBackgroundHealingReattachesReplicaAfterStaleRenew(t *testing.T) {
 
 	renewResult := startLeaseRenew(lease, context.Background(), 3_000)
 	renewRequests := harness.receiveRenewRequests(t)
-	for replica := range ServerCount {
+	for replica := range testServerCount {
 		status := redleasev1.LeaseStatus_LEASE_STATUS_OK
 		if replica == 4 {
 			status = redleasev1.LeaseStatus_LEASE_STATUS_STALE
@@ -86,7 +86,7 @@ func TestBackgroundHealingReattachesReplicaAfterStaleRenew(t *testing.T) {
 	waitForConfirmedReplicas(
 		t,
 		lease,
-		[ServerCount]bool{true, true, true, true, false},
+		[testServerCount]bool{true, true, true, true, false},
 	)
 
 	healing := receiveAcquireRequest(t, harness.streams[4])
@@ -100,7 +100,7 @@ func TestBackgroundHealingReattachesReplicaAfterStaleRenew(t *testing.T) {
 		t.Fatal("healing after stale Renew used a different lease ID")
 	}
 	harness.respondAcquire(4, healing, redleasev1.LeaseStatus_LEASE_STATUS_OK, 2_000)
-	waitForConfirmedReplicas(t, lease, [ServerCount]bool{true, true, true, true, true})
+	waitForConfirmedReplicas(t, lease, [testServerCount]bool{true, true, true, true, true})
 
 	if got := leaseValidUntil(lease); got != renewedValidUntil {
 		t.Fatalf("healing changed renewed validity from %d to %d", renewedValidUntil, got)
@@ -112,7 +112,7 @@ func TestBackgroundHealingContinuesAfterReplicaReconnect(t *testing.T) {
 	result := startClientAcquire(harness.client, context.Background(), []byte("reconnect-heal"), 5_000)
 	initial := harness.receiveAcquireRequests(t)
 
-	for replica := range quorumSize {
+	for replica := range testQuorumSize {
 		harness.respondAcquire(
 			replica,
 			initial[replica],
@@ -143,7 +143,7 @@ func TestBackgroundHealingContinuesAfterReplicaReconnect(t *testing.T) {
 	waitForConfirmedReplicas(
 		t,
 		acquired.lease,
-		[ServerCount]bool{true, true, true, true, true},
+		[testServerCount]bool{true, true, true, true, true},
 	)
 }
 
@@ -152,7 +152,7 @@ func TestBackgroundHealingStopsAfterLocalValidityExpires(t *testing.T) {
 	result := startClientAcquire(harness.client, context.Background(), []byte("expired-heal"), 1_000)
 	initial := harness.receiveAcquireRequests(t)
 
-	for replica := range quorumSize {
+	for replica := range testQuorumSize {
 		harness.respondAcquire(
 			replica,
 			initial[replica],
@@ -168,7 +168,7 @@ func TestBackgroundHealingStopsAfterLocalValidityExpires(t *testing.T) {
 	acquired.lease.stateMu.Lock()
 	acquired.lease.validUntil = boottime.Now()
 	acquired.lease.stateMu.Unlock()
-	for replica := quorumSize; replica < ServerCount; replica++ {
+	for replica := testQuorumSize; replica < testServerCount; replica++ {
 		harness.respondAcquire(
 			replica,
 			initial[replica],
@@ -177,7 +177,7 @@ func TestBackgroundHealingStopsAfterLocalValidityExpires(t *testing.T) {
 		)
 	}
 
-	for replica := quorumSize; replica < ServerCount; replica++ {
+	for replica := testQuorumSize; replica < testServerCount; replica++ {
 		select {
 		case request := <-harness.streams[replica].sent:
 			t.Fatalf("replica %d received healing after validity expired: %+v", replica, request)
@@ -191,7 +191,7 @@ func TestBackgroundHealingStopsBeforeReleaseSubmission(t *testing.T) {
 	result := startClientAcquire(harness.client, context.Background(), []byte("release-heal"), 2_000)
 	initial := harness.receiveAcquireRequests(t)
 
-	for replica := range quorumSize {
+	for replica := range testQuorumSize {
 		harness.respondAcquire(
 			replica,
 			initial[replica],
@@ -203,7 +203,7 @@ func TestBackgroundHealingStopsBeforeReleaseSubmission(t *testing.T) {
 	if acquired.err != nil {
 		t.Fatalf("Acquire: %v", acquired.err)
 	}
-	for replica := quorumSize; replica < ServerCount; replica++ {
+	for replica := testQuorumSize; replica < testServerCount; replica++ {
 		harness.respondAcquire(
 			replica,
 			initial[replica],
@@ -212,7 +212,7 @@ func TestBackgroundHealingStopsBeforeReleaseSubmission(t *testing.T) {
 		)
 	}
 
-	for replica := quorumSize; replica < ServerCount; replica++ {
+	for replica := testQuorumSize; replica < testServerCount; replica++ {
 		healing := receiveAcquireRequest(t, harness.streams[replica])
 		assertHealingAcquire(t, healing, initial[replica])
 	}
@@ -238,7 +238,7 @@ func TestBackgroundHealingDoesNotAcquireAfterReleaseAndReconnect(t *testing.T) {
 	result := startClientAcquire(harness.client, context.Background(), []byte("release-reconnect"), 2_000)
 	initial := harness.receiveAcquireRequests(t)
 
-	for replica := range quorumSize {
+	for replica := range testQuorumSize {
 		harness.respondAcquire(
 			replica,
 			initial[replica],
@@ -255,7 +255,7 @@ func TestBackgroundHealingDoesNotAcquireAfterReleaseAndReconnect(t *testing.T) {
 	waitForReplicaState(t, harness.client.replicas[4], false, false)
 	acquired.lease.Release()
 
-	for replica := range ServerCount - 1 {
+	for replica := range testServerCount - 1 {
 		release := receiveReleaseRequest(t, harness.streams[replica])
 		harness.respondRelease(replica, release)
 	}

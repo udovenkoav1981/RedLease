@@ -43,7 +43,7 @@ type renewReplicaResult struct {
 	err      error
 }
 
-// Renew attempts to extend this lease on any three replicas. Failure leaves
+// Renew attempts to extend this lease on a configured quorum. Failure leaves
 // the previously confirmed validUntil unchanged.
 func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 	l.renewMu.Lock()
@@ -53,6 +53,8 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 	if !started {
 		return &notRenewedError{cause: ErrLeaseReleased}
 	}
+	serverCount := len(l.client.replicas)
+	quorumSize := l.client.quorum.size()
 	batchActive := true
 	defer func() {
 		if batchActive {
@@ -68,8 +70,8 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 	}()
 
 	collectionContext, cancelCollection := context.WithCancel(l.ctx)
-	submissions := make(chan acquireSubmission, ServerCount)
-	results := make(chan renewReplicaResult, ServerCount)
+	submissions := make(chan acquireSubmission, serverCount)
+	results := make(chan renewReplicaResult, serverCount)
 
 	for replica := range l.client.replicas {
 		request := newRenewRequest(l.key, l.id, ttl)
@@ -83,7 +85,7 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 		)
 	}
 
-	for range ServerCount {
+	for range serverCount {
 		<-submissions
 	}
 	l.endSubmitBatch()
@@ -94,20 +96,20 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 			cancelCollection,
 			operationStart,
 			results,
-			ServerCount,
+			serverCount,
 		)
 		return &notRenewedError{cause: err}
 	}
 
 	var (
-		candidates   [ServerCount]uint64
-		successful   [ServerCount]bool
+		candidates   = make([]uint64, serverCount)
+		successful   = make([]bool, serverCount)
 		firstFailure error
 		received     int
 	)
 
 	collecting := true
-	for received < ServerCount && collecting {
+	for received < serverCount && collecting {
 		select {
 		case result := <-results:
 			received++
@@ -132,7 +134,11 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 					l.clearConfirmed(result.replica)
 				}
 
-				quorumValidUntil, hasQuorum := bestAcquireQuorum(candidates, successful)
+				quorumValidUntil, hasQuorum := bestAcquireQuorum(
+					candidates,
+					successful,
+					quorumSize,
+				)
 				if hasQuorum && now < quorumValidUntil {
 					if err := l.renewCancellationError(ctx); err != nil {
 						firstFailure = err
@@ -148,7 +154,7 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 						cancelCollection,
 						operationStart,
 						results,
-						ServerCount-received,
+						serverCount-received,
 					)
 					return nil
 				}
@@ -157,8 +163,9 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 			if !acquireQuorumStillPossible(
 				candidates,
 				successful,
-				ServerCount-received,
+				serverCount-received,
 				boottime.Now(),
+				quorumSize,
 			) {
 				collecting = false
 			}
@@ -172,7 +179,7 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 		}
 	}
 
-	if remaining := ServerCount - received; remaining > 0 {
+	if remaining := serverCount - received; remaining > 0 {
 		go l.collectRemainingRenewResults(
 			cancelCollection,
 			operationStart,

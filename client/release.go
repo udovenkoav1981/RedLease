@@ -16,8 +16,8 @@ type releaseSubmission struct {
 }
 
 // Release immediately makes the local lease invalid and asynchronously sends
-// an idempotent best-effort Release to all five replicas. Repeated calls do
-// nothing.
+// an idempotent best-effort Release to all configured replicas. Repeated calls
+// do nothing.
 func (l *Lease) Release() {
 	l.releaseOnce.Do(func() {
 		l.startRelease()
@@ -28,10 +28,11 @@ func (l *Lease) Release() {
 // releaseAll waits for one submission attempt on every replica, then leaves
 // response handling and bounded retries in the background.
 func (c *Client) releaseAll(key []byte, id leaseID) {
+	serverCount := len(c.replicas)
 	retryContext, cancelRetries := context.WithTimeout(c.ctx, releaseRetryWindow(c.responseTimeout))
 	initialContext, cancelInitial := context.WithTimeout(retryContext, c.responseTimeout)
 
-	submissions := make(chan releaseSubmission, ServerCount)
+	submissions := make(chan releaseSubmission, serverCount)
 	for replica := range c.replicas {
 		request := newReleaseRequest(key, id)
 		go func() {
@@ -40,14 +41,14 @@ func (c *Client) releaseAll(key []byte, id leaseID) {
 		}()
 	}
 
-	initial := make([]releaseSubmission, 0, ServerCount)
-	for range ServerCount {
+	initial := make([]releaseSubmission, 0, serverCount)
+	for range serverCount {
 		initial = append(initial, <-submissions)
 	}
 	cancelInitial()
 
 	var retries sync.WaitGroup
-	retries.Add(ServerCount)
+	retries.Add(serverCount)
 	for _, submission := range initial {
 		go func() {
 			defer retries.Done()

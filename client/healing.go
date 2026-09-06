@@ -43,7 +43,7 @@ func (l *Lease) healingTargets() ([]int, bool) {
 		return nil, false
 	}
 
-	targets := make([]int, 0, ServerCount)
+	targets := make([]int, 0, len(l.confirmedUntil))
 	for replica, confirmedUntil := range l.confirmedUntil {
 		if now >= confirmedUntil {
 			targets = append(targets, replica)

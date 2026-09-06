@@ -9,7 +9,7 @@ import (
 )
 
 func TestLeaseValidityUsesBootTimeBoundary(t *testing.T) {
-	client := &Client{ctx: context.Background()}
+	client := testLeaseClient()
 	lease := newLease(client, leaseID{}, []byte("key"), 1_000)
 	lease.setAcquireValidity(boottime.Add(boottime.Now(), 1_000))
 
@@ -30,7 +30,7 @@ func TestLeaseValidityUsesBootTimeBoundary(t *testing.T) {
 }
 
 func TestLeaseConfirmationCannotBeShortenedByOlderResponse(t *testing.T) {
-	client := &Client{ctx: context.Background()}
+	client := testLeaseClient()
 	lease := newLease(client, leaseID{}, []byte("key"), 1_000)
 	now := boottime.Now()
 	later := boottime.Add(now, 2_000)
@@ -44,7 +44,7 @@ func TestLeaseConfirmationCannotBeShortenedByOlderResponse(t *testing.T) {
 }
 
 func TestLeaseImmutableGettersAndConcurrentState(t *testing.T) {
-	client := &Client{ctx: context.Background()}
+	client := testLeaseClient()
 	key := []byte("key")
 	lease := newLease(client, leaseID{clientID: 1, bootID: 2, sequence: 3}, key, 1_000)
 	lease.setAcquireValidity(boottime.Add(boottime.Now(), 1_000))
@@ -55,7 +55,7 @@ func TestLeaseImmutableGettersAndConcurrentState(t *testing.T) {
 	go func() {
 		defer close(done)
 		for iteration := range iterations {
-			lease.markConfirmed(iteration%ServerCount, boottime.Add(boottime.Now(), 1_000))
+			lease.markConfirmed(iteration%testServerCount, boottime.Add(boottime.Now(), 1_000))
 		}
 	}()
 	for range iterations {
@@ -67,4 +67,12 @@ func TestLeaseImmutableGettersAndConcurrentState(t *testing.T) {
 		}
 	}
 	<-done
+}
+
+func testLeaseClient() *Client {
+	return &Client{
+		quorum:   testQuorum,
+		replicas: make([]*replicaConn, testServerCount),
+		ctx:      context.Background(),
+	}
 }

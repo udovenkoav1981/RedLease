@@ -16,11 +16,12 @@ type ServerConfig struct {
 	DialOptions []grpc.DialOption
 }
 
-// Config controls a RedLease client process. Servers is an array so an
-// incorrectly sized cluster cannot be passed to the client API.
+// Config controls a RedLease client process. Servers must contain exactly the
+// number of lock-servers selected by Quorum.
 type Config struct {
 	ClientID uint32
-	Servers  [ServerCount]ServerConfig
+	Quorum   Quorum
+	Servers  []ServerConfig
 
 	// ResponseTimeout bounds each individual server response in milliseconds.
 	// Zero selects the implementation default.
@@ -30,6 +31,18 @@ type Config struct {
 // Validate checks local values needed to construct a usable client. Cluster
 // membership and ID uniqueness remain deployment responsibilities.
 func (c Config) Validate() error {
+	serverCount, _, valid := c.Quorum.parameters()
+	if !valid {
+		return fmt.Errorf("unsupported quorum configuration %d", uint8(c.Quorum))
+	}
+	if len(c.Servers) != serverCount {
+		return fmt.Errorf(
+			"quorum configuration %s requires %d servers, got %d",
+			c.Quorum,
+			serverCount,
+			len(c.Servers),
+		)
+	}
 	for index, server := range c.Servers {
 		if server.Target == "" {
 			return fmt.Errorf("server %d target is empty", index)

@@ -16,14 +16,15 @@ const defaultResponseTimeout = time.Second
 // ErrClientClosed is returned when an operation is attempted after Close.
 var ErrClientClosed = errors.New("RedLease client closed")
 
-// Client owns one persistent reconnecting stream to each of the five
-// configured lock-servers.
+// Client owns one persistent reconnecting stream to each configured
+// lock-server.
 type Client struct {
 	clientID        uint32
-	servers         [ServerCount]ServerConfig
+	quorum          Quorum
+	servers         []ServerConfig
 	responseTimeout time.Duration
 
-	replicas [ServerCount]*replicaConn
+	replicas []*replicaConn
 
 	idGenerator *leaseIDGenerator
 
@@ -34,9 +35,9 @@ type Client struct {
 	closeErr  error
 }
 
-// New creates a client and starts connecting to all five servers. It does not
-// wait for a quorum; callers that need an explicit startup barrier can call
-// WaitReady.
+// New creates a client and starts connecting to all configured servers. It
+// does not wait for a quorum; callers that need an explicit startup barrier
+// can call WaitReady.
 func New(config Config) (*Client, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
@@ -44,6 +45,9 @@ func New(config Config) (*Client, error) {
 
 	client := &Client{
 		clientID: config.ClientID,
+		quorum:   config.Quorum,
+		servers:  make([]ServerConfig, len(config.Servers)),
+		replicas: make([]*replicaConn, len(config.Servers)),
 	}
 	if config.ResponseTimeout == 0 {
 		client.responseTimeout = defaultResponseTimeout
@@ -81,8 +85,8 @@ func New(config Config) (*Client, error) {
 	return client, nil
 }
 
-// WaitReady waits until at least three server streams are connected. It does
-// not perform GetTTL and does not mutate server state.
+// WaitReady waits until enough server streams for the configured quorum are
+// connected. It does not perform GetTTL and does not mutate server state.
 func (c *Client) WaitReady(ctx context.Context) error {
 	for {
 		if err := ctx.Err(); err != nil {
@@ -93,7 +97,7 @@ func (c *Client) WaitReady(ctx context.Context) error {
 		}
 
 		ready := 0
-		cases := make([]reflect.SelectCase, 0, ServerCount+2)
+		cases := make([]reflect.SelectCase, 0, len(c.replicas)+2)
 		cases = append(cases,
 			reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ctx.Done())},
 			reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(c.ctx.Done())},
@@ -109,7 +113,7 @@ func (c *Client) WaitReady(ctx context.Context) error {
 				Chan: reflect.ValueOf(changed),
 			})
 		}
-		if ready >= quorumSize {
+		if ready >= c.quorum.size() {
 			return nil
 		}
 

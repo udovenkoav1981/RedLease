@@ -37,7 +37,7 @@ type Lease struct {
 	stateMu        sync.RWMutex
 	lifecycle      leaseLifecycle
 	validUntil     uint64
-	confirmedUntil [ServerCount]uint64
+	confirmedUntil []uint64
 	submitBatches  sync.WaitGroup
 
 	renewMu sync.Mutex
@@ -49,15 +49,16 @@ type Lease struct {
 func newLease(client *Client, id leaseID, key []byte, requestedTTL Milliseconds) *Lease {
 	ctx, cancel := context.WithCancel(client.ctx)
 	return &Lease{
-		client:       client,
-		id:           id,
-		key:          bytes.Clone(key),
-		requestedTTL: requestedTTL,
-		now:          boottime.Now(),
-		ctx:          ctx,
-		cancel:       cancel,
-		lifecycle:    leaseActive,
-		releaseDone:  make(chan struct{}),
+		client:         client,
+		id:             id,
+		key:            bytes.Clone(key),
+		requestedTTL:   requestedTTL,
+		now:            boottime.Now(),
+		confirmedUntil: make([]uint64, len(client.replicas)),
+		ctx:            ctx,
+		cancel:         cancel,
+		lifecycle:      leaseActive,
+		releaseDone:    make(chan struct{}),
 	}
 }
 
@@ -111,12 +112,12 @@ func (l *Lease) markConfirmed(replica int, confirmedUntil uint64) {
 	l.stateMu.Unlock()
 }
 
-func (l *Lease) confirmedReplicas() [ServerCount]bool {
+func (l *Lease) confirmedReplicas() []bool {
 	l.stateMu.RLock()
 	defer l.stateMu.RUnlock()
 	now := boottime.Now()
 
-	var confirmed [ServerCount]bool
+	confirmed := make([]bool, len(l.confirmedUntil))
 	if l.lifecycle != leaseActive {
 		return confirmed
 	}
@@ -175,7 +176,7 @@ func (l *Lease) startRelease() {
 	l.stateMu.Lock()
 	l.lifecycle = leaseReleasing
 	l.validUntil = 0
-	l.confirmedUntil = [ServerCount]uint64{}
+	clear(l.confirmedUntil)
 	l.stateMu.Unlock()
 	l.cancel()
 }
