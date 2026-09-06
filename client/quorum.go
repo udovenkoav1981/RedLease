@@ -19,19 +19,6 @@ const (
 	safetyMargin = Milliseconds(100)
 )
 
-func (q Quorum) String() string {
-	switch q {
-	case Quorum1Of1:
-		return "1/1"
-	case Quorum2Of3:
-		return "2/3"
-	case Quorum3Of5:
-		return "3/5"
-	default:
-		return "unknown"
-	}
-}
-
 func (q Quorum) parameters() (serverCount, quorumSize int, valid bool) {
 	switch q {
 	case Quorum1Of1:

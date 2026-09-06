@@ -37,8 +37,8 @@ func (c Config) Validate() error {
 	}
 	if len(c.Servers) != serverCount {
 		return fmt.Errorf(
-			"quorum configuration %s requires %d servers, got %d",
-			c.Quorum,
+			"quorum configuration %d requires %d servers, got %d",
+			uint8(c.Quorum),
 			serverCount,
 			len(c.Servers),
 		)

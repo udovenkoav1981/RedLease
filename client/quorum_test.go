@@ -154,12 +154,12 @@ func TestBestAcquireQuorumUsesEverySupportedThreshold(t *testing.T) {
 			successful[index] = true
 		}
 		if _, ok := bestAcquireQuorum(candidates, successful, quorumSize); ok {
-			t.Fatalf("quorum %s succeeded below threshold", quorum)
+			t.Fatalf("quorum %d succeeded below threshold", quorum)
 		}
 
 		successful[quorumSize-1] = true
 		if _, ok := bestAcquireQuorum(candidates, successful, quorumSize); !ok {
-			t.Fatalf("quorum %s did not succeed at threshold", quorum)
+			t.Fatalf("quorum %d did not succeed at threshold", quorum)
 		}
 	}
 }

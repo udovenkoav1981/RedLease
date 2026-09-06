@@ -53,8 +53,18 @@ func TestClientAcquireThreeOKEstablishesValidity(t *testing.T) {
 }
 
 func TestClientAcquireUsesEverySupportedQuorum(t *testing.T) {
-	for _, quorum := range []Quorum{Quorum1Of1, Quorum2Of3, Quorum3Of5} {
-		t.Run(quorum.String(), func(t *testing.T) {
+	tests := []struct {
+		name   string
+		quorum Quorum
+	}{
+		{name: "1-of-1", quorum: Quorum1Of1},
+		{name: "2-of-3", quorum: Quorum2Of3},
+		{name: "3-of-5", quorum: Quorum3Of5},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			quorum := test.quorum
 			client, factories := newClientForQuorum(quorum)
 			client.responseTimeout = 500 * time.Millisecond
 			generator, err := newLeaseIDGeneratorFromReader(
