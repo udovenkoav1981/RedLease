@@ -33,7 +33,7 @@ Server-to-server hot path  none
 Client transport           N persistent ordered gRPC streams
 Initial ownership          >= Q/N
 Steady-state target        N/N
-Restart protection         quarantine > protocolMaxTTL + safetyMargin
+Restart protection         built-in quarantine by default; explicit owner-managed opt-out
 Forced lease overwrite     forbidden
 Global fencing token       none
 Internal invariant failure controlled fail-stop + owner notification
@@ -471,8 +471,8 @@ submission barrier до отправки Release.
 ## 8. Restart quarantine
 
 После crash/restart server теряет все RAM-only leases. Чтобы пустой server не
-создал новый конфликтующий quorum, каждый процесс начинает работу в состоянии
-`QUARANTINE`:
+создал новый конфликтующий quorum, по умолчанию каждый экземпляр начинает
+работу в состоянии `QUARANTINE`:
 
 ```text
 server start
@@ -496,7 +496,20 @@ ACTIVE
 REJOIN_DELAY > protocolMaxTTL + safetyMargin
 ```
 
-Это server-side invariant. В `QUARANTINE` server отвечает на read-only
+Для embedded-сценария `server.Config.SkipRestartQuarantine = true` явно передаёт
+ответственность за эту задержку прикладному ПО. Такой экземпляр сразу создаётся
+в состоянии `ACTIVE`, и library не создаёт quarantine timer. До этого приложение
+обязано самостоятельно гарантировать, что с момента потери предыдущего
+RAM-состояния прошло не меньше публичной константы
+`server.RestartQuarantineDuration`, либо что предыдущих leases заведомо не было.
+Сам факт успешного вызова `server.New` эту внешнюю гарантию не проверяет.
+
+Standalone launcher не предоставляет флаг отключения и всегда использует
+встроенный quarantine. Таким образом, server-side enforcement остаётся
+безопасным default, а его отключение является явным opt-in владельца embedded
+library.
+
+В `QUARANTINE` server отвечает на read-only
 `GetTTL`, но никогда не возвращает `OK` на lease-операции. Поэтому только что
 перезапущенный узел нельзя использовать в успешном lease quorum даже при
 клиенте, не знающем о restart.
@@ -506,8 +519,10 @@ REJOIN_DELAY > protocolMaxTTL + safetyMargin
 
 ## 9. Полный restart кластера
 
-При одновременном падении всех `N` серверов всё lock state теряется. После
-запуска каждый server независимо проходит обязательный quarantine.
+При одновременном падении всех `N` серверов всё lock state теряется. При
+безопасной конфигурации каждый server независимо либо проходит встроенный
+quarantine, либо остаётся недоступным на тот же срок под управлением embedding
+application.
 
 Даже если процессы или операционные системы перезапустились быстрее пяти
 секунд, новый quorum не станет доступен раньше, чем истекут все leases,
@@ -516,15 +531,16 @@ REJOIN_DELAY > protocolMaxTTL + safetyMargin
 ```text
 all RAM state lost
         |
-all servers enter QUARANTINE
+all servers enter QUARANTINE or remain externally unavailable
         |
 wait > protocolMaxTTL + safetyMargin
         |
 servers become ACTIVE
 ```
 
-Таким образом безопасность не зависит от длительности внешней процедуры
-restart.
+При встроенном quarantine безопасность не зависит от длительности внешней
+процедуры restart. При `SkipRestartQuarantine` соблюдение этой гарантии является
+обязанностью embedding application.
 
 ## 10. Архитектурные инварианты
 

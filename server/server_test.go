@@ -112,6 +112,39 @@ func TestQuarantineAndGetTTL(t *testing.T) {
 	}
 }
 
+func TestSkipRestartQuarantineStartsActiveWithoutTimer(t *testing.T) {
+	s, err := New(Config{
+		MaxTTL:                2_000,
+		SkipRestartQuarantine: true,
+		ShardCount:            1,
+		ShardQueueDepth:       8,
+		MaxInFlightPerStream:  8,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if !s.active() {
+		t.Fatal("server with skipped restart quarantine is not active")
+	}
+	if s.timer != nil {
+		t.Fatal("server with skipped restart quarantine created a timer")
+	}
+
+	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
+	response := s.apply(s.shards[0], operation{
+		requestID:      1,
+		kind:           operationAcquire,
+		key:            "key",
+		leaseID:        id,
+		requestedTTLMS: 1_000,
+	}).GetAcquire()
+	if got := response.GetStatus(); got != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+		t.Fatalf("immediate Acquire = %s, want OK", got)
+	}
+}
+
 func TestKeyCountUnderflowFailsServerWithoutPanicking(t *testing.T) {
 	s := newTestServer(t, 1_000, 1)
 	activateServer(t, s)

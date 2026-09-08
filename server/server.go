@@ -16,11 +16,15 @@ import (
 const (
 	// ProtocolMaxTTL is the maximum configured TTL allowed by the protocol.
 	ProtocolMaxTTL = 5 * time.Second
+	// RestartQuarantineDuration is the minimum delay enforced by the built-in
+	// restart quarantine. An embedded owner which skips that quarantine assumes
+	// responsibility for enforcing the same delay when prior RAM state may have
+	// been lost.
+	RestartQuarantineDuration = ProtocolMaxTTL + safetyMargin + time.Millisecond
 	// DefaultMaxKeys is the default maximum number of resident lease keys.
 	DefaultMaxKeys = 10_000
 
-	safetyMargin          = 100 * time.Millisecond
-	restartQuarantineTime = ProtocolMaxTTL + safetyMargin + time.Millisecond
+	safetyMargin = 100 * time.Millisecond
 
 	defaultShardCount           = 256
 	defaultShardQueueDepth      = 256
@@ -37,6 +41,12 @@ var ErrServerFailed = errors.New("RedLease server failed")
 type Config struct {
 	MaxTTL  uint64
 	MaxKeys uint64
+
+	// SkipRestartQuarantine starts the Server in ACTIVE state without a
+	// quarantine timer. The embedding application then owns restart safety and
+	// must ensure that RestartQuarantineDuration has elapsed whenever prior
+	// in-memory lease state may have been lost.
+	SkipRestartQuarantine bool
 
 	ShardCount           uint32
 	ShardQueueDepth      uint32
@@ -111,7 +121,9 @@ type Server struct {
 
 var _ redleasev1.RedLeaseServer = (*Server)(nil)
 
-// New constructs a lock-server and starts its restart quarantine period.
+// New constructs a lock-server. By default it starts in restart quarantine;
+// SkipRestartQuarantine makes it immediately active under owner-managed
+// restart safety.
 func New(c Config) (*Server, error) {
 	config, err := resolveConfig(c)
 	if err != nil {
@@ -125,7 +137,11 @@ func New(c Config) (*Server, error) {
 		fatal:  make(chan error, 1),
 		shards: make([]*leaseShard, config.ShardCount),
 	}
-	s.phase.Store(uint32(phaseQuarantine))
+	if config.SkipRestartQuarantine {
+		s.phase.Store(uint32(phaseActive))
+	} else {
+		s.phase.Store(uint32(phaseQuarantine))
+	}
 
 	for i := range s.shards {
 		shard := &leaseShard{
@@ -137,9 +153,11 @@ func New(c Config) (*Server, error) {
 		go s.runShard(shard)
 	}
 
-	s.timer = time.NewTimer(restartQuarantineTime)
-	s.wg.Add(1)
-	go s.runQuarantine()
+	if !config.SkipRestartQuarantine {
+		s.timer = time.NewTimer(RestartQuarantineDuration)
+		s.wg.Add(1)
+		go s.runQuarantine()
+	}
 
 	return s, nil
 }
