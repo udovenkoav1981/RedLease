@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 	"testing"
@@ -413,6 +414,7 @@ func (c *integrationCluster) startReplica(t *testing.T, index int) {
 	lockServer, err := redleaseserver.New(redleaseserver.Config{
 		MaxTTL:               uint64(c.ttls[index] / time.Millisecond),
 		MaxKeys:              c.maxKeys,
+		Logger:               slog.New(slog.DiscardHandler),
 		ShardCount:           4,
 		ShardQueueDepth:      64,
 		MaxInFlightPerStream: 64,

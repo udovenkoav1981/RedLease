@@ -2,8 +2,10 @@ package server
 
 import (
 	"container/heap"
+	"context"
 	"fmt"
 	"hash/maphash"
+	"log/slog"
 	"runtime/debug"
 	"sync"
 
@@ -270,20 +272,42 @@ func (s *Server) acquireLocked(
 
 func (s *Server) renew(shard *leaseShard, op operation, now uint64) *redleasev1.ServerResponse {
 	shard.mu.Lock()
-	defer shard.mu.Unlock()
 
 	current, exists := shard.leases[op.key]
 	if !exists {
+		shard.mu.Unlock()
+		s.logLeaseOperation(
+			slog.LevelWarn,
+			"renew rejected because lease does not exist",
+			"renew",
+			"not_found",
+			op,
+			false,
+			0,
+		)
 		return renewResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_STALE, 0)
 	}
 	if current.deadline <= now {
+		expiredByMS := now - current.deadline
 		shard.removeLease(current)
-		if !s.releaseKeys(1) {
+		released := s.releaseKeys(1)
+		shard.mu.Unlock()
+		s.logLeaseOperation(
+			slog.LevelWarn,
+			"renew rejected because lease has expired",
+			"renew",
+			"expired",
+			op,
+			true,
+			expiredByMS,
+		)
+		if !released {
 			return notReadyResponse(op)
 		}
 		return renewResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_STALE, 0)
 	}
 	if current.id != op.leaseID {
+		shard.mu.Unlock()
 		return renewResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_STALE, 0)
 	}
 
@@ -293,22 +317,81 @@ func (s *Server) renew(shard *leaseShard, op operation, now uint64) *redleasev1.
 		current.deadline = candidate
 		heap.Fix(&shard.deadlines, current.heapIndex)
 	}
-	return renewResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK,
-		remainingTTLMS(current.deadline, now, s.config.MaxTTL))
+	remaining := remainingTTLMS(current.deadline, now, s.config.MaxTTL)
+	shard.mu.Unlock()
+	return renewResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK, remaining)
 }
 
 func (s *Server) release(shard *leaseShard, op operation, now uint64) *redleasev1.ServerResponse {
 	shard.mu.Lock()
-	defer shard.mu.Unlock()
 
 	current, exists := shard.leases[op.key]
-	if exists && (current.deadline <= now || current.id == op.leaseID) {
+	if !exists {
+		shard.mu.Unlock()
+		return releaseResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK)
+	}
+	if current.deadline <= now {
+		expiredByMS := now - current.deadline
 		shard.removeLease(current)
-		if !s.releaseKeys(1) {
+		released := s.releaseKeys(1)
+		shard.mu.Unlock()
+		s.logLeaseOperation(
+			slog.LevelWarn,
+			"release found an expired lease",
+			"release",
+			"expired",
+			op,
+			true,
+			expiredByMS,
+		)
+		if !released {
 			return notReadyResponse(op)
 		}
+		return releaseResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK)
 	}
+	if current.id == op.leaseID {
+		shard.removeLease(current)
+		released := s.releaseKeys(1)
+		shard.mu.Unlock()
+		if !released {
+			return notReadyResponse(op)
+		}
+		return releaseResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK)
+	}
+	shard.mu.Unlock()
 	return releaseResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK)
+}
+
+func (s *Server) logLeaseOperation(
+	level slog.Level,
+	message string,
+	operationName string,
+	reason string,
+	op operation,
+	includeExpiredBy bool,
+	expiredByMS uint64,
+) {
+	ctx := context.Background()
+	if !s.logger.Enabled(ctx, level) {
+		return
+	}
+
+	attrs := [...]slog.Attr{
+		slog.String("operation", operationName),
+		slog.String("reason", reason),
+		slog.String("key", op.key),
+		slog.Uint64("request_id", op.requestID),
+		slog.Uint64("client_id", uint64(op.leaseID.clientID)),
+		slog.Uint64("boot_id", uint64(op.leaseID.bootID)),
+		slog.Uint64("lease_seq", op.leaseID.leaseSeq),
+		{},
+	}
+	count := len(attrs) - 1
+	if includeExpiredBy {
+		attrs[count] = slog.Uint64("expired_by_ms", expiredByMS)
+		count++
+	}
+	s.logger.LogAttrs(ctx, level, message, attrs[:count]...)
 }
 
 func remainingTTLMS(deadline, now, maximum uint64) uint64 {

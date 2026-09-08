@@ -1,9 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"math"
 	"strconv"
 	"strings"
@@ -20,10 +23,13 @@ import (
 
 const testEpoch uint64 = 1_000_000
 
+var testLogger = slog.New(slog.DiscardHandler)
+
 func newTestServer(t *testing.T, maxTTL uint64, shardCount uint32) *Server {
 	t.Helper()
 	s, err := New(Config{
 		MaxTTL:               maxTTL,
+		Logger:               testLogger,
 		ShardCount:           shardCount,
 		ShardQueueDepth:      8,
 		MaxInFlightPerStream: 8,
@@ -53,10 +59,11 @@ func TestConfigValidate(t *testing.T) {
 		config  Config
 		wantErr bool
 	}{
-		{name: "minimum", config: Config{MaxTTL: 1}},
-		{name: "protocol maximum", config: Config{MaxTTL: uint64(ProtocolMaxTTL / time.Millisecond)}},
-		{name: "zero TTL", config: Config{}, wantErr: true},
-		{name: "over protocol maximum", config: Config{MaxTTL: uint64(ProtocolMaxTTL/time.Millisecond) + 1}, wantErr: true},
+		{name: "minimum", config: Config{MaxTTL: 1, Logger: testLogger}},
+		{name: "protocol maximum", config: Config{MaxTTL: uint64(ProtocolMaxTTL / time.Millisecond), Logger: testLogger}},
+		{name: "missing logger", config: Config{MaxTTL: 1}, wantErr: true},
+		{name: "zero TTL", config: Config{Logger: testLogger}, wantErr: true},
+		{name: "over protocol maximum", config: Config{MaxTTL: uint64(ProtocolMaxTTL/time.Millisecond) + 1, Logger: testLogger}, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -70,7 +77,7 @@ func TestConfigValidate(t *testing.T) {
 }
 
 func TestConfigDefaultsMaxKeys(t *testing.T) {
-	config, err := resolveConfig(Config{MaxTTL: 1_000})
+	config, err := resolveConfig(Config{MaxTTL: 1_000, Logger: testLogger})
 	if err != nil {
 		t.Fatalf("resolveConfig: %v", err)
 	}
@@ -115,6 +122,7 @@ func TestQuarantineAndGetTTL(t *testing.T) {
 func TestSkipRestartQuarantineStartsActiveWithoutTimer(t *testing.T) {
 	s, err := New(Config{
 		MaxTTL:                2_000,
+		Logger:                testLogger,
 		SkipRestartQuarantine: true,
 		ShardCount:            1,
 		ShardQueueDepth:       8,
@@ -309,6 +317,7 @@ func TestAcquireEnforcesKeyLimitAndRestoresCapacity(t *testing.T) {
 	s, err := New(Config{
 		MaxTTL:     1_000,
 		MaxKeys:    1,
+		Logger:     testLogger,
 		ShardCount: 1,
 	})
 	if err != nil {
@@ -361,6 +370,7 @@ func TestCapacityCleanupUsesDeadlineOrderAfterRenew(t *testing.T) {
 	s, err := New(Config{
 		MaxTTL:     uint64(ProtocolMaxTTL / time.Millisecond),
 		MaxKeys:    2,
+		Logger:     testLogger,
 		ShardCount: 1,
 	})
 	if err != nil {
@@ -398,6 +408,7 @@ func TestCapacityCleanupReclaimsExpiredLeaseFromAnotherShard(t *testing.T) {
 	s, err := New(Config{
 		MaxTTL:     1_000,
 		MaxKeys:    1,
+		Logger:     testLogger,
 		ShardCount: 2,
 	})
 	if err != nil {
@@ -563,6 +574,113 @@ func TestRenewStaleAndExpiry(t *testing.T) {
 	}
 	if got := s.keys.Load(); got != 0 {
 		t.Fatalf("key count after expired Renew = %d, want 0", got)
+	}
+}
+
+func TestMissingAndExpiredLeaseOperationsAreLogged(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	s, err := New(Config{
+		MaxTTL:                1_000,
+		Logger:                logger,
+		SkipRestartQuarantine: true,
+		ShardCount:            1,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	output.Reset() // Ignore the startup lifecycle record in this operation test.
+
+	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
+	shard := s.shards[0]
+	s.renew(shard, operation{
+		requestID:      11,
+		kind:           operationRenew,
+		key:            "missing-renew",
+		leaseID:        id,
+		requestedTTLMS: 1_000,
+	}, testEpoch)
+	s.acquire(shard, operation{
+		kind:           operationAcquire,
+		key:            "expired-renew",
+		leaseID:        id,
+		requestedTTLMS: 1_000,
+	}, testEpoch)
+	s.renew(shard, operation{
+		requestID:      12,
+		kind:           operationRenew,
+		key:            "expired-renew",
+		leaseID:        id,
+		requestedTTLMS: 1_000,
+	}, testEpoch+1_000)
+	s.release(shard, operation{
+		requestID: 13,
+		kind:      operationRelease,
+		key:       "missing-release",
+		leaseID:   id,
+	}, testEpoch)
+	s.acquire(shard, operation{
+		kind:           operationAcquire,
+		key:            "expired-release",
+		leaseID:        id,
+		requestedTTLMS: 1_000,
+	}, testEpoch)
+	s.release(shard, operation{
+		requestID: 14,
+		kind:      operationRelease,
+		key:       "expired-release",
+		leaseID:   id,
+	}, testEpoch+1_000)
+
+	type record struct {
+		Level       string  `json:"level"`
+		Message     string  `json:"msg"`
+		Component   string  `json:"component"`
+		Operation   string  `json:"operation"`
+		Reason      string  `json:"reason"`
+		Key         string  `json:"key"`
+		RequestID   uint64  `json:"request_id"`
+		ClientID    uint64  `json:"client_id"`
+		BootID      uint64  `json:"boot_id"`
+		LeaseSeq    uint64  `json:"lease_seq"`
+		ExpiredByMS *uint64 `json:"expired_by_ms"`
+	}
+	var records []record
+	decoder := json.NewDecoder(&output)
+	for {
+		var current record
+		if err := decoder.Decode(&current); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			t.Fatalf("decode log record: %v", err)
+		}
+		records = append(records, current)
+	}
+
+	want := []record{
+		{Level: "WARN", Message: "renew rejected because lease does not exist", Operation: "renew", Reason: "not_found", Key: "missing-renew", RequestID: 11},
+		{Level: "WARN", Message: "renew rejected because lease has expired", Operation: "renew", Reason: "expired", Key: "expired-renew", RequestID: 12},
+		{Level: "WARN", Message: "release found an expired lease", Operation: "release", Reason: "expired", Key: "expired-release", RequestID: 14},
+	}
+	if len(records) != len(want) {
+		t.Fatalf("log record count = %d, want %d; output:\n%s", len(records), len(want), output.String())
+	}
+	for index := range want {
+		got := records[index]
+		expected := want[index]
+		if got.Level != expected.Level || got.Message != expected.Message ||
+			got.Operation != expected.Operation || got.Reason != expected.Reason ||
+			got.Key != expected.Key || got.RequestID != expected.RequestID {
+			t.Errorf("record %d = %+v, want matching %+v", index, got, expected)
+		}
+		if got.Component != "redlease-server" || got.ClientID != 1 || got.BootID != 2 || got.LeaseSeq != 3 {
+			t.Errorf("record %d lacks lease context: %+v", index, got)
+		}
+		if expected.Reason == "expired" && got.ExpiredByMS == nil {
+			t.Errorf("record %d lacks expired_by_ms: %+v", index, got)
+		}
 	}
 }
 

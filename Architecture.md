@@ -37,6 +37,7 @@ Restart protection         built-in quarantine by default; explicit owner-manage
 Forced lease overwrite     forbidden
 Global fencing token       none
 Internal invariant failure controlled fail-stop + owner notification
+Server logging             owner-supplied `*slog.Logger`
 ```
 
 - Архитектура не использует leader-based replicated log. 
@@ -124,6 +125,34 @@ standalone launcher выполняет этот lifecycle автоматичес
 Автоматическая коррекция неизвестного повреждения, например saturating reset
 глобального счётчика занятых key до нуля, запрещена: она могла бы скрыть
 рассогласование счётчика с shard maps и нарушить `maxKeys`.
+
+### 3.2. Логирование server library
+
+При создании server владелец обязательно передаёт `*slog.Logger` через
+`server.Config.Logger`. Library добавляет ко всем своим записям атрибут
+`component=redlease-server`, но не меняет handler, output или уровень
+фильтрации. Logger и его handler остаются собственностью прикладного ПО:
+RedLease не закрывает их и не выполняет flush.
+
+Server пишет lifecycle-события запуска, перехода из `QUARANTINE` в `ACTIVE`,
+перехода в `FAILED` и завершения. Запуск с `SkipRestartQuarantine` имеет уровень
+`WARN`; обычные lifecycle-события — `INFO`, а controlled fail-stop — `ERROR`.
+Лог не является управляющим сигналом: владелец по-прежнему обязан следить за
+`Server.Fatal()`.
+
+Успешные `Acquire`, `Renew` и `Release` не логируются и logging handler не
+вызывается в штатном hot path. Для диагностики stale-операций server пишет:
+
+- `WARN` для `Renew` отсутствующего или истёкшего lease;
+- `WARN` для `Release` истёкшего lease.
+
+`Release` отсутствующего lease является нормальной частью cleanup после
+неудачного quorum `Acquire`, поэтому ничего не записывает в лог.
+
+Эти записи содержат `operation`, `reason`, `key`, `request_id` и компоненты
+переданного `leaseID`; для истёкшей записи также указывается
+`expired_by_ms`. Logging handler вызывается после освобождения shard lock,
+чтобы медленный output не останавливал операции с ключами того же shard.
 
 ## 4. Lease identity
 

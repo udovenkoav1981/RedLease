@@ -7,7 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -33,22 +33,22 @@ type launcherConfig struct {
 }
 
 func main() {
-	logger := log.New(os.Stderr, "redlease-server: ", log.LstdFlags|log.Lmicroseconds)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if err := run(os.Args[1:], os.Stderr, logger); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return
 		}
-		logger.Printf("error: %v", err)
+		logger.Error("redlease-server exited", slog.Any("error", err))
 		os.Exit(1)
 	}
 }
 
-func run(args []string, flagOutput io.Writer, logger *log.Logger) error {
+func run(args []string, flagOutput io.Writer, logger *slog.Logger) error {
 	config, err := parseFlags(args, flagOutput)
 	if err != nil {
 		return err
 	}
-	serverConfig, err := config.serverConfig()
+	serverConfig, err := config.serverConfig(logger)
 	if err != nil {
 		return err
 	}
@@ -68,12 +68,10 @@ func run(args []string, flagOutput io.Writer, logger *log.Logger) error {
 	grpcServer := grpc.NewServer()
 	leaseServer.Register(grpcServer)
 
-	logger.Printf(
-		"state=QUARANTINE configured_max_ttl_ms=%d max_keys=%d; activation is managed by the server library",
-		config.configuredMaxTTLMS,
-		serverConfig.MaxKeys,
+	logger.Info(
+		"listening with plaintext gRPC (local testing only)",
+		slog.String("address", listener.Addr().String()),
 	)
-	logger.Printf("listening on %s with plaintext gRPC (local testing only)", listener.Addr())
 
 	serveErr := make(chan error, 1)
 	go func() {
@@ -92,7 +90,7 @@ func run(args []string, flagOutput io.Writer, logger *log.Logger) error {
 		return nil
 
 	case received := <-signals:
-		logger.Printf("received %s; shutting down", received)
+		logger.Info("shutdown requested", slog.String("signal", received.String()))
 		if err := leaseServer.Close(); err != nil {
 			grpcServer.Stop()
 			return fmt.Errorf("close RedLease server: %w", err)
@@ -101,11 +99,11 @@ func run(args []string, flagOutput io.Writer, logger *log.Logger) error {
 		if err := <-serveErr; err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 			return fmt.Errorf("serve gRPC during shutdown: %w", err)
 		}
-		logger.Print("stopped")
+		logger.Info("standalone server stopped")
 		return nil
 
 	case fatalErr := <-leaseServer.Fatal():
-		logger.Printf("state=FAILED error=%v; shutting down", fatalErr)
+		logger.Error("server failure received; shutting down", slog.Any("error", fatalErr))
 		grpcServer.Stop()
 		closeErr := leaseServer.Close()
 		serveResult := <-serveErr
@@ -184,7 +182,7 @@ func uint32Flag(flags *flag.FlagSet, target *uint32, name, usage string) {
 	})
 }
 
-func (c launcherConfig) serverConfig() (server.Config, error) {
+func (c launcherConfig) serverConfig(logger *slog.Logger) (server.Config, error) {
 	maxKeys := c.maxKeys
 	if maxKeys == 0 {
 		maxKeys = server.DefaultMaxKeys
@@ -192,6 +190,7 @@ func (c launcherConfig) serverConfig() (server.Config, error) {
 	result := server.Config{
 		MaxTTL:               c.configuredMaxTTLMS,
 		MaxKeys:              maxKeys,
+		Logger:               logger,
 		ShardCount:           c.shardCount,
 		ShardQueueDepth:      c.shardQueueDepth,
 		MaxInFlightPerStream: c.maxInFlightPerStream,

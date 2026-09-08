@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,6 +43,10 @@ type Config struct {
 	MaxTTL  uint64
 	MaxKeys uint64
 
+	// Logger receives structured operational events from the Server. It is
+	// required. The caller retains ownership of the logger and its handler.
+	Logger *slog.Logger
+
 	// SkipRestartQuarantine starts the Server in ACTIVE state without a
 	// quarantine timer. The embedding application then owns restart safety and
 	// must ensure that RestartQuarantineDuration has elapsed whenever prior
@@ -56,6 +61,8 @@ type Config struct {
 // Validate checks values explicitly supplied by the caller.
 func (c Config) Validate() error {
 	switch {
+	case c.Logger == nil:
+		return errors.New("logger must not be nil")
 	case c.MaxTTL == 0:
 		return errors.New("max TTL must be positive")
 	case c.MaxTTL > uint64(ProtocolMaxTTL/time.Millisecond):
@@ -100,6 +107,7 @@ type Server struct {
 	redleasev1.UnimplementedRedLeaseServer
 
 	config Config
+	logger *slog.Logger
 
 	phase atomic.Uint32
 	keys  atomic.Uint64
@@ -132,6 +140,7 @@ func New(c Config) (*Server, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
 		config: config,
+		logger: config.Logger.With(slog.String("component", "redlease-server")),
 		ctx:    ctx,
 		cancel: cancel,
 		fatal:  make(chan error, 1),
@@ -157,6 +166,30 @@ func New(c Config) (*Server, error) {
 		s.timer = time.NewTimer(RestartQuarantineDuration)
 		s.wg.Add(1)
 		go s.runQuarantine()
+	}
+
+	startAttrs := []slog.Attr{
+		slog.Uint64("max_ttl_ms", config.MaxTTL),
+		slog.Uint64("max_keys", config.MaxKeys),
+		slog.Uint64("shard_count", uint64(config.ShardCount)),
+		slog.Uint64("shard_queue_depth", uint64(config.ShardQueueDepth)),
+		slog.Uint64("max_in_flight_per_stream", uint64(config.MaxInFlightPerStream)),
+	}
+	if config.SkipRestartQuarantine {
+		startAttrs = append(startAttrs, slog.String("state", "ACTIVE"))
+		s.logger.LogAttrs(
+			context.Background(),
+			slog.LevelWarn,
+			"server started with restart quarantine skipped",
+			startAttrs...,
+		)
+	} else {
+		startAttrs = append(
+			startAttrs,
+			slog.String("state", "QUARANTINE"),
+			slog.Uint64("restart_quarantine_ms", uint64(RestartQuarantineDuration/time.Millisecond)),
+		)
+		s.logger.LogAttrs(context.Background(), slog.LevelInfo, "server started", startAttrs...)
 	}
 
 	return s, nil
@@ -187,6 +220,11 @@ func (s *Server) fail(cause error) {
 		}
 		s.cancel()
 		s.fatal <- failure
+		s.logger.Error(
+			"server entered failed state",
+			slog.String("state", "FAILED"),
+			slog.Any("error", failure),
+		)
 	})
 }
 
@@ -208,6 +246,7 @@ func (s *Server) Close() error {
 		s.dispatchMu.Unlock()
 
 		s.wg.Wait()
+		s.logger.Info("server stopped", slog.String("state", "CLOSED"))
 	})
 	return nil
 }
@@ -223,7 +262,9 @@ func (s *Server) runQuarantine() {
 
 	select {
 	case <-s.timer.C:
-		s.phase.CompareAndSwap(uint32(phaseQuarantine), uint32(phaseActive))
+		if s.phase.CompareAndSwap(uint32(phaseQuarantine), uint32(phaseActive)) {
+			s.logger.Info("server entered active state", slog.String("state", "ACTIVE"))
+		}
 	case <-s.ctx.Done():
 	}
 }

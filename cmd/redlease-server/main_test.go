@@ -3,12 +3,15 @@ package main
 import (
 	"bytes"
 	"flag"
+	"log/slog"
 	"math"
 	"strings"
 	"testing"
 
 	"github.com/udovenkoav1981/RedLease/server"
 )
+
+var testLogger = slog.New(slog.DiscardHandler)
 
 func TestParseFlagsDefaults(t *testing.T) {
 	config, err := parseFlags(nil, &bytes.Buffer{})
@@ -81,7 +84,7 @@ func TestServerConfigValidatesMaxTTL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config, err := (launcherConfig{configuredMaxTTLMS: tt.ttlMS}).serverConfig()
+			config, err := (launcherConfig{configuredMaxTTLMS: tt.ttlMS}).serverConfig(testLogger)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("serverConfig error = %v, wantErr %t", err, tt.wantErr)
 			}
@@ -102,7 +105,7 @@ func TestServerConfigPassesImplementationTuning(t *testing.T) {
 		shardCount:           8,
 		shardQueueDepth:      16,
 		maxInFlightPerStream: 32,
-	}).serverConfig()
+	}).serverConfig(testLogger)
 	if err != nil {
 		t.Fatalf("serverConfig: %v", err)
 	}
