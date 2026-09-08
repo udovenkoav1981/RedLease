@@ -2,7 +2,9 @@ package client
 
 import (
 	"context"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
@@ -13,6 +15,11 @@ const protocolMaxTTL = 5 * time.Second
 type releaseSubmission struct {
 	replica int
 	future  *streamFuture
+}
+
+type releaseRetries struct {
+	sync.WaitGroup
+	failed atomic.Uint64
 }
 
 // Release immediately makes the local lease invalid and asynchronously sends
@@ -47,24 +54,48 @@ func (c *Client) releaseAll(key []byte, id leaseID) {
 	}
 	cancelInitial()
 
-	var retries sync.WaitGroup
+	var retries releaseRetries
 	retries.Add(serverCount)
 	for _, submission := range initial {
 		go func() {
 			defer retries.Done()
-			c.retryReleaseReplica(
+			if c.retryReleaseReplica(
 				retryContext,
 				submission.replica,
 				key,
 				id,
 				submission.future,
-			)
+			) {
+				retries.failed.Or(uint64(1) << uint(submission.replica))
+			}
 		}()
 	}
 	go func() {
 		retries.Wait()
 		cancelRetries()
+		failed := retries.failed.Load()
+		if failed != 0 && c.ctx.Err() == nil {
+			c.logger.Warn(
+				"release cleanup did not complete before retry deadline",
+				slog.String("operation", "release"),
+				slog.String("key", string(key)),
+				slog.Uint64("lease_client_id", uint64(id.clientID)),
+				slog.Uint64("lease_boot_id", uint64(id.bootID)),
+				slog.Uint64("lease_sequence", id.sequence),
+				slog.Any("replica_indices", replicaIndices(failed, serverCount)),
+			)
+		}
 	}()
+}
+
+func replicaIndices(mask uint64, serverCount int) []int {
+	indices := make([]int, 0, serverCount)
+	for replica := range serverCount {
+		if mask&(uint64(1)<<uint(replica)) != 0 {
+			indices = append(indices, replica)
+		}
+	}
+	return indices
 }
 
 func (c *Client) retryReleaseReplica(
@@ -73,16 +104,16 @@ func (c *Client) retryReleaseReplica(
 	key []byte,
 	id leaseID,
 	future *streamFuture,
-) {
+) bool {
 	backoff := defaultReconnectBackoff()
 	var attempt uint
 
 	for {
 		if future != nil && c.releaseResponseOK(ctx, future) {
-			return
+			return false
 		}
 		if !waitBackoff(ctx, backoff.duration(attempt)) {
-			return
+			return ctx.Err() == context.DeadlineExceeded
 		}
 		attempt++
 

@@ -382,6 +382,7 @@ func (c *integrationCluster) newClient(t *testing.T, clientID uint32) *redleasec
 		Quorum:          redleaseclient.Quorum3Of5,
 		Servers:         make([]redleaseclient.ServerConfig, integrationServerCount),
 		ResponseTimeout: 500,
+		Logger:          slog.New(slog.DiscardHandler),
 	}
 	for index := range c.listeners {
 		index := index

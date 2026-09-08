@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
@@ -55,6 +56,7 @@ func (f *grpcStreamFactory) close() error {
 type replicaConn struct {
 	factory streamFactory
 	backoff exponentialBackoff
+	logger  *slog.Logger
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -71,11 +73,12 @@ type replicaConn struct {
 	closeErr  error
 }
 
-func newReplicaConn(factory streamFactory) *replicaConn {
+func newReplicaConn(factory streamFactory, logger *slog.Logger) *replicaConn {
 	ctx, cancel := context.WithCancel(context.Background())
 	connection := &replicaConn{
 		factory: factory,
 		backoff: defaultReconnectBackoff(),
+		logger:  logger,
 		ctx:     ctx,
 		cancel:  cancel,
 		changed: make(chan struct{}),
@@ -144,12 +147,21 @@ func (c *replicaConn) manage() {
 	defer c.manager.Done()
 
 	var attempt uint
+	unavailable := false
 	for {
 		streamContext, cancelStream := context.WithCancel(c.ctx)
 		stream, err := c.factory.open(streamContext)
 		if err != nil {
 			cancelStream()
 			c.recordFailure(fmt.Errorf("open stream: %w", err))
+			if !unavailable && c.ctx.Err() == nil {
+				c.logger.Warn(
+					"replica stream unavailable",
+					slog.String("reason", "connect_failed"),
+					slog.Any("error", err),
+				)
+				unavailable = true
+			}
 			if !c.waitBeforeRetry(attempt) {
 				return
 			}
@@ -162,6 +174,12 @@ func (c *replicaConn) manage() {
 			_ = generation.Close()
 			return
 		}
+		c.logger.Info(
+			"replica stream connected",
+			slog.Bool("reconnected", unavailable),
+			slog.Uint64("attempt", uint64(attempt+1)),
+		)
+		unavailable = false
 		attempt = 0
 
 		select {
@@ -175,6 +193,12 @@ func (c *replicaConn) manage() {
 		if c.ctx.Err() != nil {
 			return
 		}
+		c.logger.Warn(
+			"replica stream unavailable",
+			slog.String("reason", "stream_terminated"),
+			slog.Any("error", cause),
+		)
+		unavailable = true
 
 		if !c.waitBeforeRetry(attempt) {
 			return

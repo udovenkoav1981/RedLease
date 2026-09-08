@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ type Client struct {
 	quorum          Quorum
 	servers         []ServerConfig
 	responseTimeout time.Duration
+	logger          *slog.Logger
 
 	replicas []*replicaConn
 
@@ -48,6 +50,10 @@ func New(config Config) (*Client, error) {
 		quorum:   config.Quorum,
 		servers:  make([]ServerConfig, len(config.Servers)),
 		replicas: make([]*replicaConn, len(config.Servers)),
+		logger: config.Logger.With(
+			slog.String("component", "redlease-client"),
+			slog.Uint64("client_id", uint64(config.ClientID)),
+		),
 	}
 	if config.ResponseTimeout == 0 {
 		client.responseTimeout = defaultResponseTimeout
@@ -80,7 +86,13 @@ func New(config Config) (*Client, error) {
 			}
 			return nil, fmt.Errorf("create connection for server %d: %w", index, openErr)
 		}
-		client.replicas[index] = newReplicaConn(newGRPCStreamFactory(connection))
+		client.replicas[index] = newReplicaConn(
+			newGRPCStreamFactory(connection),
+			client.logger.With(
+				slog.Uint64("replica_index", uint64(index)),
+				slog.String("server_target", server.Target),
+			),
+		)
 	}
 	return client, nil
 }

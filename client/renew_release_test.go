@@ -11,6 +11,28 @@ import (
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
+func TestRetryReleaseReplicaDistinguishesDeadlineFromCancellation(t *testing.T) {
+	client := &Client{}
+
+	deadlineContext, cancelDeadline := context.WithDeadline(context.Background(), time.Now())
+	defer cancelDeadline()
+	if exhausted := client.retryReleaseReplica(deadlineContext, 0, nil, leaseID{}, nil); !exhausted {
+		t.Fatal("release retry deadline was not reported as exhausted")
+	}
+
+	canceledContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	if exhausted := client.retryReleaseReplica(canceledContext, 0, nil, leaseID{}, nil); exhausted {
+		t.Fatal("release retry cancellation was reported as deadline exhaustion")
+	}
+}
+
+func TestReplicaIndices(t *testing.T) {
+	if got, want := replicaIndices(1<<1|1<<4, 5), []int{1, 4}; !slices.Equal(got, want) {
+		t.Fatalf("replicaIndices = %v, want %v", got, want)
+	}
+}
+
 func TestLeaseRenewExtendsValidity(t *testing.T) {
 	harness := newAcquireHarness(t)
 	lease := acquireFullyConfirmedLease(t, harness, "renew", 1_000)

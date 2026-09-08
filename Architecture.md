@@ -39,6 +39,7 @@ Forced lease overwrite     forbidden
 Global fencing token       none
 Internal invariant failure controlled fail-stop + owner notification
 Server logging             owner-supplied `*slog.Logger`
+Client logging             owner-supplied `*slog.Logger`
 Server metrics             optional owner-registered Prometheus collector
 ```
 
@@ -529,6 +530,31 @@ healing с тем же `leaseID` и исходным `requestedTTL`. Перед 
 Release до восстановления соединения. В таком случае новый Acquire после
 reconnect не отправляется, а уже принятые stream'ом попытки Acquire завершают
 submission barrier до отправки Release.
+
+### 7.1. Логирование client library
+
+При создании client владелец обязательно передаёт `*slog.Logger` через
+`client.Config.Logger`. Library добавляет ко всем своим записям атрибуты
+`component=redlease-client` и `client_id`, но не меняет handler, output или
+уровень фильтрации. Logger и его handler остаются собственностью прикладного
+ПО: RedLease не закрывает их и не выполняет flush.
+
+Client не логирует успешные `Acquire` и `Renew`, а также ошибки, синхронно
+возвращаемые вызвавшему их приложению. В лог попадают только фоновые события,
+которые иначе не имеют публичного наблюдателя:
+
+- `WARN`, когда replica впервые не может открыть stream или установленный
+  stream разрывается;
+- `INFO`, когда stream устанавливается; после периода недоступности запись
+  содержит `reconnected=true`;
+- один агрегированный `WARN` на lease, если bounded retry асинхронного
+  `Release` завершился, не получив приемлемый ответ от части replicas.
+
+Повторные неудачные попытки reconnect во время одного периода недоступности не
+логируются. Новая `WARN`-запись возможна только после восстановления stream и
+следующего перехода в недоступное состояние. Ошибки отдельных background
+healing attempts также не логируются, чтобы штатные retry не создавали поток
+повторяющихся записей.
 
 ## 8. Restart quarantine
 

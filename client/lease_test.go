@@ -73,6 +73,7 @@ func testLeaseClient() *Client {
 	return &Client{
 		quorum:   testQuorum,
 		replicas: make([]*replicaConn, testServerCount),
+		logger:   testLogger,
 		ctx:      context.Background(),
 	}
 }

@@ -1,14 +1,64 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
+
+func TestReplicaConnLogsStateTransitionsWithoutRetrySpam(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil)).With(
+		slog.String("component", "redlease-client"),
+		slog.Uint64("client_id", 7),
+		slog.Uint64("replica_index", 2),
+		slog.String("server_target", "server-2"),
+	)
+	factory := newScriptedStreamFactory()
+	factory.results <- streamFactoryResult{err: errors.New("first failure")}
+	factory.results <- streamFactoryResult{err: errors.New("second failure")}
+	stream := newReplicaFakeStream()
+	factory.results <- streamFactoryResult{stream: stream}
+
+	connection := newReplicaConn(factory, logger)
+	waitForReplicaState(t, connection, true, false)
+	secondStream := newReplicaFakeStream()
+	factory.results <- streamFactoryResult{stream: secondStream}
+	stream.receive <- fakeReceive{err: errors.New("stream lost")}
+	waitForReplicaState(t, connection, false, false)
+	waitForReplicaState(t, connection, true, false)
+	if err := connection.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	logs := output.String()
+	if got := strings.Count(logs, `"msg":"replica stream unavailable"`); got != 2 {
+		t.Fatalf("unavailable log count = %d, want 2; logs:\n%s", got, logs)
+	}
+	if got := strings.Count(logs, `"msg":"replica stream connected"`); got != 2 {
+		t.Fatalf("connected log count = %d, want 2; logs:\n%s", got, logs)
+	}
+	for _, fragment := range []string{
+		`"component":"redlease-client"`,
+		`"client_id":7`,
+		`"replica_index":2`,
+		`"server_target":"server-2"`,
+		`"reason":"connect_failed"`,
+		`"reason":"stream_terminated"`,
+		`"reconnected":true`,
+	} {
+		if !strings.Contains(logs, fragment) {
+			t.Errorf("logs do not contain %s; logs:\n%s", fragment, logs)
+		}
+	}
+}
 
 func TestReplicaConnRetriesOpenFailure(t *testing.T) {
 	openFailure := errors.New("open failure")
@@ -204,7 +254,7 @@ func newTestReplicaConn(
 }
 
 func newTestReplicaConnWithoutCleanup(factory streamFactory) *replicaConn {
-	return newReplicaConn(factory)
+	return newReplicaConn(factory, testLogger)
 }
 
 func newReplicaFakeStream() *fakeLeaseClientStream {

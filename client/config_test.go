@@ -1,6 +1,7 @@
 package client
 
 import (
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -8,6 +9,17 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+var testLogger = slog.New(slog.DiscardHandler)
+
+func TestConfigRequiresLogger(t *testing.T) {
+	config := validClientConfig()
+	config.Logger = nil
+
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "logger") {
+		t.Fatalf("Validate error = %v, want missing logger", err)
+	}
+}
 
 func TestConfigRequiresEverySelectedServerTarget(t *testing.T) {
 	config := validClientConfig()
@@ -35,6 +47,7 @@ func TestConfigAcceptsSupportedQuorumConfigurations(t *testing.T) {
 			config := Config{
 				Quorum:  test.quorum,
 				Servers: make([]ServerConfig, test.serverCount),
+				Logger:  testLogger,
 			}
 			for index := range config.Servers {
 				config.Servers[index].Target = "test-target"
@@ -51,6 +64,7 @@ func TestConfigRejectsUnsupportedQuorum(t *testing.T) {
 	config := Config{
 		Quorum:  Quorum(4),
 		Servers: make([]ServerConfig, 4),
+		Logger:  testLogger,
 	}
 
 	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "unsupported quorum") {
@@ -112,6 +126,7 @@ func validClientConfig() Config {
 	config := Config{
 		Quorum:  testQuorum,
 		Servers: make([]ServerConfig, testServerCount),
+		Logger:  testLogger,
 	}
 	for index := range config.Servers {
 		config.Servers[index].Target = "test-target"
