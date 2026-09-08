@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/udovenkoav1981/RedLease/internal/boottime"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 	"google.golang.org/grpc"
 )
@@ -30,6 +31,7 @@ const (
 	defaultShardCount           = 256
 	defaultShardQueueDepth      = 256
 	defaultMaxInFlightPerStream = 256
+	expiredLeaseCleanupInterval = time.Minute
 )
 
 // ErrServerFailed identifies a fatal internal server error. The affected
@@ -161,6 +163,8 @@ func New(c Config) (*Server, error) {
 		s.wg.Add(1)
 		go s.runShard(shard)
 	}
+	s.wg.Add(1)
+	go s.runExpiredLeaseCleanup()
 
 	if !config.SkipRestartQuarantine {
 		s.timer = time.NewTimer(RestartQuarantineDuration)
@@ -266,6 +270,28 @@ func (s *Server) runQuarantine() {
 			s.logger.Info("server entered active state", slog.String("state", "ACTIVE"))
 		}
 	case <-s.ctx.Done():
+	}
+}
+
+func (s *Server) runExpiredLeaseCleanup() {
+	defer s.wg.Done()
+	ticker := time.NewTicker(expiredLeaseCleanupInterval)
+	defer ticker.Stop()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			s.failRecoveredPanic("cleaning expired leases", recovered)
+		}
+	}()
+
+	for {
+		select {
+		case <-ticker.C:
+			if s.active() && !s.removeExpiredKeys(boottime.Now()) {
+				return
+			}
+		case <-s.ctx.Done():
+			return
+		}
 	}
 }
 

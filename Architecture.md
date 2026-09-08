@@ -22,6 +22,7 @@ Storage                    RAM only
 Disk persistence           none
 Default per-server maxKeys 10 000
 Maximum key size           2048 bytes
+Expired lease cleanup      lazy/on-demand + background every minute
 Protocol maximum TTL       5 s
 Per-server configuredMaxTTL <= Protocol maximum TTL
 Typical Renew interval     1 s
@@ -92,8 +93,15 @@ lease операция Renew перемещает его элемент в heap.
 reservation нового key упирается в глобальный `maxKeys`, server запускает
 on-demand cleanup: каждый shard удаляет из heap истёкшие элементы, начиная с
 ближайшего deadline. После очистки reservation повторяется один раз. Если место
-не появилось, server возвращает `KEY_LIMIT_REACHED`. Периодического timer и
-полного обхода map нет.
+не появилось, server возвращает `KEY_LIMIT_REACHED`.
+
+Кроме того, один background goroutine server раз в минуту запускает ту же
+очистку. Срок действия lease при этом проверяется по `CLOCK_BOOTTIME`; обычный
+ticker лишь задаёт период запуска. Cleanup последовательно берёт lock одного
+shard и удаляет элементы с начала deadline heap, пока ближайший deadline не
+окажется действующим. Полного обхода map нет. Background cleanup завершает
+работу при `FAILED` или `CLOSED`, а обнаруженный panic переводит server в
+controlled fail-stop.
 
 ### 3.1. Controlled fail-stop
 
