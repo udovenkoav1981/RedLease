@@ -20,6 +20,7 @@ const (
 	operationAcquire operationKind = iota
 	operationRenew
 	operationRelease
+	operationKindCount
 )
 
 type leaseID struct {
@@ -186,13 +187,14 @@ func removeExpiredKeysFromShard(shard *leaseShard, now uint64) uint64 {
 }
 
 func (s *Server) apply(shard *leaseShard, op operation) *redleasev1.ServerResponse {
-	if op.kind > operationRelease {
+	if op.kind >= operationKindCount {
 		s.fail(fmt.Errorf("unknown operation kind %d", op.kind))
 		return &redleasev1.ServerResponse{RequestId: op.requestID}
 	}
 	if !s.active() {
 		return notReadyResponse(op)
 	}
+	s.operationTotals[op.kind].Add(1)
 	if len(op.key) > protocol.MaxKeyBytes {
 		return statusResponse(op, redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE)
 	}

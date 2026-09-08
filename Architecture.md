@@ -39,6 +39,7 @@ Forced lease overwrite     forbidden
 Global fencing token       none
 Internal invariant failure controlled fail-stop + owner notification
 Server logging             owner-supplied `*slog.Logger`
+Server metrics             optional owner-registered Prometheus collector
 ```
 
 - Архитектура не использует leader-based replicated log. 
@@ -161,6 +162,30 @@ Server пишет lifecycle-события запуска, перехода из
 переданного `leaseID`; для истёкшей записи также указывается
 `expired_by_ms`. Logging handler вызывается после освобождения shard lock,
 чтобы медленный output не останавливал операции с ключами того же shard.
+
+### 3.3. Метрики server library
+
+Опциональный package `server/prometheus` предоставляет pull-collector для
+регистрации в Prometheus registry прикладного ПО. Library не использует global
+registry и не запускает собственный HTTP endpoint.
+
+Счётчики `redlease_server_acquires_total`, `redlease_server_renews_total` и
+`redlease_server_releases_total` реализованы тремя общими для server
+`atomic.Uint64`. Каждый счётчик увеличивается ровно один раз для операции,
+принятой в обработку в состоянии `ACTIVE`, независимо от её результата.
+Операции, отклонённые quarantine как `NOT_READY`, не учитываются. Текущая
+частота вычисляется Prometheus через `rate()`.
+
+Остальные метрики вычисляются только при scrape:
+
+- `redlease_server_state{state="quarantine|active|failed|closed"}` — one-hot
+  lifecycle state;
+- `redlease_server_resident_keys` — физически хранящиеся записи, включая
+  истёкшие записи до lazy или background cleanup;
+- `redlease_server_queued_operations` — сумма текущих длин shard queues;
+- `redlease_server_active_streams` — число активных gRPC streams;
+- `redlease_server_restart_quarantine_skipped` — owner-managed quarantine
+  включён (1) или выключен (0).
 
 ## 4. Lease identity
 

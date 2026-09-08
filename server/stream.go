@@ -35,6 +35,8 @@ func (s *Server) LeaseStream(
 	if err := s.streamUnavailableError(); err != nil {
 		return err
 	}
+	s.activeStreams.Add(1)
+	defer s.activeStreams.Add(-1)
 
 	ctx, cancel := context.WithCancel(stream.Context())
 	stopServerCancel := context.AfterFunc(s.ctx, cancel)

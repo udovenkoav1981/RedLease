@@ -114,6 +114,9 @@ type Server struct {
 	phase atomic.Uint32
 	keys  atomic.Uint64
 
+	activeStreams   atomic.Int64
+	operationTotals [operationKindCount]atomic.Uint64
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	timer  *time.Timer

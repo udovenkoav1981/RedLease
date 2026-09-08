@@ -119,6 +119,76 @@ func TestQuarantineAndGetTTL(t *testing.T) {
 	}
 }
 
+func TestOperationMetricsCountActiveRequestsOnce(t *testing.T) {
+	s := newTestServer(t, 2_000, 1)
+	shard := s.shards[0]
+	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
+
+	s.apply(shard, operation{kind: operationAcquire, key: "quarantine", leaseID: id, requestedTTLMS: 1_000})
+	s.apply(shard, operation{kind: operationRenew, key: "quarantine", leaseID: id, requestedTTLMS: 1_000})
+	s.apply(shard, operation{kind: operationRelease, key: "quarantine", leaseID: id})
+	if got := s.MetricsSnapshot(); got.AcquiresTotal != 0 || got.RenewsTotal != 0 || got.ReleasesTotal != 0 {
+		t.Fatalf("quarantine operation totals = (%d, %d, %d), want all zero", got.AcquiresTotal, got.RenewsTotal, got.ReleasesTotal)
+	}
+
+	activateServer(t, s)
+	s.apply(shard, operation{
+		kind:           operationAcquire,
+		key:            strings.Repeat("x", protocol.MaxKeyBytes+1),
+		leaseID:        id,
+		requestedTTLMS: 1_000,
+	})
+	s.apply(shard, operation{kind: operationRenew, key: "missing", leaseID: id, requestedTTLMS: 1_000})
+	s.apply(shard, operation{kind: operationRelease, key: "missing", leaseID: id})
+
+	got := s.MetricsSnapshot()
+	if got.AcquiresTotal != 1 || got.RenewsTotal != 1 || got.ReleasesTotal != 1 {
+		t.Fatalf("active operation totals = (%d, %d, %d), want (1, 1, 1)", got.AcquiresTotal, got.RenewsTotal, got.ReleasesTotal)
+	}
+}
+
+func TestMetricsSnapshot(t *testing.T) {
+	firstJobs := make(chan shardJob, 2)
+	secondJobs := make(chan shardJob, 2)
+	firstJobs <- shardJob{}
+	secondJobs <- shardJob{}
+	secondJobs <- shardJob{}
+	s := &Server{
+		config: Config{SkipRestartQuarantine: true},
+		shards: []*leaseShard{{jobs: firstJobs}, {jobs: secondJobs}},
+	}
+	s.phase.Store(uint32(phaseFailed))
+	s.keys.Store(7)
+	s.activeStreams.Store(2)
+	s.operationTotals[operationAcquire].Store(11)
+	s.operationTotals[operationRenew].Store(12)
+	s.operationTotals[operationRelease].Store(13)
+
+	got := s.MetricsSnapshot()
+	if got.State != "failed" || got.ResidentKeys != 7 || got.QueuedOperations != 3 || got.ActiveStreams != 2 ||
+		got.AcquiresTotal != 11 || got.RenewsTotal != 12 || got.ReleasesTotal != 13 || !got.RestartQuarantineSkipped {
+		t.Fatalf("MetricsSnapshot() = %+v", got)
+	}
+}
+
+func TestMetricsState(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		phase serverPhase
+		want  string
+	}{
+		{phaseQuarantine, "quarantine"},
+		{phaseActive, "active"},
+		{phaseFailed, "failed"},
+		{phaseClosed, "closed"},
+		{serverPhase(100), "unknown"},
+	} {
+		if got := metricsState(test.phase); got != test.want {
+			t.Errorf("metricsState(%d) = %q, want %q", test.phase, got, test.want)
+		}
+	}
+}
+
 func TestSkipRestartQuarantineStartsActiveWithoutTimer(t *testing.T) {
 	s, err := New(Config{
 		MaxTTL:                2_000,
@@ -781,6 +851,39 @@ func TestLeaseStreamRejectsRequestDuringQuarantine(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("LeaseStream did not finish after EOF")
+	}
+}
+
+func TestActiveStreamsMetricTracksStreamLifetime(t *testing.T) {
+	s := newTestServer(t, 1_000, 1)
+	requests := make(chan *redleasev1.ClientRequest)
+	stream := &fakeLeaseStream{
+		ctx:      context.Background(),
+		requests: requests,
+		sent:     make(chan *redleasev1.ServerResponse),
+	}
+	errDone := make(chan error, 1)
+	go func() { errDone <- s.LeaseStream(stream) }()
+
+	deadline := time.Now().Add(time.Second)
+	for s.MetricsSnapshot().ActiveStreams != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("active stream was not reflected in metrics")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	close(requests)
+	select {
+	case err := <-errDone:
+		if err != nil {
+			t.Fatalf("LeaseStream: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("LeaseStream did not finish after EOF")
+	}
+	if got := s.MetricsSnapshot().ActiveStreams; got != 0 {
+		t.Fatalf("active streams after EOF = %d, want 0", got)
 	}
 }
 
