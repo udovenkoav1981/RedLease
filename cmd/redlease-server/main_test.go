@@ -5,6 +5,8 @@ import (
 	"flag"
 	"log/slog"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -21,6 +23,9 @@ func TestParseFlagsDefaults(t *testing.T) {
 	if config.listenAddress != defaultListenAddress {
 		t.Errorf("listen address = %q, want %q", config.listenAddress, defaultListenAddress)
 	}
+	if config.metricsListenAddress != "" {
+		t.Errorf("metrics listen address = %q, want disabled", config.metricsListenAddress)
+	}
 	if config.configuredMaxTTLMS != defaultConfiguredMaxTTL {
 		t.Errorf("configured max TTL = %d, want %d", config.configuredMaxTTLMS, defaultConfiguredMaxTTL)
 	}
@@ -36,6 +41,7 @@ func TestParseFlagsDefaults(t *testing.T) {
 func TestParseFlagsCustomValues(t *testing.T) {
 	config, err := parseFlags([]string{
 		"-listen", "127.0.0.1:15051",
+		"-metrics-listen", "127.0.0.1:19090",
 		"-configured-max-ttl-ms", "1234",
 		"-max-keys", "123",
 		"-shard-count", "8",
@@ -46,6 +52,7 @@ func TestParseFlagsCustomValues(t *testing.T) {
 		t.Fatalf("parseFlags: %v", err)
 	}
 	if config.listenAddress != "127.0.0.1:15051" ||
+		config.metricsListenAddress != "127.0.0.1:19090" ||
 		config.configuredMaxTTLMS != 1234 ||
 		config.maxKeys != 123 ||
 		config.shardCount != 8 ||
@@ -61,9 +68,50 @@ func TestParseFlagsHelpDescribesLocalPlaintextLauncher(t *testing.T) {
 	if err != flag.ErrHelp {
 		t.Fatalf("parseFlags help error = %v, want flag.ErrHelp", err)
 	}
-	for _, fragment := range []string{"Local test launcher", "plaintext gRPC", "no TLS or authentication"} {
+	for _, fragment := range []string{
+		"Local test launcher",
+		"plaintext gRPC",
+		"no TLS or authentication",
+		"metrics-listen",
+	} {
 		if !strings.Contains(output.String(), fragment) {
 			t.Errorf("help does not contain %q:\n%s", fragment, output.String())
+		}
+	}
+}
+
+func TestMetricsHandlerServesPrivateRegistry(t *testing.T) {
+	leaseServer, err := server.New(server.Config{
+		MaxTTL:                1000,
+		MaxKeys:               10,
+		Logger:                testLogger,
+		SkipRestartQuarantine: true,
+		ShardCount:            1,
+		ShardQueueDepth:       1,
+		MaxInFlightPerStream:  1,
+	})
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	defer leaseServer.Close()
+
+	handler, err := newMetricsHandler(leaseServer)
+	if err != nil {
+		t.Fatalf("newMetricsHandler: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /metrics status = %d, want %d", response.Code, http.StatusOK)
+	}
+	for _, metric := range []string{
+		"redlease_server_state",
+		"redlease_server_resident_keys",
+		"redlease_server_acquires_total",
+	} {
+		if !bytes.Contains(response.Body.Bytes(), []byte(metric)) {
+			t.Errorf("GET /metrics does not contain %q", metric)
 		}
 	}
 }

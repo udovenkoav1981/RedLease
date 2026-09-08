@@ -9,12 +9,17 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
+	clientprometheus "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/udovenkoav1981/RedLease/server"
+	redleaseprometheus "github.com/udovenkoav1981/RedLease/server/prometheus"
 	"google.golang.org/grpc"
 )
 
@@ -25,6 +30,7 @@ const (
 
 type launcherConfig struct {
 	listenAddress        string
+	metricsListenAddress string
 	configuredMaxTTLMS   uint64
 	maxKeys              uint64
 	shardCount           uint32
@@ -67,6 +73,16 @@ func run(args []string, flagOutput io.Writer, logger *slog.Logger) error {
 
 	grpcServer := grpc.NewServer()
 	leaseServer.Register(grpcServer)
+	defer grpcServer.Stop()
+
+	var metrics *metricsEndpoint
+	if config.metricsListenAddress != "" {
+		metrics, err = startMetricsEndpoint(config.metricsListenAddress, leaseServer, logger)
+		if err != nil {
+			return err
+		}
+		defer metrics.Close()
+	}
 
 	logger.Info(
 		"listening with plaintext gRPC (local testing only)",
@@ -77,6 +93,10 @@ func run(args []string, flagOutput io.Writer, logger *slog.Logger) error {
 	go func() {
 		serveErr <- grpcServer.Serve(listener)
 	}()
+	var metricsServeErr <-chan error
+	if metrics != nil {
+		metricsServeErr = metrics.serveErr
+	}
 
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
@@ -86,6 +106,12 @@ func run(args []string, flagOutput io.Writer, logger *slog.Logger) error {
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 			return fmt.Errorf("serve gRPC: %w", err)
+		}
+		return nil
+
+	case err := <-metricsServeErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("serve Prometheus metrics: %w", err)
 		}
 		return nil
 
@@ -125,6 +151,12 @@ func parseFlags(args []string, output io.Writer) (launcherConfig, error) {
 		"listen",
 		defaultListenAddress,
 		"TCP listen address",
+	)
+	flags.StringVar(
+		&config.metricsListenAddress,
+		"metrics-listen",
+		"",
+		"Prometheus HTTP listen address; empty disables the exporter",
 	)
 	flags.Uint64Var(
 		&config.configuredMaxTTLMS,
@@ -169,6 +201,68 @@ func parseFlags(args []string, output io.Writer) (launcherConfig, error) {
 		return launcherConfig{}, fmt.Errorf("unexpected positional arguments: %v", flags.Args())
 	}
 	return config, nil
+}
+
+type metricsEndpoint struct {
+	server   *http.Server
+	listener net.Listener
+	serveErr chan error
+}
+
+func startMetricsEndpoint(
+	address string,
+	leaseServer *server.Server,
+	logger *slog.Logger,
+) (*metricsEndpoint, error) {
+	handler, err := newMetricsHandler(leaseServer)
+	if err != nil {
+		return nil, err
+	}
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, fmt.Errorf("listen for Prometheus metrics on %q: %w", address, err)
+	}
+	endpoint := &metricsEndpoint{
+		server: &http.Server{
+			Handler:           handler,
+			ReadHeaderTimeout: 5 * time.Second,
+		},
+		listener: listener,
+		serveErr: make(chan error, 1),
+	}
+	go func() {
+		endpoint.serveErr <- endpoint.server.Serve(listener)
+	}()
+
+	logger.Info(
+		"Prometheus metrics listening",
+		slog.String("address", listener.Addr().String()),
+		slog.String("path", "/metrics"),
+	)
+	return endpoint, nil
+}
+
+func newMetricsHandler(leaseServer *server.Server) (http.Handler, error) {
+	collector, err := redleaseprometheus.NewCollector(leaseServer)
+	if err != nil {
+		return nil, fmt.Errorf("create Prometheus collector: %w", err)
+	}
+	registry := clientprometheus.NewRegistry()
+	if err := registry.Register(collector); err != nil {
+		return nil, fmt.Errorf("register Prometheus collector: %w", err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
+	return mux, nil
+}
+
+func (e *metricsEndpoint) Close() error {
+	serverErr := e.server.Close()
+	listenerErr := e.listener.Close()
+	if errors.Is(listenerErr, net.ErrClosed) {
+		listenerErr = nil
+	}
+	return errors.Join(serverErr, listenerErr)
 }
 
 func uint32Flag(flags *flag.FlagSet, target *uint32, name, usage string) {
