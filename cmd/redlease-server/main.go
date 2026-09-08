@@ -103,6 +103,18 @@ func run(args []string, flagOutput io.Writer, logger *log.Logger) error {
 		}
 		logger.Print("stopped")
 		return nil
+
+	case fatalErr := <-leaseServer.Fatal():
+		logger.Printf("state=FAILED error=%v; shutting down", fatalErr)
+		grpcServer.Stop()
+		closeErr := leaseServer.Close()
+		serveResult := <-serveErr
+		if serveResult != nil && !errors.Is(serveResult, grpc.ErrServerStopped) {
+			serveResult = fmt.Errorf("serve gRPC during failed shutdown: %w", serveResult)
+		} else {
+			serveResult = nil
+		}
+		return errors.Join(fatalErr, closeErr, serveResult)
 	}
 }
 

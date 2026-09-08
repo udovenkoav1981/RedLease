@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"io"
 	"sync"
 
@@ -22,9 +23,17 @@ type streamSession struct {
 
 // LeaseStream multiplexes requests through the global shard workers. Recv is
 // performed by one goroutine and Send only by the handler goroutine.
-func (s *Server) LeaseStream(stream grpc.BidiStreamingServer[redleasev1.ClientRequest, redleasev1.ServerResponse]) error {
-	if s.closed.Load() {
-		return status.Error(codes.Unavailable, "server is closed")
+func (s *Server) LeaseStream(
+	stream grpc.BidiStreamingServer[redleasev1.ClientRequest, redleasev1.ServerResponse],
+) (result error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			s.failRecoveredPanic("serving stream", recovered)
+			result = s.streamUnavailableError()
+		}
+	}()
+	if err := s.streamUnavailableError(); err != nil {
+		return err
 	}
 
 	ctx, cancel := context.WithCancel(stream.Context())
@@ -39,14 +48,21 @@ func (s *Server) LeaseStream(stream grpc.BidiStreamingServer[redleasev1.ClientRe
 		slots:     make(chan struct{}, s.config.MaxInFlightPerStream),
 		recvDone:  make(chan error, 1),
 	}
-	go session.receive(stream)
+	go session.receiveSafely(stream)
 
 	recvDone := session.recvDone
 	for {
 		select {
 		case response, ok := <-session.responses:
 			if !ok {
+				if err := s.streamUnavailableError(); err != nil {
+					return err
+				}
 				return nil
+			}
+			if err := s.streamUnavailableError(); err != nil {
+				session.releaseSlot()
+				return err
 			}
 			if err := stream.Send(response); err != nil {
 				return err
@@ -62,11 +78,40 @@ func (s *Server) LeaseStream(stream grpc.BidiStreamingServer[redleasev1.ClientRe
 			recvDone = nil
 
 		case <-ctx.Done():
-			if s.closed.Load() {
-				return status.Error(codes.Unavailable, "server is closed")
+			if err := s.streamUnavailableError(); err != nil {
+				return err
 			}
-			return status.FromContextError(stream.Context().Err()).Err()
+			if err := stream.Context().Err(); err != nil {
+				return status.FromContextError(err).Err()
+			}
+			return status.Error(codes.Unavailable, "server stream is unavailable")
 		}
+	}
+}
+
+func (s *streamSession) receiveSafely(
+	stream grpc.BidiStreamingServer[redleasev1.ClientRequest, redleasev1.ServerResponse],
+) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			s.server.failRecoveredPanic("receiving stream request", recovered)
+			select {
+			case s.recvDone <- s.server.streamUnavailableError():
+			default:
+			}
+		}
+	}()
+	s.receive(stream)
+}
+
+func (s *Server) streamUnavailableError() error {
+	switch serverPhase(s.phase.Load()) {
+	case phaseFailed:
+		return status.Error(codes.Unavailable, ErrServerFailed.Error())
+	case phaseClosed:
+		return status.Error(codes.Unavailable, "server is closed")
+	default:
+		return nil
 	}
 }
 
@@ -74,6 +119,11 @@ func (s *streamSession) receive(stream grpc.BidiStreamingServer[redleasev1.Clien
 	var pending pendingJobs
 	defer func() {
 		go func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					s.server.failRecoveredPanic("closing stream responses", recovered)
+				}
+			}()
 			pending.Wait()
 			close(s.responses)
 		}()
@@ -93,6 +143,11 @@ func (s *streamSession) receive(stream grpc.BidiStreamingServer[redleasev1.Clien
 
 		decoded, directResponse, err := s.server.decodeRequest(request)
 		if err != nil {
+			s.releaseSlot()
+			s.recvDone <- err
+			return
+		}
+		if err := s.server.streamUnavailableError(); err != nil {
 			s.releaseSlot()
 			s.recvDone <- err
 			return
@@ -118,7 +173,11 @@ func (s *streamSession) receive(stream grpc.BidiStreamingServer[redleasev1.Clien
 		if !s.server.dispatch(s.ctx.Done(), shardJob{operation: decoded, complete: complete}) {
 			pending.Done()
 			s.releaseSlot()
-			s.recvDone <- status.Error(codes.Unavailable, "server is closed")
+			if err := s.server.streamUnavailableError(); err != nil {
+				s.recvDone <- err
+			} else {
+				s.recvDone <- status.Error(codes.Unavailable, "server is not accepting work")
+			}
 			return
 		}
 	}
@@ -147,7 +206,7 @@ func (s *streamSession) releaseSlot() {
 	select {
 	case <-s.slots:
 	default:
-		panic("server: released an unreserved stream slot")
+		s.server.fail(errors.New("released an unreserved stream slot"))
 	}
 }
 

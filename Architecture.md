@@ -36,6 +36,7 @@ Steady-state target        N/N
 Restart protection         quarantine > protocolMaxTTL + safetyMargin
 Forced lease overwrite     forbidden
 Global fencing token       none
+Internal invariant failure controlled fail-stop + owner notification
 ```
 
 - Архитектура не использует leader-based replicated log. 
@@ -92,6 +93,37 @@ on-demand cleanup: каждый shard удаляет из heap истёкшие 
 ближайшего deadline. После очистки reservation повторяется один раз. Если место
 не появилось, server возвращает `KEY_LIMIT_REACHED`. Периодического timer и
 полного обхода map нет.
+
+### 3.1. Controlled fail-stop
+
+Lock-server имеет однонаправленный lifecycle:
+
+```text
+QUARANTINE -> ACTIVE -> FAILED
+     |           |         |
+     `-----------+---------+-> CLOSED
+```
+
+Если server обнаруживает внутреннее нарушение инварианта, продолжение работы с
+потенциально повреждённым RAM-состоянием запрещено. Server атомарно переходит в
+`FAILED`, отменяет свой внутренний context и тем самым завершает все активные
+streams. Новые streams и все операции, включая `GetTTL`, отклоняются как
+`Unavailable`. Переход из `FAILED` обратно в `ACTIVE` невозможен.
+
+Server library не вызывает `panic` или `os.Exit` для обнаруженного нарушения.
+Вместо этого публичный `Server.Fatal()` возвращает receive-only buffered channel,
+в который ровно один раз передаётся non-nil ошибка `err`, для которой
+`errors.Is(err, server.ErrServerFailed)` возвращает `true`. Нормальный `Close`
+не публикует fatal error и не закрывает этот channel.
+
+Владелец library обязан следить за `Server.Fatal()`, после сигнала вывести
+диагностику, вызвать `Close` и вывести экземпляр из эксплуатации. Поставляемый
+standalone launcher выполняет этот lifecycle автоматически. Созданный взамен
+экземпляр проходит обычный restart quarantine.
+
+Автоматическая коррекция неизвестного повреждения, например saturating reset
+глобального счётчика занятых key до нуля, запрещена: она могла бы скрыть
+рассогласование счётчика с shard maps и нарушить `maxKeys`.
 
 ## 4. Lease identity
 

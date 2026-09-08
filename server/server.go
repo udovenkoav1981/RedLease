@@ -27,6 +27,10 @@ const (
 	defaultMaxInFlightPerStream = 256
 )
 
+// ErrServerFailed identifies a fatal internal server error. The affected
+// Server has stopped accepting work and cannot be returned to service.
+var ErrServerFailed = errors.New("RedLease server failed")
+
 // Config controls one in-memory lock-server instance. MaxTTL is measured in
 // milliseconds. Zero values for MaxKeys and the queue-related fields select
 // implementation defaults.
@@ -76,6 +80,7 @@ type serverPhase uint32
 const (
 	phaseQuarantine serverPhase = iota
 	phaseActive
+	phaseFailed
 	phaseClosed
 )
 
@@ -86,19 +91,20 @@ type Server struct {
 
 	config Config
 
-	phase  atomic.Uint32
-	closed atomic.Bool
-	keys   atomic.Uint64
+	phase atomic.Uint32
+	keys  atomic.Uint64
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	timer  *time.Timer
+	fatal  chan error
 
 	shards []*leaseShard
 
 	dispatchMu sync.RWMutex
 	// cleanupMu prevents concurrent capacity-triggered scans of all shards.
 	cleanupMu sync.Mutex
+	failOnce  sync.Once
 	closeOnce sync.Once
 	wg        sync.WaitGroup
 }
@@ -116,6 +122,7 @@ func New(c Config) (*Server, error) {
 		config: config,
 		ctx:    ctx,
 		cancel: cancel,
+		fatal:  make(chan error, 1),
 		shards: make([]*leaseShard, config.ShardCount),
 	}
 	s.phase.Store(uint32(phaseQuarantine))
@@ -142,11 +149,33 @@ func (s *Server) Register(registrar grpc.ServiceRegistrar) {
 	redleasev1.RegisterRedLeaseServer(registrar, s)
 }
 
+// Fatal returns a channel which receives exactly one non-nil error if the
+// server detects an unrecoverable internal failure. Detection moves the server
+// to FAILED and cancels its active streams. The channel is buffered so failure
+// detection never waits for the owner, and normal Close does not send to it.
+// A failed Server cannot be returned to service and must be closed.
+func (s *Server) Fatal() <-chan error {
+	return s.fatal
+}
+
+func (s *Server) fail(cause error) {
+	s.failOnce.Do(func() {
+		failure := fmt.Errorf("%w: %v", ErrServerFailed, cause)
+		for {
+			phase := serverPhase(s.phase.Load())
+			if phase == phaseClosed || s.phase.CompareAndSwap(uint32(phase), uint32(phaseFailed)) {
+				break
+			}
+		}
+		s.cancel()
+		s.fatal <- failure
+	})
+}
+
 // Close stops accepting work, cancels active streams and drains work already
 // submitted to the shard queues. It is safe to call Close more than once.
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
-		s.closed.Store(true)
 		s.phase.Store(uint32(phaseClosed))
 		s.cancel()
 
@@ -168,6 +197,11 @@ func (s *Server) Close() error {
 func (s *Server) runQuarantine() {
 	defer s.wg.Done()
 	defer s.timer.Stop()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			s.failRecoveredPanic("running quarantine", recovered)
+		}
+	}()
 
 	select {
 	case <-s.timer.C:

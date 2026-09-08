@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"io"
 	"math"
 	"strconv"
@@ -108,6 +109,125 @@ func TestQuarantineAndGetTTL(t *testing.T) {
 	acquire = s.apply(shard, operation{requestID: 14, kind: operationAcquire, key: "key", leaseID: id, requestedTTLMS: 1000})
 	if got := acquire.GetAcquire().GetStatus(); got != redleasev1.LeaseStatus_LEASE_STATUS_OK {
 		t.Fatalf("Acquire after quarantine = %s", got)
+	}
+}
+
+func TestKeyCountUnderflowFailsServerWithoutPanicking(t *testing.T) {
+	s := newTestServer(t, 1_000, 1)
+	activateServer(t, s)
+
+	if released := s.releaseKeys(1); released {
+		t.Fatal("releaseKeys reported success for an underflow")
+	}
+
+	select {
+	case err := <-s.Fatal():
+		if !errors.Is(err, ErrServerFailed) {
+			t.Fatalf("fatal error = %v, want ErrServerFailed", err)
+		}
+		if !strings.Contains(err.Error(), "release 1 reservations from 0") {
+			t.Fatalf("fatal error lacks counter context: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not publish its fatal error")
+	}
+
+	if got := serverPhase(s.phase.Load()); got != phaseFailed {
+		t.Fatalf("server phase = %d, want FAILED", got)
+	}
+	select {
+	case <-s.ctx.Done():
+	default:
+		t.Fatal("server failure did not cancel active streams")
+	}
+
+	response := s.apply(s.shards[0], operation{
+		kind:           operationAcquire,
+		key:            "key",
+		leaseID:        leaseID{clientID: 1, bootID: 1, leaseSeq: 1},
+		requestedTTLMS: 1_000,
+	}).GetAcquire()
+	if response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_NOT_READY {
+		t.Fatalf("Acquire after failure = %s, want NOT_READY", response.GetStatus())
+	}
+
+	stream := newFakeLeaseStream(getTTLRequest(1))
+	if err := s.LeaseStream(stream); status.Code(err) != codes.Unavailable {
+		t.Fatalf("new stream after failure error = %v, want Unavailable", err)
+	}
+	select {
+	case response := <-stream.sent:
+		t.Fatalf("failed server answered GetTTL: %v", response)
+	default:
+	}
+
+	if released := s.releaseKeys(1); released {
+		t.Fatal("second releaseKeys reported success for an underflow")
+	}
+	select {
+	case err := <-s.Fatal():
+		t.Fatalf("server published a second fatal error: %v", err)
+	default:
+	}
+}
+
+func TestNormalCloseDoesNotPublishFatalError(t *testing.T) {
+	s := newTestServer(t, 1_000, 1)
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-s.Fatal():
+		t.Fatalf("normal Close published fatal error: %v", err)
+	default:
+	}
+}
+
+func TestShardPanicIsConvertedToControlledFailure(t *testing.T) {
+	s := newTestServer(t, 1_000, 1)
+	activateServer(t, s)
+	shard := s.shards[0]
+	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
+	corrupted := &lease{
+		key:       "key",
+		id:        id,
+		deadline:  testEpoch + 1_000,
+		heapIndex: 2,
+	}
+	shard.leases[corrupted.key] = corrupted
+	shard.deadlines = leaseDeadlineHeap{corrupted}
+	s.keys.Store(1)
+
+	responses := make(chan *redleasev1.ServerResponse, 1)
+	if !s.dispatch(context.Background().Done(), shardJob{
+		operation: operation{
+			requestID: 1,
+			kind:      operationRelease,
+			key:       corrupted.key,
+			leaseID:   id,
+		},
+		complete: func(response *redleasev1.ServerResponse) {
+			responses <- response
+		},
+	}) {
+		t.Fatal("dispatch corrupted Release")
+	}
+
+	select {
+	case response := <-responses:
+		if got := response.GetRelease().GetStatus(); got != redleasev1.LeaseStatus_LEASE_STATUS_NOT_READY {
+			t.Fatalf("corrupted Release = %s, want NOT_READY", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("corrupted Release did not complete")
+	}
+	select {
+	case err := <-s.Fatal():
+		if !errors.Is(err, ErrServerFailed) || !strings.Contains(err.Error(), "panic while processing shard operation") {
+			t.Fatalf("fatal error = %v, want recovered panic", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("recovered panic did not publish fatal error")
 	}
 }
 

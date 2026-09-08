@@ -2,7 +2,9 @@ package server
 
 import (
 	"container/heap"
+	"fmt"
 	"hash/maphash"
+	"runtime/debug"
 	"sync"
 
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
@@ -91,9 +93,51 @@ type leaseShard struct {
 
 func (s *Server) runShard(shard *leaseShard) {
 	defer s.wg.Done()
+
+	var current shardJob
+	hasCurrent := false
+	completing := false
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			s.failRecoveredPanic("processing shard operation", recovered)
+			if hasCurrent && !completing {
+				s.completeFailedJob(current)
+			}
+			// The owner closes a failed Server after receiving Fatal. Drain the
+			// already accepted jobs so their stream waiters can also finish.
+			for queued := range shard.jobs {
+				s.completeFailedJob(queued)
+			}
+		}
+	}()
+
 	for job := range shard.jobs {
-		job.complete(s.apply(shard, job.operation))
+		current = job
+		hasCurrent = true
+		response := s.apply(shard, job.operation)
+		completing = true
+		job.complete(response)
+		completing = false
+		hasCurrent = false
 	}
+}
+
+func (s *Server) completeFailedJob(job shardJob) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			s.failRecoveredPanic("completing failed shard operation", recovered)
+		}
+	}()
+	job.complete(notReadyResponse(job.operation))
+}
+
+func (s *Server) failRecoveredPanic(scope string, recovered any) {
+	s.fail(fmt.Errorf(
+		"panic while %s: %v\n%s",
+		scope,
+		recovered,
+		debug.Stack(),
+	))
 }
 
 func (shard *leaseShard) addLease(key string, id leaseID, deadline uint64) {
@@ -122,20 +166,28 @@ func (shard *leaseShard) removeExpiredLeases(now uint64) uint64 {
 	return deleted
 }
 
-func (s *Server) removeExpiredKeys(now uint64) {
+func (s *Server) removeExpiredKeys(now uint64) bool {
 	s.cleanupMu.Lock()
 	defer s.cleanupMu.Unlock()
 
 	var deleted uint64
 	for _, shard := range s.shards {
-		shard.mu.Lock()
-		deleted += shard.removeExpiredLeases(now)
-		shard.mu.Unlock()
+		deleted += removeExpiredKeysFromShard(shard, now)
 	}
-	s.releaseKeys(deleted)
+	return s.releaseKeys(deleted)
+}
+
+func removeExpiredKeysFromShard(shard *leaseShard, now uint64) uint64 {
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	return shard.removeExpiredLeases(now)
 }
 
 func (s *Server) apply(shard *leaseShard, op operation) *redleasev1.ServerResponse {
+	if op.kind > operationRelease {
+		s.fail(fmt.Errorf("unknown operation kind %d", op.kind))
+		return &redleasev1.ServerResponse{RequestId: op.requestID}
+	}
 	if !s.active() {
 		return notReadyResponse(op)
 	}
@@ -152,7 +204,7 @@ func (s *Server) apply(shard *leaseShard, op operation) *redleasev1.ServerRespon
 	case operationRelease:
 		return s.release(shard, op, now)
 	default:
-		panic("server: unknown operation kind")
+		return &redleasev1.ServerResponse{RequestId: op.requestID}
 	}
 }
 
@@ -160,47 +212,60 @@ func (s *Server) acquire(shard *leaseShard, op operation, now uint64) *redleasev
 	effectiveTTLMS := min(op.requestedTTLMS, s.config.MaxTTL)
 	cleanupAttempted := false
 	for {
-		shard.mu.Lock()
-		current, exists := shard.leases[op.key]
-		if exists && current.deadline > now && current.id == op.leaseID {
-			response := acquireResponse(
-				op.requestID,
-				redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED,
-				remainingTTLMS(current.deadline, now, s.config.MaxTTL),
-			)
-			shard.mu.Unlock()
+		response, capacityFull := s.acquireLocked(shard, op, now, effectiveTTLMS)
+		if !capacityFull {
 			return response
 		}
-		if exists && current.deadline > now {
-			shard.mu.Unlock()
-			return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_BUSY, 0)
-		}
-		if exists {
-			shard.removeLease(current)
-			s.releaseKeys(1)
-		}
-
-		if effectiveTTLMS == 0 {
-			shard.mu.Unlock()
-			return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK, 0)
-		}
-		if s.reserveKey() {
-			shard.addLease(
-				op.key,
-				op.leaseID,
-				boottime.Add(now, effectiveTTLMS),
-			)
-			shard.mu.Unlock()
-			return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK, effectiveTTLMS)
-		}
-		shard.mu.Unlock()
 
 		if cleanupAttempted {
 			return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_KEY_LIMIT_REACHED, 0)
 		}
-		s.removeExpiredKeys(now)
+		if !s.removeExpiredKeys(now) {
+			return notReadyResponse(op)
+		}
 		cleanupAttempted = true
 	}
+}
+
+func (s *Server) acquireLocked(
+	shard *leaseShard,
+	op operation,
+	now uint64,
+	effectiveTTLMS uint64,
+) (*redleasev1.ServerResponse, bool) {
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	current, exists := shard.leases[op.key]
+	if exists && current.deadline > now && current.id == op.leaseID {
+		return acquireResponse(
+			op.requestID,
+			redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED,
+			remainingTTLMS(current.deadline, now, s.config.MaxTTL),
+		), false
+	}
+	if exists && current.deadline > now {
+		return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_BUSY, 0), false
+	}
+	if exists {
+		shard.removeLease(current)
+		if !s.releaseKeys(1) {
+			return notReadyResponse(op), false
+		}
+	}
+
+	if effectiveTTLMS == 0 {
+		return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK, 0), false
+	}
+	if !s.reserveKey() {
+		return nil, true
+	}
+	shard.addLease(
+		op.key,
+		op.leaseID,
+		boottime.Add(now, effectiveTTLMS),
+	)
+	return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK, effectiveTTLMS), false
 }
 
 func (s *Server) renew(shard *leaseShard, op operation, now uint64) *redleasev1.ServerResponse {
@@ -213,7 +278,9 @@ func (s *Server) renew(shard *leaseShard, op operation, now uint64) *redleasev1.
 	}
 	if current.deadline <= now {
 		shard.removeLease(current)
-		s.releaseKeys(1)
+		if !s.releaseKeys(1) {
+			return notReadyResponse(op)
+		}
 		return renewResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_STALE, 0)
 	}
 	if current.id != op.leaseID {
@@ -237,7 +304,9 @@ func (s *Server) release(shard *leaseShard, op operation, now uint64) *redleasev
 	current, exists := shard.leases[op.key]
 	if exists && (current.deadline <= now || current.id == op.leaseID) {
 		shard.removeLease(current)
-		s.releaseKeys(1)
+		if !s.releaseKeys(1) {
+			return notReadyResponse(op)
+		}
 	}
 	return releaseResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK)
 }
@@ -288,7 +357,7 @@ func statusResponse(op operation, status redleasev1.LeaseStatus) *redleasev1.Ser
 	case operationRelease:
 		return releaseResponse(op.requestID, status)
 	default:
-		panic("server: unknown operation kind")
+		return &redleasev1.ServerResponse{RequestId: op.requestID}
 	}
 }
 
@@ -304,16 +373,22 @@ func (s *Server) reserveKey() bool {
 	}
 }
 
-func (s *Server) releaseKeys(count uint64) {
+func (s *Server) releaseKeys(count uint64) bool {
 	for count != 0 {
 		current := s.keys.Load()
 		if count > current {
-			panic("server: lease key count underflow")
+			s.fail(fmt.Errorf(
+				"lease key count underflow: release %d reservations from %d",
+				count,
+				current,
+			))
+			return false
 		}
 		if s.keys.CompareAndSwap(current, current-count) {
-			return
+			return true
 		}
 	}
+	return true
 }
 
 var hashSeed = maphash.MakeSeed()
@@ -323,14 +398,14 @@ func (s *Server) shardIndex(key string) int {
 }
 
 func (s *Server) dispatch(ctxDone <-chan struct{}, job shardJob) bool {
-	if s.closed.Load() {
+	if !s.active() {
 		return false
 	}
 
 	shard := s.shards[s.shardIndex(job.operation.key)]
 	s.dispatchMu.RLock()
 	defer s.dispatchMu.RUnlock()
-	if s.closed.Load() {
+	if !s.active() {
 		return false
 	}
 	select {
