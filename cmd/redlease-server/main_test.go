@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"log/slog"
 	"math"
@@ -66,7 +67,7 @@ func TestParseFlagsCustomValues(t *testing.T) {
 func TestParseFlagsHelpDescribesLocalPlaintextLauncher(t *testing.T) {
 	var output bytes.Buffer
 	_, err := parseFlags([]string{"-help"}, &output)
-	if err != flag.ErrHelp {
+	if !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("parseFlags help error = %v, want flag.ErrHelp", err)
 	}
 	for _, fragment := range []string{
@@ -94,7 +95,11 @@ func TestMetricsHandlerServesPrivateRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
-	defer leaseServer.Close()
+	t.Cleanup(func() {
+		if err := leaseServer.Close(); err != nil {
+			t.Errorf("close server: %v", err)
+		}
+	})
 
 	handler, err := newMetricsHandler(leaseServer)
 	if err != nil {

@@ -50,7 +50,7 @@ func main() {
 	}
 }
 
-func run(args []string, flagOutput io.Writer, logger *slog.Logger) error {
+func run(args []string, flagOutput io.Writer, logger *slog.Logger) (runErr error) {
 	config, err := parseFlags(args, flagOutput)
 	if err != nil {
 		return err
@@ -64,13 +64,22 @@ func run(args []string, flagOutput io.Writer, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("listen on %q: %w", config.listenAddress, err)
 	}
-	defer listener.Close()
+	defer func() {
+		closeErr := listener.Close()
+		if closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+			runErr = errors.Join(runErr, fmt.Errorf("close gRPC listener: %w", closeErr))
+		}
+	}()
 
 	leaseServer, err := server.New(serverConfig)
 	if err != nil {
 		return fmt.Errorf("create RedLease server: %w", err)
 	}
-	defer leaseServer.Close()
+	defer func() {
+		if closeErr := leaseServer.Close(); closeErr != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("close RedLease server: %w", closeErr))
+		}
+	}()
 
 	grpcServer := grpc.NewServer()
 	leaseServer.Register(grpcServer)
@@ -82,7 +91,11 @@ func run(args []string, flagOutput io.Writer, logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
-		defer metrics.Close()
+		defer func() {
+			if closeErr := metrics.Close(); closeErr != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("close Prometheus metrics endpoint: %w", closeErr))
+			}
+		}()
 	}
 
 	logger.Info(
@@ -190,8 +203,8 @@ func parseFlags(args []string, output io.Writer) (launcherConfig, error) {
 		"maximum requests in flight per stream (0 uses the library default)",
 	)
 	flags.Usage = func() {
-		fmt.Fprintf(output, "Usage: %s [flags]\n\n", flags.Name())
-		fmt.Fprintln(output, "Local test launcher using plaintext gRPC; no TLS or authentication.")
+		_, _ = fmt.Fprintf(output, "Usage: %s [flags]\n\n", flags.Name())
+		_, _ = fmt.Fprintln(output, "Local test launcher using plaintext gRPC; no TLS or authentication.")
 		flags.PrintDefaults()
 	}
 

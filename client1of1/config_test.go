@@ -75,7 +75,11 @@ func TestNewAppliesResponseTimeout(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
-			defer client.Close()
+			t.Cleanup(func() {
+				if err := client.Close(); err != nil {
+					t.Errorf("close client: %v", err)
+				}
+			})
 			if client.responseTimeout != test.timeout {
 				t.Fatalf("response timeout = %v, want %v", client.responseTimeout, test.timeout)
 			}

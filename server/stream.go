@@ -73,7 +73,7 @@ func (s *Server) LeaseStream(
 			session.releaseSlot()
 
 		case err := <-recvDone:
-			if err != nil && err != io.EOF {
+			if err != nil && !errors.Is(err, io.EOF) {
 				return err
 			}
 			// No more jobs can be added after receive returns. Its waiter closes

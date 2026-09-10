@@ -219,7 +219,7 @@ func (s *Server) Fatal() <-chan error {
 
 func (s *Server) fail(cause error) {
 	s.failOnce.Do(func() {
-		failure := fmt.Errorf("%w: %v", ErrServerFailed, cause)
+		failure := fmt.Errorf("%w: %w", ErrServerFailed, cause)
 		for {
 			phase := serverPhase(s.phase.Load())
 			if phase == phaseClosed || s.phase.CompareAndSwap(uint32(phase), uint32(phaseFailed)) {
