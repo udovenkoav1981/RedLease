@@ -120,7 +120,7 @@ func (c *Client) Acquire(
 		return lease, nil
 	}
 
-	c.release(lease.key, id)
+	c.release(lease.key, id) //nolint:contextcheck // Cleanup must outlive caller cancellation.
 	return nil, &operationError{kind: ErrNotAcquired, cause: err}
 }
 

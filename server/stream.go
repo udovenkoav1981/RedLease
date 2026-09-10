@@ -15,7 +15,7 @@ import (
 
 type streamSession struct {
 	server *Server
-	ctx    context.Context
+	ctx    context.Context //nolint:containedctx // Session owns this stream-scoped context.
 
 	responses chan *redleasev1.ServerResponse
 	slots     chan struct{}

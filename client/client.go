@@ -32,7 +32,7 @@ type Client struct {
 
 	idGenerator *leaseid.Generator
 
-	ctx    context.Context
+	ctx    context.Context //nolint:containedctx // Client owns this lifecycle context.
 	cancel context.CancelFunc
 
 	closeOnce sync.Once

@@ -118,7 +118,7 @@ type Server struct {
 	activeStreams   atomic.Int64
 	operationTotals [operationKindCount]atomic.Uint64
 
-	ctx    context.Context
+	ctx    context.Context //nolint:containedctx // Server owns streams and workers lifecycle.
 	cancel context.CancelFunc
 	timer  *time.Timer
 	fatal  chan error

@@ -13,7 +13,7 @@ import (
 )
 
 type fakeLeaseStream struct {
-	ctx       context.Context
+	ctx       context.Context //nolint:containedctx // Test stream owns this context.
 	requests  chan *redleasev1.ClientRequest
 	responses chan *redleasev1.ServerResponse
 }

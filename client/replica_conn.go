@@ -60,7 +60,7 @@ type replicaConn struct {
 	backoff backoff.Exponential
 	logger  *slog.Logger
 
-	ctx    context.Context
+	ctx    context.Context //nolint:containedctx // Connection owns its manager lifecycle.
 	cancel context.CancelFunc
 
 	stateMu    sync.Mutex

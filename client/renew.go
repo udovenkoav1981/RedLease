@@ -76,6 +76,7 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 
 	for replica := range l.client.replicas {
 		request := newRenewRequest(l.key, l.id, ttl)
+		//nolint:contextcheck // Submission and response collection intentionally have different lifetimes.
 		go l.submitRenew(
 			operationContext,
 			collectionContext,

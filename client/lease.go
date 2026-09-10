@@ -25,7 +25,7 @@ type Lease struct {
 	key          []byte
 	requestedTTL Milliseconds
 	now          uint64
-	ctx          context.Context
+	ctx          context.Context //nolint:containedctx // Lease owns healing and cancellation lifecycle.
 	cancel       context.CancelFunc
 
 	stateMu        sync.RWMutex

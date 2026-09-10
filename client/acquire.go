@@ -89,6 +89,7 @@ func (c *Client) Acquire(
 
 	for replica := range c.replicas {
 		request := newAcquireRequest(lease.key, id, ttl)
+		//nolint:contextcheck // Submission and response collection intentionally have different lifetimes.
 		go c.submitAcquire(
 			operationContext,
 			collectionContext,
@@ -108,7 +109,7 @@ func (c *Client) Acquire(
 	if err := c.acquireCancellationError(ctx); err != nil {
 		cancelCollection()
 		lease.cancel()
-		c.cleanupFailedAcquire(lease.key, id)
+		c.cleanupFailedAcquire(lease.key, id) //nolint:contextcheck // Cleanup must outlive caller cancellation.
 		return nil, &notAcquiredError{cause: err}
 	}
 
@@ -153,6 +154,7 @@ func (c *Client) Acquire(
 					}
 
 					lease.setAcquireValidity(validUntil)
+					//nolint:contextcheck // Remaining responses belong to the lease lifecycle, not the caller context.
 					go c.collectRemainingAcquireResults(
 						cancelCollection,
 						lease,
@@ -194,7 +196,7 @@ func (c *Client) Acquire(
 
 	cancelCollection()
 	lease.cancel()
-	c.cleanupFailedAcquire(lease.key, id)
+	c.cleanupFailedAcquire(lease.key, id) //nolint:contextcheck // Cleanup must outlive caller cancellation.
 	if keyLimitSeen {
 		firstFailure = errors.Join(firstFailure, ErrKeyLimitReached)
 	}

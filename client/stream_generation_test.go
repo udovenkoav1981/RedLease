@@ -346,7 +346,7 @@ type fakeStreamOptions struct {
 }
 
 type fakeLeaseClientStream struct {
-	ctx context.Context
+	ctx context.Context //nolint:containedctx // Test stream owns this context.
 
 	sent        chan *redleasev1.ClientRequest
 	receive     chan fakeReceive

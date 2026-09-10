@@ -42,7 +42,7 @@ type Client struct {
 	connection *grpc.ClientConn
 	rpc        redleasev1.RedLeaseClient
 
-	ctx    context.Context
+	ctx    context.Context //nolint:containedctx // Client owns this lifecycle context.
 	cancel context.CancelFunc
 
 	stateMu    sync.Mutex

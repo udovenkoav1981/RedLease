@@ -1018,7 +1018,7 @@ func keysForDifferentShards(t *testing.T, s *Server) ([]byte, []byte) {
 }
 
 type fakeLeaseStream struct {
-	ctx      context.Context
+	ctx      context.Context //nolint:containedctx // Test stream owns this context.
 	requests chan *redleasev1.ClientRequest
 	sent     chan *redleasev1.ServerResponse
 }
