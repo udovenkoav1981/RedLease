@@ -96,9 +96,7 @@ func TestConcurrentLeasesShareOneStream(t *testing.T) {
 	var workers sync.WaitGroup
 	errorsSeen := make(chan error, leaseCount)
 	for index := range leaseCount {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
+		workers.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			lease, err := client.Acquire(ctx, []byte(fmt.Sprintf("key-%d", index)), 1000)
@@ -111,7 +109,7 @@ func TestConcurrentLeasesShareOneStream(t *testing.T) {
 				return
 			}
 			lease.Release()
-		}()
+		})
 	}
 	workers.Wait()
 	close(errorsSeen)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"sync"
@@ -29,9 +30,9 @@ func TestClientAndServersEndToEnd(t *testing.T) {
 	defer cluster.close()
 
 	firstClient := cluster.newClient(t, 1)
-	defer firstClient.Close()
+	defer closeResource(t, "first client", firstClient)
 	secondClient := cluster.newClient(t, 2)
-	defer secondClient.Close()
+	defer closeResource(t, "second client", secondClient)
 
 	waitReady(t, firstClient)
 	waitReady(t, secondClient)
@@ -82,7 +83,7 @@ func TestClientAcquiresWithTwoUnavailableServersEndToEnd(t *testing.T) {
 	defer cluster.close()
 
 	client := cluster.newClient(t, 1)
-	defer client.Close()
+	defer closeResource(t, "client", client)
 	waitReady(t, client)
 	waitForServerActivation()
 
@@ -113,7 +114,7 @@ func TestClientUsesHeterogeneousServerTTLsEndToEnd(t *testing.T) {
 	defer cluster.close()
 
 	client := cluster.newClient(t, 1)
-	defer client.Close()
+	defer closeResource(t, "client", client)
 	waitReady(t, client)
 	waitForServerActivation()
 
@@ -141,7 +142,7 @@ func TestLeaseHealsAfterServerRestartEndToEnd(t *testing.T) {
 	defer cluster.close()
 
 	client := cluster.newClient(t, 1)
-	defer client.Close()
+	defer closeResource(t, "client", client)
 	waitReady(t, client)
 	waitForServerActivation()
 
@@ -185,9 +186,9 @@ func TestFullClusterRestartDoesNotRestoreOldLeaseEndToEnd(t *testing.T) {
 	defer cluster.close()
 
 	firstClient := cluster.newClient(t, 1)
-	defer firstClient.Close()
+	defer closeResource(t, "first client", firstClient)
 	secondClient := cluster.newClient(t, 2)
-	defer secondClient.Close()
+	defer closeResource(t, "second client", secondClient)
 	waitReady(t, firstClient)
 	waitReady(t, secondClient)
 	waitForServerActivation()
@@ -228,7 +229,7 @@ func TestServerKeyLimitEndToEnd(t *testing.T) {
 	defer cluster.close()
 
 	client := cluster.newClient(t, 1)
-	defer client.Close()
+	defer closeResource(t, "client", client)
 	waitReady(t, client)
 	waitForServerActivation()
 
@@ -277,7 +278,7 @@ func TestServerKeySizeLimitOverGRPC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create gRPC connection: %v", err)
 	}
-	defer connection.Close()
+	defer closeResource(t, "gRPC connection", connection)
 
 	streamContext, cancelStream := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancelStream()
@@ -380,7 +381,6 @@ func (c *integrationCluster) newClient(t *testing.T, clientID uint32) *redleasec
 		Logger:          slog.New(slog.DiscardHandler),
 	}
 	for index := range c.listeners {
-		index := index
 		config.Servers[index] = redleaseclient.ServerConfig{
 			Target: fmt.Sprintf("passthrough:///redlease-%d", index),
 			DialOptions: []grpc.DialOption{
@@ -408,7 +408,7 @@ func (c *integrationCluster) close() {
 func (c *integrationCluster) startReplica(t *testing.T, index int) {
 	t.Helper()
 	lockServer, err := redleaseserver.New(redleaseserver.Config{
-		MaxTTL:               uint64(c.ttls[index] / time.Millisecond),
+		MaxTTL:               uint64(c.ttls[index] / time.Millisecond), //nolint:gosec // Test fixtures use positive TTLs.
 		MaxKeys:              c.maxKeys,
 		Logger:               slog.New(slog.DiscardHandler),
 		ShardCount:           4,
@@ -479,6 +479,13 @@ func waitReady(t *testing.T, client *redleaseclient.Client) {
 	defer cancel()
 	if err := client.WaitReady(ctx); err != nil {
 		t.Fatalf("WaitReady: %v", err)
+	}
+}
+
+func closeResource(t *testing.T, name string, closer io.Closer) {
+	t.Helper()
+	if err := closer.Close(); err != nil {
+		t.Errorf("close %s: %v", name, err)
 	}
 }
 
