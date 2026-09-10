@@ -49,10 +49,17 @@ Server metrics             optional owner-registered Prometheus collector
   и один и тот же набор из `N` серверов.
 - Клиент независимо и параллельно обращается ко всем `N` lock-server.
 
-В публичном client config конфигурация выбирается обязательным enum-полем
-`Quorum`: `Quorum1Of1`, `Quorum2Of3` или `Quorum3Of5`. Поле `Servers` содержит
-ровно `N` элементов. Нулевое или неизвестное значение enum и несовпадающее
-число серверов отклоняются при создании клиента.
+В config универсального package `client` конфигурация выбирается обязательным
+enum-полем `Quorum`: `Quorum1Of1`, `Quorum2Of3` или `Quorum3Of5`. Поле `Servers`
+содержит ровно `N` элементов. Нулевое или неизвестное значение enum и
+несовпадающее число серверов отклоняются при создании клиента.
+
+Для фиксированной топологии `1/1` также существует самостоятельный package
+`client1of1`. В его `Config` нет quorum enum и списка replicas: задаётся один
+`Target`. Реализация не является wrapper над универсальным клиентом и не
+содержит fan-out, выбор quorum, replica masks или background healing. При этом
+она сохраняет общий wire protocol, multiplexing по `requestID`, reconnect,
+правила validity и cleanup после неуспешного Acquire.
 
 ## 2. Топология общения клиент-сервер
 
@@ -312,6 +319,9 @@ restart сервера.
 Конкретная retry/backoff policy background healing остаётся параметром
 реализации.
 
+В `client1of1` начальный quorum одновременно является целевым состоянием `1/1`,
+поэтому background healing и client-side Attach отсутствуют.
+
 ### 5.4. Renew
 
 Примерно раз в секунду клиент фиксирует локальное время начала Renew и
@@ -534,10 +544,10 @@ submission barrier до отправки Release.
 ### 7.1. Логирование client library
 
 При создании client владелец обязательно передаёт `*slog.Logger` через
-`client.Config.Logger`. Library добавляет ко всем своим записям атрибуты
-`component=redlease-client` и `client_id`, но не меняет handler, output или
-уровень фильтрации. Logger и его handler остаются собственностью прикладного
-ПО: RedLease не закрывает их и не выполняет flush.
+`client.Config.Logger` или `client1of1.Config.Logger`. Обе реализации добавляют
+ко всем своим записям атрибуты `component=redlease-client` и `client_id`, но не
+меняют handler, output или уровень фильтрации. Logger и его handler остаются
+собственностью прикладного ПО: RedLease не закрывает их и не выполняет flush.
 
 Client не логирует успешные `Acquire` и `Renew`, а также ошибки, синхронно
 возвращаемые вызвавшему их приложению. В лог попадают только фоновые события,
@@ -547,8 +557,9 @@ Client не логирует успешные `Acquire` и `Renew`, а такж�
   stream разрывается;
 - `INFO`, когда stream устанавливается; после периода недоступности запись
   содержит `reconnected=true`;
-- один агрегированный `WARN` на lease, если bounded retry асинхронного
-  `Release` завершился, не получив приемлемый ответ от части replicas.
+- один `WARN` на lease, если bounded retry асинхронного `Release` завершился,
+  не получив приемлемый ответ от lock-server; универсальный client агрегирует
+  в этой записи все не ответившие replicas.
 
 Повторные неудачные попытки reconnect во время одного периода недоступности не
 логируются. Новая `WARN`-запись возможна только после восстановления stream и

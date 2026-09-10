@@ -12,10 +12,16 @@ Client и server поддерживаются только на Linux; для о
 
 ## Установка
 
-Для использования client library:
+Для использования универсального client library:
 
 ```bash
 go get github.com/udovenkoav1981/RedLease/client@latest
+```
+
+Для специализированного клиента с фиксированной топологией `1/1`:
+
+```bash
+go get github.com/udovenkoav1981/RedLease/client1of1@latest
 ```
 
 Для встраивания server и его Prometheus collector:
@@ -107,24 +113,23 @@ go metricsServer.ListenAndServe() // обработку ошибки нужно 
 
 Client является библиотекой и запускается внутри прикладного процесса.
 
-`client.Client` должен быть долгоживущим объектом приложения: он поддерживает
-по одному reconnecting stream к каждому server. `Logger` и transport credentials
-задаются явно. Для локального plaintext server конфигурация `1/1` выглядит так:
+Package `client` поддерживает все конфигурации `1/1`, `2/3` и `3/5`. Package
+`client1of1` — отдельная упрощённая реализация только для одного lock-server;
+в её `Config` вместо `Quorum` и списка `Servers` задаётся один `Target`.
+
+Client должен быть долгоживущим объектом приложения. `Logger` и transport
+credentials задаются явно. Для локального plaintext server специализированный
+client `1/1` настраивается так:
 
 ```go
-client, err := redleaseclient.New(redleaseclient.Config{
-	ClientID: 1, // unique among simultaneously running client processes
-	Quorum:   redleaseclient.Quorum1Of1,
-	Servers: []redleaseclient.ServerConfig{
-		{
-			Target: "127.0.0.1:50051",
-			DialOptions: []grpc.DialOption{
-				grpc.WithTransportCredentials(insecure.NewCredentials()),
-			},
-		},
+client, err := client1of1.New(client1of1.Config{
+	ClientID: 1,
+	Target:   "127.0.0.1:50051",
+	DialOptions: []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	},
 	Logger:          logger,
-	ResponseTimeout: 1000, // milliseconds per server response
+	ResponseTimeout: 1000,
 })
 
 client.WaitReady(startupCtx)
@@ -138,9 +143,9 @@ if lease.Valid() {
 }
 ```
 
-При `Quorum2Of3` список `Servers` должен содержать ровно три адреса, а при
-`Quorum3Of5` — ровно пять. В production вместо `insecure.NewCredentials()`
-нужно передать подходящие TLS credentials.
+Для `Quorum2Of3` и `Quorum3Of5` используется универсальный package `client` со
+списком из трёх или пяти `Servers`. В production вместо
+`insecure.NewCredentials()` нужно передать подходящие TLS credentials.
 
 `WaitReady` проверяет наличие достаточного числа подключённых streams, но не
 завершение server quarantine. `Acquire` выполняет одну попытку и при неудаче
