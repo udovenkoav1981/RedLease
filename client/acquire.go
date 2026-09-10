@@ -168,6 +168,8 @@ func (c *Client) Acquire(
 					keyLimitSeen = true
 				case redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE:
 					largeKeySeen = true
+				default:
+					// Other statuses are represented by notAcquiredError below.
 				}
 			}
 

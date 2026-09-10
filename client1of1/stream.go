@@ -116,7 +116,7 @@ func (g *streamGeneration) submit(
 	}
 	wireRequest := &redleasev1.ClientRequest{
 		RequestId: requestID,
-		Operation: request.Operation,
+		Operation: request.GetOperation(),
 	}
 
 	select {

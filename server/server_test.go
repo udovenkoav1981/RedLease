@@ -549,6 +549,8 @@ func TestServerRejectsKeysLargerThanProtocolLimit(t *testing.T) {
 			leaseStatus = response.GetRenew().GetStatus()
 		case operationRelease:
 			leaseStatus = response.GetRelease().GetStatus()
+		default:
+			t.Fatalf("unexpected operation kind %d", op.kind)
 		}
 		if leaseStatus != redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE {
 			t.Fatalf("operation %d oversized key status = %s, want KEY_TOO_LARGE", op.kind, leaseStatus)

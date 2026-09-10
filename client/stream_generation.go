@@ -213,7 +213,7 @@ func (g *streamGeneration) submit(
 	}
 	requestCopy := &redleasev1.ClientRequest{
 		RequestId: requestID,
-		Operation: request.Operation,
+		Operation: request.GetOperation(),
 	}
 	deadline, _ := ctx.Deadline()
 	outbound := newOutboundStreamRequest(requestCopy, deadline)

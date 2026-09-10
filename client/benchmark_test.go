@@ -101,7 +101,7 @@ func serveBenchmarkReplica(done <-chan struct{}, stream *fakeLeaseClientStream) 
 
 func benchmarkResponse(request *redleasev1.ClientRequest) *redleasev1.ServerResponse {
 	response := &redleasev1.ServerResponse{RequestId: request.GetRequestId()}
-	switch operation := request.Operation.(type) {
+	switch operation := request.GetOperation().(type) {
 	case *redleasev1.ClientRequest_Acquire:
 		response.Result = &redleasev1.ServerResponse_Acquire{
 			Acquire: &redleasev1.AcquireResponse{

@@ -218,17 +218,17 @@ func (s *Server) decodeRequest(request *redleasev1.ClientRequest) (operation, *r
 		return operation{}, nil, status.Error(codes.InvalidArgument, "request is nil")
 	}
 
-	switch value := request.Operation.(type) {
+	switch value := request.GetOperation().(type) {
 	case *redleasev1.ClientRequest_Acquire:
 		if value.Acquire == nil {
 			return operation{}, nil, status.Error(codes.InvalidArgument, "acquire request is nil")
 		}
 		return operation{
-			requestID:      request.RequestId,
+			requestID:      request.GetRequestId(),
 			kind:           operationAcquire,
-			key:            string(value.Acquire.Key),
-			leaseID:        makeLeaseID(value.Acquire.LeaseId),
-			requestedTTLMS: value.Acquire.RequestedTtlMs,
+			key:            string(value.Acquire.GetKey()),
+			leaseID:        makeLeaseID(value.Acquire.GetLeaseId()),
+			requestedTTLMS: value.Acquire.GetRequestedTtlMs(),
 		}, nil, nil
 
 	case *redleasev1.ClientRequest_Renew:
@@ -236,11 +236,11 @@ func (s *Server) decodeRequest(request *redleasev1.ClientRequest) (operation, *r
 			return operation{}, nil, status.Error(codes.InvalidArgument, "renew request is nil")
 		}
 		return operation{
-			requestID:      request.RequestId,
+			requestID:      request.GetRequestId(),
 			kind:           operationRenew,
-			key:            string(value.Renew.Key),
-			leaseID:        makeLeaseID(value.Renew.LeaseId),
-			requestedTTLMS: value.Renew.RequestedTtlMs,
+			key:            string(value.Renew.GetKey()),
+			leaseID:        makeLeaseID(value.Renew.GetLeaseId()),
+			requestedTTLMS: value.Renew.GetRequestedTtlMs(),
 		}, nil, nil
 
 	case *redleasev1.ClientRequest_Release:
@@ -248,10 +248,10 @@ func (s *Server) decodeRequest(request *redleasev1.ClientRequest) (operation, *r
 			return operation{}, nil, status.Error(codes.InvalidArgument, "release request is nil")
 		}
 		return operation{
-			requestID: request.RequestId,
+			requestID: request.GetRequestId(),
 			kind:      operationRelease,
-			key:       string(value.Release.Key),
-			leaseID:   makeLeaseID(value.Release.LeaseId),
+			key:       string(value.Release.GetKey()),
+			leaseID:   makeLeaseID(value.Release.GetLeaseId()),
 		}, nil, nil
 
 	case *redleasev1.ClientRequest_GetTtl:
@@ -259,7 +259,7 @@ func (s *Server) decodeRequest(request *redleasev1.ClientRequest) (operation, *r
 			return operation{}, nil, status.Error(codes.InvalidArgument, "get TTL request is nil")
 		}
 		return operation{}, &redleasev1.ServerResponse{
-			RequestId: request.RequestId,
+			RequestId: request.GetRequestId(),
 			Result: &redleasev1.ServerResponse_GetTtl{GetTtl: &redleasev1.GetTTLResponse{
 				ConfiguredMaxTtlMs: s.config.MaxTTL,
 			}},

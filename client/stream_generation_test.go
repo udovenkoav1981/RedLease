@@ -366,8 +366,8 @@ func (s *fakeLeaseClientStream) Send(request *redleasev1.ClientRequest) error {
 	}
 
 	requestCopy := &redleasev1.ClientRequest{
-		RequestId: request.RequestId,
-		Operation: request.Operation,
+		RequestId: request.GetRequestId(),
+		Operation: request.GetOperation(),
 	}
 	select {
 	case s.sent <- requestCopy:
