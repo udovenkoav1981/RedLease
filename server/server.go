@@ -10,9 +10,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
-	"google.golang.org/grpc"
 )
 
 const (

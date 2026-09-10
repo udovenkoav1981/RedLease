@@ -7,9 +7,10 @@ import (
 	"log/slog"
 	"sync"
 
+	"google.golang.org/grpc"
+
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
-	"google.golang.org/grpc"
 )
 
 var errReplicaClosed = errors.New("replica connection closed")
@@ -30,7 +31,7 @@ func (e *replicaUnavailableError) Unwrap() error {
 }
 
 type streamFactory interface {
-	open(context.Context) (leaseClientStream, error)
+	open(ctx context.Context) (leaseClientStream, error)
 	close() error
 }
 
@@ -125,7 +126,7 @@ func (c *replicaConn) submit(
 
 // readiness returns a level-triggered snapshot plus a channel closed on the
 // next state change. A future Client.WaitReady can safely recheck in a loop.
-func (c *replicaConn) readiness() (ready bool, closed bool, changed <-chan struct{}) {
+func (c *replicaConn) readiness() (ready, closed bool, changed <-chan struct{}) {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	return c.generation != nil && !c.closed, c.closed, c.changed

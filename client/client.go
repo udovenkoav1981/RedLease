@@ -9,8 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	"google.golang.org/grpc"
+
+	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 )
 
 const defaultResponseTimeout = time.Second

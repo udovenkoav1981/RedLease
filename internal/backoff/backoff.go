@@ -36,10 +36,7 @@ func Default() Exponential {
 
 // Duration returns the randomized delay for a zero-based attempt number.
 func (b Exponential) Duration(attempt uint) time.Duration {
-	base := b.initial
-	if base > b.maximum {
-		base = b.maximum
-	}
+	base := min(b.initial, b.maximum)
 	for range attempt {
 		if base >= b.maximum {
 			base = b.maximum

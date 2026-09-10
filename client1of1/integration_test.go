@@ -11,14 +11,15 @@ import (
 	"testing"
 	"time"
 
-	redleaseclient "github.com/udovenkoav1981/RedLease/client1of1"
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
-	redleaseserver "github.com/udovenkoav1981/RedLease/server"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+
+	redleaseclient "github.com/udovenkoav1981/RedLease/client1of1"
+	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+	redleaseserver "github.com/udovenkoav1981/RedLease/server"
 )
 
 func TestClientAndServerEndToEnd(t *testing.T) {

@@ -6,10 +6,11 @@ import (
 	"io"
 	"sync"
 
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
 type streamSession struct {

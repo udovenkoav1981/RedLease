@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"sort"
+	"slices"
 
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
 	"github.com/udovenkoav1981/RedLease/internal/leaseid"
@@ -305,9 +305,7 @@ func bestAcquireQuorum(
 		return 0, false
 	}
 
-	sort.Slice(validities, func(i, j int) bool {
-		return validities[i] < validities[j]
-	})
+	slices.Sort(validities)
 	return validities[len(validities)-quorumSize], true
 }
 

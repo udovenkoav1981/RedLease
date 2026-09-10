@@ -22,7 +22,7 @@ var (
 // stream. The cancel function passed to newStreamGeneration owns the context
 // used to create the stream and must unblock Send and Recv.
 type leaseClientStream interface {
-	Send(*redleasev1.ClientRequest) error
+	Send(request *redleasev1.ClientRequest) error
 	Recv() (*redleasev1.ServerResponse, error)
 	CloseSend() error
 }
@@ -355,10 +355,7 @@ func (g *streamGeneration) sendLoop() {
 }
 
 func (g *streamGeneration) watchSendDeadline(outbound *outboundStreamRequest) {
-	delay := time.Until(outbound.deadline)
-	if delay < 0 {
-		delay = 0
-	}
+	delay := max(time.Until(outbound.deadline), 0)
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 

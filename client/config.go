@@ -1,6 +1,7 @@
 package client
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -37,7 +38,7 @@ type Config struct {
 // membership and ID uniqueness remain deployment responsibilities.
 func (c Config) Validate() error {
 	if c.Logger == nil {
-		return fmt.Errorf("logger must not be nil")
+		return errors.New("logger must not be nil")
 	}
 	serverCount, _, valid := c.Quorum.parameters()
 	if !valid {

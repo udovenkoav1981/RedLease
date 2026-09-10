@@ -493,8 +493,7 @@ func receiveCallResult(t *testing.T, result <-chan streamCallResult) streamCallR
 
 func assertTransportCause(t *testing.T, err, cause error) {
 	t.Helper()
-	var transportErr *streamTransportError
-	if !errors.As(err, &transportErr) {
+	if _, ok := errors.AsType[*streamTransportError](err); !ok {
 		t.Fatalf("error %v is not a stream transport error", err)
 	}
 	if !errors.Is(err, cause) {

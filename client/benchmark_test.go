@@ -16,7 +16,7 @@ func BenchmarkClientAcquireRelease(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 
-	for iteration := 0; iteration < b.N; iteration++ {
+	for iteration := range b.N {
 		key := strconv.AppendInt(nil, int64(iteration), 10)
 		lease, err := client.Acquire(context.Background(), key, 5_000)
 		if err != nil {

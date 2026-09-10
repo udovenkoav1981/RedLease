@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"flag"
 	"log/slog"
 	"math"
@@ -99,7 +100,7 @@ func TestMetricsHandlerServesPrivateRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newMetricsHandler: %v", err)
 	}
-	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", http.NoBody)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {

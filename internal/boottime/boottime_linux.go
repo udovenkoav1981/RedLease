@@ -9,7 +9,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const millisecondsPerSecond = 1_000
+const (
+	millisecondsPerSecond     = 1_000
+	nanosecondsPerMillisecond = 1_000_000
+)
 
 // Now returns milliseconds elapsed on CLOCK_BOOTTIME.
 func Now() uint64 {
@@ -17,7 +20,7 @@ func Now() uint64 {
 	if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &value); err != nil {
 		panic("boottime: clock_gettime: " + err.Error())
 	}
-	return uint64(value.Sec)*millisecondsPerSecond + uint64(value.Nsec)/1_000_000
+	return uint64(value.Sec)*millisecondsPerSecond + uint64(value.Nsec)/nanosecondsPerMillisecond
 }
 
 // Add returns instant plus milliseconds, saturating on overflow.

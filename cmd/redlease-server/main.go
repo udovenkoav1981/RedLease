@@ -18,9 +18,10 @@ import (
 
 	clientprometheus "github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"google.golang.org/grpc"
+
 	"github.com/udovenkoav1981/RedLease/server"
 	redleaseprometheus "github.com/udovenkoav1981/RedLease/server/prometheus"
-	"google.golang.org/grpc"
 )
 
 const (

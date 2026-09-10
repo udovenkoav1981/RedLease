@@ -141,8 +141,7 @@ func TestReplicaConnCallWhenUnavailable(t *testing.T) {
 	connection := newTestReplicaConn(t, factory)
 
 	_, err := connection.call(context.Background(), acquireStreamRequest("key"))
-	var unavailable *replicaUnavailableError
-	if !errors.As(err, &unavailable) {
+	if _, ok := errors.AsType[*replicaUnavailableError](err); !ok {
 		t.Fatalf("error %v is not replicaUnavailableError", err)
 	}
 }
@@ -318,8 +317,7 @@ func waitForReplicaError(t *testing.T, connection *replicaConn, want error) {
 
 func assertReplicaUnavailableCause(t *testing.T, err, cause error) {
 	t.Helper()
-	var unavailable *replicaUnavailableError
-	if !errors.As(err, &unavailable) {
+	if _, ok := errors.AsType[*replicaUnavailableError](err); !ok {
 		t.Fatalf("error %v is not replicaUnavailableError", err)
 	}
 	if !errors.Is(err, cause) {
@@ -329,5 +327,7 @@ func assertReplicaUnavailableCause(t *testing.T, err, cause error) {
 
 // Assert that the test-only stream still satisfies the production factory
 // result type after concurrent lifecycle tests evolve.
-var _ leaseClientStream = (*fakeLeaseClientStream)(nil)
-var _ streamFactory = (*scriptedStreamFactory)(nil)
+var (
+	_ leaseClientStream = (*fakeLeaseClientStream)(nil)
+	_ streamFactory     = (*scriptedStreamFactory)(nil)
+)

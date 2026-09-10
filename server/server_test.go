@@ -14,11 +14,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/udovenkoav1981/RedLease/internal/protocol"
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
+	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
 const testEpoch uint64 = 1_000_000
@@ -540,17 +541,17 @@ func TestServerRejectsKeysLargerThanProtocolLimit(t *testing.T) {
 		{kind: operationRelease, key: tooLarge, leaseID: id},
 	} {
 		response := s.apply(s.shards[0], op)
-		var status redleasev1.LeaseStatus
+		var leaseStatus redleasev1.LeaseStatus
 		switch op.kind {
 		case operationAcquire:
-			status = response.GetAcquire().GetStatus()
+			leaseStatus = response.GetAcquire().GetStatus()
 		case operationRenew:
-			status = response.GetRenew().GetStatus()
+			leaseStatus = response.GetRenew().GetStatus()
 		case operationRelease:
-			status = response.GetRelease().GetStatus()
+			leaseStatus = response.GetRelease().GetStatus()
 		}
-		if status != redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE {
-			t.Fatalf("operation %d oversized key status = %s, want KEY_TOO_LARGE", op.kind, status)
+		if leaseStatus != redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE {
+			t.Fatalf("operation %d oversized key status = %s, want KEY_TOO_LARGE", op.kind, leaseStatus)
 		}
 	}
 	if got := s.keys.Load(); got != 0 {

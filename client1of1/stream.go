@@ -18,7 +18,7 @@ var (
 )
 
 type leaseClientStream interface {
-	Send(*redleasev1.ClientRequest) error
+	Send(request *redleasev1.ClientRequest) error
 	Recv() (*redleasev1.ServerResponse, error)
 	CloseSend() error
 }

@@ -26,7 +26,7 @@ func BenchmarkServerAcquireReleaseQueue(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 
-	for iteration := 0; iteration < b.N; iteration++ {
+	for iteration := range b.N {
 		key := strconv.Itoa(iteration)
 		id := leaseID{clientID: 1, bootID: 1, leaseSeq: uint64(iteration + 1)}
 		if !s.dispatch(ctx.Done(), shardJob{

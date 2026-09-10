@@ -21,6 +21,7 @@ type releaseSubmission struct {
 
 type releaseRetries struct {
 	sync.WaitGroup
+
 	failed atomic.Uint64
 }
 

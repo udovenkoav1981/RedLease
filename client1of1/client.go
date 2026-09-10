@@ -8,10 +8,11 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
 	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
-	"google.golang.org/grpc"
 )
 
 // ErrClientClosed is returned when an operation is attempted after Close.

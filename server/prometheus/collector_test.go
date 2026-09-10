@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	clientprometheus "github.com/prometheus/client_golang/prometheus"
+
 	redleaseserver "github.com/udovenkoav1981/RedLease/server"
 )
 

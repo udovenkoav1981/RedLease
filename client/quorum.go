@@ -86,10 +86,7 @@ func renewQuorumValidity(
 	}
 
 	quorumValidUntil := selectQuorumValidUntil(candidates)
-	validUntil := previousValidUntil
-	if quorumValidUntil > validUntil {
-		validUntil = quorumValidUntil
-	}
+	validUntil := max(previousValidUntil, quorumValidUntil)
 
 	return validUntil, now < quorumValidUntil
 }
