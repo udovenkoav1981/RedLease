@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -60,7 +61,7 @@ func run(args []string, flagOutput io.Writer, logger *slog.Logger) (runErr error
 		return err
 	}
 
-	listener, err := net.Listen("tcp", config.listenAddress)
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", config.listenAddress)
 	if err != nil {
 		return fmt.Errorf("listen on %q: %w", config.listenAddress, err)
 	}
@@ -232,7 +233,7 @@ func startMetricsEndpoint(
 	if err != nil {
 		return nil, err
 	}
-	listener, err := net.Listen("tcp", address)
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", address)
 	if err != nil {
 		return nil, fmt.Errorf("listen for Prometheus metrics on %q: %w", address, err)
 	}
