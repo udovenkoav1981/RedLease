@@ -1,0 +1,271 @@
+version: "2"
+run:
+  allow-parallel-runners: true
+linters:
+  default: none
+  enable:
+    - asasalint
+    - asciicheck
+    - bidichk
+    - bodyclose # проверка что закрыли body запроса
+    - canonicalheader
+    - containedctx
+    - contextcheck
+    - copyloopvar
+    - cyclop
+    - decorder
+    #- depguard # Go linter that checks if package imports are in a list of acceptable packages.
+    - dogsled
+    - dupl
+    - dupword
+    - durationcheck
+    - embeddedstructfieldcheck
+    - err113
+    - errcheck
+    - errchkjson
+    - errname
+    - errorlint
+    - exhaustive
+    - exptostd 
+    - fatcontext
+    # - forbidigo  
+    - forcetypeassert
+    - funcorder
+    - funlen
+    - ginkgolinter 
+    - gocheckcompilerdirectives
+    - gochecknoglobals
+    - gochecksumtype 
+    - gocognit
+    - goconst
+    - gocritic
+    - gocyclo
+    - godoclint 
+    - godot
+    # TODO: Раскомментировать после получения доступа в gonum.org
+    # - gomoddirectives
+    - goprintffuncname
+    - gosec
+    - gosmopolitan
+    - govet
+    - grouper
+    - iface
+    - importas
+    - inamedparam
+    - ineffassign
+    - interfacebloat
+    - intrange
+    - iotamixing
+    - ireturn
+    - lll
+    - loggercheck
+    - maintidx
+    - makezero
+    - mirror
+    - misspell
+    - mnd
+    - modernize
+    - musttag
+    - nakedret
+    - nestif
+    - nilerr
+    - nilnesserr
+    - nilnil
+    - nlreturn
+    - noctx
+    - paralleltest
+    - perfsprint
+    - prealloc
+    - predeclared
+    - promlinter
+    - protogetter
+    - reassign
+    - revive
+    - rowserrcheck 
+    - sloglint
+    - spancheck
+    - sqlclosecheck
+    - staticcheck
+    - tagalign
+    #- tagliatelle # we dont have a uniform rule for json and xml tags
+    - testableexamples
+    - testifylint
+    - testpackage
+    - thelper
+    - tparallel
+    - unconvert
+    - unparam
+    - unqueryvet
+    - unused
+    - usestdlibvars
+    - usetesting
+    # - varnamelen # does not allow for var name like ok, wg, ... And we have t
+    - wastedassign
+    - whitespace
+    - wrapcheck
+    - wsl_v5
+    - zerologlint # для логгера
+  settings:
+    goconst:
+      # The exclusions below already say goconst does not apply to _test.go, but
+      # occurrences there were still counted towards the "3 or more" threshold,
+      # so a literal written once in production and twice in its table-driven
+      # test was reported against the production line. Counting and reporting
+      # now agree.
+      ignore-tests: true
+    decorder:
+      dec-order:
+        - const
+        - var
+        - type
+        - func
+      disable-dec-order-check: false
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+        - experimental
+        - opinionated
+    mnd:
+      ignored-functions:
+        - log.Info
+    prealloc:
+      simple: true
+      range-loops: true
+      for-loops: false
+    revive:
+      severity: warning
+      rules:
+        - name: indent-error-flow
+          severity: warning
+        - name: add-constant
+          arguments:
+            - allowFloats: 0.0,0.,1.0,1.,2.0,2.
+              allowInts: 0,1,2,3,4
+              allowStrs: '"","error"'
+              maxLitCount: "11"
+          severity: warning
+    wrapcheck:
+      ignore-sigs:
+        - .Errorf(
+        - errors.New(
+        - errors.Unwrap(
+        - errors.Join(
+        - .Wrap(
+        - .Wrapf(
+        - .WithMessage(
+        - .WithMessagef(
+        - .WithStack(
+    wsl_v5:
+      allow-first-in-block: true
+      allow-whole-block: false
+      branch-max-lines: 2 
+    cyclop:
+      max-complexity: 46
+      package-average: 15
+    dogsled:
+      max-blank-identifiers: 3
+    modernize:
+     disable:
+        - omitzero # it conflicts removing omitempty and adding omitzero
+    ginkgolinter:
+       force-expect-to: true
+       validate-async-intervals: true
+    godoclint:
+      disable:
+        - start-with-name
+        - pkg-doc
+        - single-pkg-doc
+    gocognit:
+      min-complexity: 90
+    gomoddirectives:
+       replace-allow-list:
+          - github.com/cespare/xxhash/v2
+          - github.com/gocql/gocql
+          - github.com/gocql/gocql/lz4
+          - go.etcd.io/etcd/api/v3
+          - go.etcd.io/etcd/client/v3
+          - go.etcd.io/etcd/server/v3
+    iface:
+      enable:
+        - identical # Identifies interfaces in the same package that have identical method sets.
+        - opaque # Identifies functions that return interfaces, but the actual returned value is always a single concrete implementation.
+    nestif:
+      min-complexity: 12
+    funlen:
+      lines: 70
+  exclusions:
+    generated: lax
+    rules:
+      - path: web/node_modules/
+        linters:
+          - wrapcheck
+          - nilnil
+          - prealloc
+          - intrange
+          - gocritic
+          - funlen
+          - exhaustive
+      - linters:
+          - dupl
+        path: pkg/metacorelib/scylladb/internal/tests/...
+      - linters:
+          - err113
+          - wrapcheck
+        path: internal/database/database_test.go
+      - linters:
+          - wrapcheck
+        path: internal/database/scylla/...
+      - linters:
+          - wrapcheck
+        path: internal/transport/...
+      - linters:
+          - wrapcheck
+        path: internal/middleware/...
+      - linters:
+          - lll
+        path: internal/transport/handlers/...
+      - linters:
+          - lll
+        path: internal/healthcheck/...
+      - linters:
+          - containedctx
+          - funlen
+          - goconst
+          - mnd
+          - revive
+          - testpackage
+        path: _test\.go
+    paths:
+      - integration_test
+      - vendor
+      - internal/database/mock/...
+      - third_party$
+      - builtin$
+      - examples$
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 50
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule
+      custom-order: true
+    gofumpt:
+      extra-rules: true
+  exclusions:
+    generated: lax
+    paths:
+      - vendor
+      - internal/database/mock/...
+      - third_party$
+      - builtin$
+      - examples$

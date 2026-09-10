@@ -1,7 +1,15 @@
 PROTO_ROOT := proto
 PROTO_FILE := redlease/v1/redlease.proto
 
-.PHONY: generate generate-proto test
+.PHONY: all build lint generate generate-proto test
+
+all: build
+
+build: lint
+	go build ./...
+
+lint:
+	golangci-lint run ./...
 
 generate: generate-proto
 

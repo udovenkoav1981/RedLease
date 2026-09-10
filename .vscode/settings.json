@@ -1,0 +1,5 @@
+{
+  "go.lintTool": "golangci-lint",
+  "go.lintOnSave": "workspace",
+  "go.lintFlags": []
+}
