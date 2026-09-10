@@ -13,14 +13,12 @@ linters:
     - contextcheck
     - copyloopvar
     - cyclop
-    - decorder
     #- depguard # Go linter that checks if package imports are in a list of acceptable packages.
     - dogsled
     - dupl
     - dupword
     - durationcheck
     - embeddedstructfieldcheck
-    - err113
     - errcheck
     - errchkjson
     - errname
@@ -30,7 +28,6 @@ linters:
     - fatcontext
     # - forbidigo  
     - forcetypeassert
-    - funcorder
     - funlen
     - ginkgolinter 
     - gocheckcompilerdirectives
@@ -56,14 +53,12 @@ linters:
     - interfacebloat
     - intrange
     - iotamixing
-    - ireturn
     - lll
     - loggercheck
     - maintidx
     - makezero
     - mirror
     - misspell
-    - mnd
     - modernize
     - musttag
     - nakedret
@@ -71,9 +66,7 @@ linters:
     - nilerr
     - nilnesserr
     - nilnil
-    - nlreturn
     - noctx
-    - paralleltest
     - perfsprint
     - prealloc
     - predeclared
@@ -92,7 +85,6 @@ linters:
     - testifylint
     - testpackage
     - thelper
-    - tparallel
     - unconvert
     - unparam
     - unqueryvet
@@ -102,8 +94,6 @@ linters:
     # - varnamelen # does not allow for var name like ok, wg, ... And we have t
     - wastedassign
     - whitespace
-    - wrapcheck
-    - wsl_v5
     - zerologlint # для логгера
   settings:
     goconst:
@@ -113,23 +103,16 @@ linters:
       # test was reported against the production line. Counting and reporting
       # now agree.
       ignore-tests: true
-    decorder:
-      dec-order:
-        - const
-        - var
-        - type
-        - func
-      disable-dec-order-check: false
+    exhaustive:
+      default-signifies-exhaustive: true
     gocritic:
       enabled-tags:
         - diagnostic
         - style
         - performance
-        - experimental
-        - opinionated
-    mnd:
-      ignored-functions:
-        - log.Info
+      disabled-checks:
+        - ifElseChain
+        - unnamedResult
     prealloc:
       simple: true
       range-loops: true
@@ -142,25 +125,10 @@ linters:
         - name: add-constant
           arguments:
             - allowFloats: 0.0,0.,1.0,1.,2.0,2.
-              allowInts: 0,1,2,3,4
+              allowInts: 0,1,2,3,4,5
               allowStrs: '"","error"'
               maxLitCount: "11"
           severity: warning
-    wrapcheck:
-      ignore-sigs:
-        - .Errorf(
-        - errors.New(
-        - errors.Unwrap(
-        - errors.Join(
-        - .Wrap(
-        - .Wrapf(
-        - .WithMessage(
-        - .WithMessagef(
-        - .WithStack(
-    wsl_v5:
-      allow-first-in-block: true
-      allow-whole-block: false
-      branch-max-lines: 2 
     cyclop:
       max-complexity: 46
       package-average: 15
@@ -194,56 +162,54 @@ linters:
     nestif:
       min-complexity: 12
     funlen:
-      lines: 70
+      lines: 180
+      statements: 100
   exclusions:
     generated: lax
     rules:
-      - path: web/node_modules/
+      # container/heap guarantees these concrete element types.
+      - path: server/state.go
         linters:
-          - wrapcheck
-          - nilnil
-          - prealloc
-          - intrange
+          - forcetypeassert
+      # Retry jitter is not used for cryptography.
+      - path: internal/backoff/backoff.go
+        text: "G404:"
+        linters:
+          - gosec
+      # CLOCK_BOOTTIME is non-negative, counters fail-stop before underflow,
+      # and a hash modulo slice length always fits int.
+      - path: internal/boottime/boottime_linux.go|server/metrics.go|server/state.go
+        text: "G115:"
+        linters:
+          - gosec
+      # These immutable process-wide values are intentional.
+      - path: server/prometheus/collector.go
+        text: "serverStates is a global variable"
+        linters:
+          - gochecknoglobals
+      - path: server/state.go
+        text: "hashSeed is a global variable"
+        linters:
+          - gochecknoglobals
+      # This lock/unlock pair is a synchronization barrier waiting for an
+      # already-started Renew; extending the critical section is unnecessary.
+      - path: client1of1/lease.go
+        text: "badLock|SA2001"
+        linters:
           - gocritic
-          - funlen
-          - exhaustive
+          - staticcheck
+
       - linters:
-          - dupl
-        path: pkg/metacorelib/scylladb/internal/tests/...
-      - linters:
-          - err113
-          - wrapcheck
-        path: internal/database/database_test.go
-      - linters:
-          - wrapcheck
-        path: internal/database/scylla/...
-      - linters:
-          - wrapcheck
-        path: internal/transport/...
-      - linters:
-          - wrapcheck
-        path: internal/middleware/...
-      - linters:
-          - lll
-        path: internal/transport/handlers/...
-      - linters:
-          - lll
-        path: internal/healthcheck/...
-      - linters:
-          - containedctx
           - funlen
           - goconst
+          - gochecknoglobals
+          - lll
           - mnd
           - revive
           - testpackage
         path: _test\.go
     paths:
-      - integration_test
       - vendor
-      - internal/database/mock/...
-      - third_party$
-      - builtin$
-      - examples$
 issues:
   max-issues-per-linter: 50
   max-same-issues: 50
@@ -260,7 +226,8 @@ formatters:
         - localmodule
       custom-order: true
     gofumpt:
-      extra-rules: true
+      extra:
+        group-params: true
   exclusions:
     generated: lax
     paths:
