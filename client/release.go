@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/udovenkoav1981/RedLease/internal/backoff"
+	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -34,7 +36,7 @@ func (l *Lease) Release() {
 
 // releaseAll waits for one submission attempt on every replica, then leaves
 // response handling and bounded retries in the background.
-func (c *Client) releaseAll(key []byte, id leaseID) {
+func (c *Client) releaseAll(key []byte, id leaseid.LeaseID) {
 	serverCount := len(c.replicas)
 	retryContext, cancelRetries := context.WithTimeout(c.ctx, releaseRetryWindow(c.responseTimeout))
 	initialContext, cancelInitial := context.WithTimeout(retryContext, c.responseTimeout)
@@ -79,9 +81,9 @@ func (c *Client) releaseAll(key []byte, id leaseID) {
 				"release cleanup did not complete before retry deadline",
 				slog.String("operation", "release"),
 				slog.String("key", string(key)),
-				slog.Uint64("lease_client_id", uint64(id.clientID)),
-				slog.Uint64("lease_boot_id", uint64(id.bootID)),
-				slog.Uint64("lease_sequence", id.sequence),
+				slog.Uint64("lease_client_id", uint64(id.ClientID)),
+				slog.Uint64("lease_boot_id", uint64(id.BootID)),
+				slog.Uint64("lease_sequence", id.Sequence),
 				slog.Any("replica_indices", replicaIndices(failed, serverCount)),
 			)
 		}
@@ -102,17 +104,17 @@ func (c *Client) retryReleaseReplica(
 	ctx context.Context,
 	replica int,
 	key []byte,
-	id leaseID,
+	id leaseid.LeaseID,
 	future *streamFuture,
 ) bool {
-	backoff := defaultReconnectBackoff()
+	retryBackoff := backoff.Default()
 	var attempt uint
 
 	for {
 		if future != nil && c.releaseResponseOK(ctx, future) {
 			return false
 		}
-		if !waitBackoff(ctx, backoff.duration(attempt)) {
+		if !backoff.Wait(ctx, retryBackoff.Duration(attempt)) {
 			return ctx.Err() == context.DeadlineExceeded
 		}
 		attempt++

@@ -6,14 +6,8 @@ import (
 	"sync"
 
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
+	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 )
-
-// LeaseID identifies one lease attempt created by a RedLease client process.
-type LeaseID struct {
-	ClientID uint32
-	BootID   uint32
-	LeaseSeq uint64
-}
 
 type leaseLifecycle uint8
 
@@ -27,7 +21,7 @@ const (
 // on the quorum selected by Acquire; later replica responses never extend it.
 type Lease struct {
 	client       *Client
-	id           leaseID
+	id           leaseid.LeaseID
 	key          []byte
 	requestedTTL Milliseconds
 	now          uint64
@@ -46,7 +40,7 @@ type Lease struct {
 	releaseDone chan struct{}
 }
 
-func newLease(client *Client, id leaseID, key []byte, requestedTTL Milliseconds) *Lease {
+func newLease(client *Client, id leaseid.LeaseID, key []byte, requestedTTL Milliseconds) *Lease {
 	ctx, cancel := context.WithCancel(client.ctx)
 	return &Lease{
 		client:         client,
@@ -59,15 +53,6 @@ func newLease(client *Client, id leaseID, key []byte, requestedTTL Milliseconds)
 		cancel:         cancel,
 		lifecycle:      leaseActive,
 		releaseDone:    make(chan struct{}),
-	}
-}
-
-// ID returns the immutable identity assigned to this lease attempt.
-func (l *Lease) ID() LeaseID {
-	return LeaseID{
-		ClientID: l.id.clientID,
-		BootID:   l.id.bootID,
-		LeaseSeq: l.id.sequence,
 	}
 }
 

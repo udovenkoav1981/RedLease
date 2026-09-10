@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/udovenkoav1981/RedLease/internal/backoff"
+	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 	"google.golang.org/grpc"
 )
@@ -34,7 +36,7 @@ func (e *serverUnavailableError) Unwrap() error {
 type Client struct {
 	responseTimeout time.Duration
 	logger          *slog.Logger
-	idGenerator     *leaseIDGenerator
+	idGenerator     *leaseid.Generator
 
 	connection *grpc.ClientConn
 	rpc        redleasev1.RedLeaseClient
@@ -60,7 +62,7 @@ func New(config Config) (*Client, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	idGenerator, err := newLeaseIDGenerator(config.ClientID)
+	idGenerator, err := leaseid.NewGenerator(config.ClientID)
 	if err != nil {
 		return nil, err
 	}
@@ -191,6 +193,7 @@ func (c *Client) manageStream() {
 
 	var attempt uint
 	unavailable := false
+	retryBackoff := backoff.Default()
 	for {
 		streamContext, cancelStream := context.WithCancel(c.ctx)
 		stream, err := c.rpc.LeaseStream(streamContext)
@@ -205,7 +208,7 @@ func (c *Client) manageStream() {
 				)
 				unavailable = true
 			}
-			if !waitBackoff(c.ctx, reconnectBackoff(attempt)) {
+			if !backoff.Wait(c.ctx, retryBackoff.Duration(attempt)) {
 				return
 			}
 			attempt++
@@ -242,7 +245,7 @@ func (c *Client) manageStream() {
 			slog.Any("error", cause),
 		)
 		unavailable = true
-		if !waitBackoff(c.ctx, reconnectBackoff(attempt)) {
+		if !backoff.Wait(c.ctx, retryBackoff.Duration(attempt)) {
 			return
 		}
 		attempt++

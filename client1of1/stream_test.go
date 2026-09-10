@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -51,11 +52,11 @@ func TestStreamGenerationMultiplexesOutOfOrderResponses(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	first, err := generation.submit(ctx, newReleaseRequest([]byte("first"), leaseID{}))
+	first, err := generation.submit(ctx, newReleaseRequest([]byte("first"), leaseid.LeaseID{}))
 	if err != nil {
 		t.Fatalf("submit first: %v", err)
 	}
-	second, err := generation.submit(ctx, newReleaseRequest([]byte("second"), leaseID{}))
+	second, err := generation.submit(ctx, newReleaseRequest([]byte("second"), leaseid.LeaseID{}))
 	if err != nil {
 		t.Fatalf("submit second: %v", err)
 	}
@@ -93,7 +94,7 @@ func TestStreamGenerationCancellationUnblocksAwait(t *testing.T) {
 	defer generation.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	future, err := generation.submit(ctx, newReleaseRequest([]byte("key"), leaseID{}))
+	future, err := generation.submit(ctx, newReleaseRequest([]byte("key"), leaseid.LeaseID{}))
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestStreamGenerationDeadlineUnblocksSend(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
-	if _, err := generation.submit(ctx, newReleaseRequest([]byte("key"), leaseID{})); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := generation.submit(ctx, newReleaseRequest([]byte("key"), leaseid.LeaseID{})); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("submit error = %v, want context.DeadlineExceeded", err)
 	}
 }
@@ -132,17 +133,18 @@ func TestFailedAcquireSubmitsCleanupReleaseBeforeReturning(t *testing.T) {
 
 	clientContext, cancelClient := context.WithCancel(context.Background())
 	defer cancelClient()
+	idGenerator, err := leaseid.NewGenerator(7)
+	if err != nil {
+		t.Fatalf("new lease ID generator: %v", err)
+	}
 	client := &Client{
 		responseTimeout: 100 * time.Millisecond,
 		logger:          slog.New(slog.DiscardHandler),
-		idGenerator: &leaseIDGenerator{
-			clientID: 7,
-			bootID:   8,
-		},
-		ctx:        clientContext,
-		cancel:     cancelClient,
-		generation: generation,
-		changed:    make(chan struct{}),
+		idGenerator:     idGenerator,
+		ctx:             clientContext,
+		cancel:          cancelClient,
+		generation:      generation,
+		changed:         make(chan struct{}),
 	}
 
 	acquireSent := make(chan *redleasev1.ClientRequest, 1)

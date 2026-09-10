@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
+	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -16,13 +17,13 @@ func TestRetryReleaseReplicaDistinguishesDeadlineFromCancellation(t *testing.T) 
 
 	deadlineContext, cancelDeadline := context.WithDeadline(context.Background(), time.Now())
 	defer cancelDeadline()
-	if exhausted := client.retryReleaseReplica(deadlineContext, 0, nil, leaseID{}, nil); !exhausted {
+	if exhausted := client.retryReleaseReplica(deadlineContext, 0, nil, leaseid.LeaseID{}, nil); !exhausted {
 		t.Fatal("release retry deadline was not reported as exhausted")
 	}
 
 	canceledContext, cancel := context.WithCancel(context.Background())
 	cancel()
-	if exhausted := client.retryReleaseReplica(canceledContext, 0, nil, leaseID{}, nil); exhausted {
+	if exhausted := client.retryReleaseReplica(canceledContext, 0, nil, leaseid.LeaseID{}, nil); exhausted {
 		t.Fatal("release retry cancellation was reported as deadline exhaustion")
 	}
 }

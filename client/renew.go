@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
+	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -269,12 +270,12 @@ func (l *Lease) renewCancellationError(callerContext context.Context) error {
 	return nil
 }
 
-func newRenewRequest(key []byte, id leaseID, ttl Milliseconds) *redleasev1.ClientRequest {
+func newRenewRequest(key []byte, id leaseid.LeaseID, ttl Milliseconds) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Renew{
 			Renew: &redleasev1.RenewRequest{
 				Key:            bytes.Clone(key),
-				LeaseId:        id.protobuf(),
+				LeaseId:        id.Protobuf(),
 				RequestedTtlMs: uint64(ttl),
 			},
 		},

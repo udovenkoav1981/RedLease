@@ -3,13 +3,14 @@ package client
 import (
 	"context"
 
+	"github.com/udovenkoav1981/RedLease/internal/backoff"
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
 )
 
 // backgroundHeal keeps trying to place this lease on every replica while the
 // locally confirmed lease remains valid. It never changes validUntil.
 func (l *Lease) backgroundHeal() {
-	backoff := defaultReconnectBackoff()
+	retryBackoff := backoff.Default()
 	var attempt uint
 
 	for {
@@ -18,7 +19,7 @@ func (l *Lease) backgroundHeal() {
 			return
 		}
 
-		if !waitBackoff(l.ctx, backoff.duration(attempt)) {
+		if !backoff.Wait(l.ctx, retryBackoff.Duration(attempt)) {
 			return
 		}
 

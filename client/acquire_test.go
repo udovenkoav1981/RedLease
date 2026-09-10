@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
@@ -34,7 +35,7 @@ func TestClientAcquireThreeOKEstablishesValidity(t *testing.T) {
 	if !acquired.lease.Valid() {
 		t.Fatal("newly acquired lease is not valid")
 	}
-	if id := acquired.lease.ID(); id.ClientID != 19 || id.BootID != 0x01020304 || id.LeaseSeq != 1 {
+	if id := acquired.lease.id; id.ClientID != 19 || id.Sequence != 1 {
 		t.Fatalf("unexpected lease ID: %+v", id)
 	}
 
@@ -67,10 +68,7 @@ func TestClientAcquireUsesEverySupportedQuorum(t *testing.T) {
 			quorum := test.quorum
 			client, factories := newClientForQuorum(quorum)
 			client.responseTimeout = 500 * time.Millisecond
-			generator, err := newLeaseIDGeneratorFromReader(
-				19,
-				bytes.NewReader([]byte{1, 2, 3, 4}),
-			)
+			generator, err := leaseid.NewGenerator(19)
 			if err != nil {
 				t.Fatalf("new lease ID generator: %v", err)
 			}
@@ -406,7 +404,7 @@ func TestClientAcquireConcurrentCalls(t *testing.T) {
 		if acquired.err != nil {
 			t.Fatalf("concurrent Acquire: %v", acquired.err)
 		}
-		sequence := acquired.lease.ID().LeaseSeq
+		sequence := acquired.lease.id.Sequence
 		if _, duplicate := seen[sequence]; duplicate {
 			t.Fatalf("duplicate lease sequence %d", sequence)
 		}
@@ -429,7 +427,7 @@ type acquireCallResult struct {
 func newAcquireHarness(t *testing.T) *acquireHarness {
 	t.Helper()
 	client, factories := newClientWithScriptedReplicasWithoutCleanup()
-	generator, err := newLeaseIDGeneratorFromReader(19, bytes.NewReader([]byte{1, 2, 3, 4}))
+	generator, err := leaseid.NewGenerator(19)
 	if err != nil {
 		t.Fatalf("new lease ID generator: %v", err)
 	}

@@ -8,7 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/udovenkoav1981/RedLease/internal/backoff"
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
+	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
@@ -53,13 +55,6 @@ func (e *operationError) Is(target error) bool {
 	return target == e.kind
 }
 
-// LeaseID identifies one lease attempt created by a client process.
-type LeaseID struct {
-	ClientID uint32
-	BootID   uint32
-	LeaseSeq uint64
-}
-
 type leaseLifecycle uint8
 
 const (
@@ -71,7 +66,7 @@ const (
 // Lease is a locally confirmed lease on the configured lock-server.
 type Lease struct {
 	client *Client
-	id     leaseID
+	id     leaseid.LeaseID
 	key    []byte
 	now    uint64
 
@@ -83,7 +78,7 @@ type Lease struct {
 	releaseOnce sync.Once
 }
 
-func newLease(client *Client, id leaseID, key []byte, now uint64) *Lease {
+func newLease(client *Client, id leaseid.LeaseID, key []byte, now uint64) *Lease {
 	return &Lease{
 		client:    client,
 		id:        id,
@@ -107,7 +102,7 @@ func (c *Client) Acquire(
 		return nil, &operationError{kind: ErrNotAcquired, cause: ErrKeyTooLarge}
 	}
 
-	id := c.idGenerator.next()
+	id := c.idGenerator.Next()
 	operationStart := boottime.Now()
 	lease := newLease(c, id, key, operationStart)
 	operationContext, cancelOperation := c.operationContext(ctx)
@@ -157,15 +152,6 @@ func (l *Lease) acceptAcquireResponse(
 		return false, ErrKeyTooLarge
 	default:
 		return false, nil
-	}
-}
-
-// ID returns the immutable identity assigned to this lease attempt.
-func (l *Lease) ID() LeaseID {
-	return LeaseID{
-		ClientID: l.id.clientID,
-		BootID:   l.id.bootID,
-		LeaseSeq: l.id.sequence,
 	}
 }
 
@@ -278,7 +264,7 @@ func (l *Lease) Release() {
 	})
 }
 
-func (c *Client) release(key []byte, id leaseID) {
+func (c *Client) release(key []byte, id leaseid.LeaseID) {
 	retryContext, cancelRetries := context.WithTimeout(
 		c.ctx,
 		releaseRetryWindow(c.responseTimeout),
@@ -293,24 +279,25 @@ func (c *Client) retryRelease(
 	ctx context.Context,
 	cancel context.CancelFunc,
 	key []byte,
-	id leaseID,
+	id leaseid.LeaseID,
 	future *streamFuture,
 ) {
 	defer cancel()
 	var attempt uint
+	retryBackoff := backoff.Default()
 	for {
 		if future != nil && c.releaseResponseOK(ctx, future) {
 			return
 		}
-		if !waitBackoff(ctx, reconnectBackoff(attempt)) {
+		if !backoff.Wait(ctx, retryBackoff.Duration(attempt)) {
 			if ctx.Err() == context.DeadlineExceeded && c.ctx.Err() == nil {
 				c.logger.Warn(
 					"release cleanup did not complete before retry deadline",
 					slog.String("operation", "release"),
 					slog.String("key", string(key)),
-					slog.Uint64("lease_client_id", uint64(id.clientID)),
-					slog.Uint64("lease_boot_id", uint64(id.bootID)),
-					slog.Uint64("lease_sequence", id.sequence),
+					slog.Uint64("lease_client_id", uint64(id.ClientID)),
+					slog.Uint64("lease_boot_id", uint64(id.BootID)),
+					slog.Uint64("lease_sequence", id.Sequence),
 				)
 			}
 			return
@@ -354,31 +341,31 @@ func releaseRetryWindow(responseTimeout time.Duration) time.Duration {
 	return protocolMaxTTL + responseTimeout
 }
 
-func newAcquireRequest(key []byte, id leaseID, ttl Milliseconds) *redleasev1.ClientRequest {
+func newAcquireRequest(key []byte, id leaseid.LeaseID, ttl Milliseconds) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Acquire{Acquire: &redleasev1.AcquireRequest{
 			Key:            bytes.Clone(key),
-			LeaseId:        id.protobuf(),
+			LeaseId:        id.Protobuf(),
 			RequestedTtlMs: uint64(ttl),
 		}},
 	}
 }
 
-func newRenewRequest(key []byte, id leaseID, ttl Milliseconds) *redleasev1.ClientRequest {
+func newRenewRequest(key []byte, id leaseid.LeaseID, ttl Milliseconds) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Renew{Renew: &redleasev1.RenewRequest{
 			Key:            bytes.Clone(key),
-			LeaseId:        id.protobuf(),
+			LeaseId:        id.Protobuf(),
 			RequestedTtlMs: uint64(ttl),
 		}},
 	}
 }
 
-func newReleaseRequest(key []byte, id leaseID) *redleasev1.ClientRequest {
+func newReleaseRequest(key []byte, id leaseid.LeaseID) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Release{Release: &redleasev1.ReleaseRequest{
 			Key:     bytes.Clone(key),
-			LeaseId: id.protobuf(),
+			LeaseId: id.Protobuf(),
 		}},
 	}
 }

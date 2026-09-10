@@ -82,15 +82,3 @@ func TestNewAppliesResponseTimeout(t *testing.T) {
 		})
 	}
 }
-
-func TestLeaseIDSequenceStartsAtOne(t *testing.T) {
-	generator, err := newLeaseIDGeneratorFromReader(9, strings.NewReader("boot"))
-	if err != nil {
-		t.Fatalf("newLeaseIDGeneratorFromReader: %v", err)
-	}
-	first := generator.next()
-	second := generator.next()
-	if first.clientID != 9 || first.sequence != 1 || second.sequence != 2 {
-		t.Fatalf("lease IDs = %+v, %+v", first, second)
-	}
-}

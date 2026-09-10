@@ -72,9 +72,6 @@ func TestClientAndServersEndToEnd(t *testing.T) {
 
 	firstLease.Release()
 	secondLease := acquireEventually(t, secondClient, key, 5_000, 2*time.Second)
-	if firstLease.ID() == secondLease.ID() {
-		t.Fatal("different clients acquired the same lease ID")
-	}
 	secondLease.Release()
 }
 
@@ -221,9 +218,6 @@ func TestFullClusterRestartDoesNotRestoreOldLeaseEndToEnd(t *testing.T) {
 	}
 
 	newLease := acquireEventually(t, secondClient, []byte("full-restart"), 5_000, 3*time.Second)
-	if oldLease.ID() == newLease.ID() {
-		t.Fatal("lease ID was reused after full cluster restart")
-	}
 	newLease.Release()
 }
 

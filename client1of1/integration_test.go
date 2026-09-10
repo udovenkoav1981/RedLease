@@ -67,9 +67,6 @@ func TestClientAndServerEndToEnd(t *testing.T) {
 		t.Fatalf("Renew after Release error = %v", err)
 	}
 	secondLease := acquireEventually(t, secondClient, []byte("shared-key"), 1000)
-	if firstLease.ID() == secondLease.ID() {
-		t.Fatal("different clients generated the same lease ID")
-	}
 	secondLease.Release()
 }
 

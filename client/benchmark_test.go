@@ -1,13 +1,13 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -49,10 +49,7 @@ func BenchmarkLeaseRenew(b *testing.B) {
 func newBenchmarkClient(b *testing.B) *Client {
 	b.Helper()
 	client, factories := newClientWithScriptedReplicasWithoutCleanup()
-	generator, err := newLeaseIDGeneratorFromReader(
-		1,
-		bytes.NewReader([]byte{1, 2, 3, 4}),
-	)
+	generator, err := leaseid.NewGenerator(1)
 	if err != nil {
 		b.Fatalf("new lease ID generator: %v", err)
 	}

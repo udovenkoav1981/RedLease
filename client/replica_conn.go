@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/udovenkoav1981/RedLease/internal/backoff"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 	"google.golang.org/grpc"
 )
@@ -55,7 +56,7 @@ func (f *grpcStreamFactory) close() error {
 
 type replicaConn struct {
 	factory streamFactory
-	backoff exponentialBackoff
+	backoff backoff.Exponential
 	logger  *slog.Logger
 
 	ctx    context.Context
@@ -77,7 +78,7 @@ func newReplicaConn(factory streamFactory, logger *slog.Logger) *replicaConn {
 	ctx, cancel := context.WithCancel(context.Background())
 	connection := &replicaConn{
 		factory: factory,
-		backoff: defaultReconnectBackoff(),
+		backoff: backoff.Default(),
 		logger:  logger,
 		ctx:     ctx,
 		cancel:  cancel,
@@ -208,7 +209,7 @@ func (c *replicaConn) manage() {
 }
 
 func (c *replicaConn) waitBeforeRetry(attempt uint) bool {
-	return waitBackoff(c.ctx, c.backoff.duration(attempt))
+	return backoff.Wait(c.ctx, c.backoff.Duration(attempt))
 }
 
 func (c *replicaConn) publish(generation *streamGeneration) bool {

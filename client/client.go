@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	"google.golang.org/grpc"
 )
 
@@ -28,7 +29,7 @@ type Client struct {
 
 	replicas []*replicaConn
 
-	idGenerator *leaseIDGenerator
+	idGenerator *leaseid.Generator
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -67,7 +68,7 @@ func New(config Config) (*Client, error) {
 		}
 	}
 
-	idGenerator, err := newLeaseIDGenerator(client.clientID)
+	idGenerator, err := leaseid.NewGenerator(client.clientID)
 	if err != nil {
 		return nil, err
 	}

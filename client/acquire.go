@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
+	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
@@ -69,7 +70,7 @@ func (c *Client) Acquire(
 		return nil, &notAcquiredError{cause: ErrKeyTooLarge}
 	}
 
-	id := c.idGenerator.next()
+	id := c.idGenerator.Next()
 	lease := newLease(c, id, key, ttl)
 	operationStart := lease.now
 	serverCount := len(c.replicas)
@@ -285,7 +286,7 @@ func acquireQuorumStillPossible(
 	return usable+remaining >= quorumSize
 }
 
-func (c *Client) cleanupFailedAcquire(key []byte, id leaseID) {
+func (c *Client) cleanupFailedAcquire(key []byte, id leaseid.LeaseID) {
 	c.releaseAll(key, id)
 }
 
@@ -310,24 +311,24 @@ func bestAcquireQuorum(
 	return validities[len(validities)-quorumSize], true
 }
 
-func newAcquireRequest(key []byte, id leaseID, ttl Milliseconds) *redleasev1.ClientRequest {
+func newAcquireRequest(key []byte, id leaseid.LeaseID, ttl Milliseconds) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Acquire{
 			Acquire: &redleasev1.AcquireRequest{
 				Key:            bytes.Clone(key),
-				LeaseId:        id.protobuf(),
+				LeaseId:        id.Protobuf(),
 				RequestedTtlMs: uint64(ttl),
 			},
 		},
 	}
 }
 
-func newReleaseRequest(key []byte, id leaseID) *redleasev1.ClientRequest {
+func newReleaseRequest(key []byte, id leaseid.LeaseID) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Release{
 			Release: &redleasev1.ReleaseRequest{
 				Key:     bytes.Clone(key),
-				LeaseId: id.protobuf(),
+				LeaseId: id.Protobuf(),
 			},
 		},
 	}
