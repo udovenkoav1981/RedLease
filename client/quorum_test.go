@@ -9,10 +9,8 @@ import (
 
 func TestAcquireQuorumZeroTTLIsExpired(t *testing.T) {
 	const start uint64 = 1_000_000
-	responses := acquireResponses(0, 0, 0)
-
-	validUntil, valid := acquireQuorumValidity(start, start, responses)
-	if valid {
+	validUntil := candidateValidUntil(start, 0)
+	if start < validUntil {
 		t.Fatal("zero-TTL quorum is valid")
 	}
 	if validUntil != start {
@@ -22,10 +20,13 @@ func TestAcquireQuorumZeroTTLIsExpired(t *testing.T) {
 
 func TestAcquireQuorumUsesMinimumHeterogeneousTTL(t *testing.T) {
 	const start uint64 = 1_000_000
-	responses := acquireResponses(2_000, 1_500, 3_000)
-
-	validUntil, valid := acquireQuorumValidity(start, start+200, responses)
-	if !valid {
+	candidates := []uint64{
+		candidateValidUntil(start, 2_000),
+		candidateValidUntil(start, 1_500),
+		candidateValidUntil(start, 3_000),
+	}
+	validUntil, hasQuorum := bestAcquireQuorum(candidates, []bool{true, true, true}, 3)
+	if !hasQuorum || start+200 >= validUntil {
 		t.Fatal("quorum unexpectedly expired")
 	}
 	want := start + 1_400
@@ -36,11 +37,9 @@ func TestAcquireQuorumUsesMinimumHeterogeneousTTL(t *testing.T) {
 
 func TestAcquireQuorumAccountsForElapsedOperationTime(t *testing.T) {
 	const start uint64 = 1_000_000
-	responses := acquireResponses(1_500, 1_500, 1_500)
 	now := start + 900
-
-	validUntil, valid := acquireQuorumValidity(start, now, responses)
-	if !valid {
+	validUntil := candidateValidUntil(start, 1_500)
+	if now >= validUntil {
 		t.Fatal("quorum unexpectedly expired")
 	}
 	if remaining := validUntil - now; remaining != 500 {
@@ -50,57 +49,16 @@ func TestAcquireQuorumAccountsForElapsedOperationTime(t *testing.T) {
 
 func TestAcquireQuorumRejectsExpiredValidity(t *testing.T) {
 	const start uint64 = 1_000_000
-	responses := acquireResponses(1_500, 1_500, 1_500)
 	now := start + 1_400
-
-	_, valid := acquireQuorumValidity(start, now, responses)
-	if valid {
+	validUntil := candidateValidUntil(start, 1_500)
+	if now < validUntil {
 		t.Fatal("quorum whose validUntil equals now is valid")
 	}
 }
 
 func TestAcquireQuorumAcceptsAlreadyOwned(t *testing.T) {
-	const start uint64 = 1_000_000
-	responses := acquireResponses(1_000, 1_000, 1_000)
-	responses[1].Status = redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED
-
-	_, valid := acquireQuorumValidity(start, start, responses)
-	if !valid {
+	if !isSuccessfulAcquire(redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED) {
 		t.Fatal("ALREADY_OWNED did not count as an Acquire success")
-	}
-}
-
-func TestRenewKeepsLaterPreviousValidUntil(t *testing.T) {
-	const start uint64 = 1_000_000
-	previous := start + 3_000
-	responses := renewResponses(2_000, 2_500, 3_000)
-
-	validUntil, quorumValid := renewQuorumValidity(
-		start,
-		start+500,
-		previous,
-		responses,
-	)
-	if !quorumValid {
-		t.Fatal("Renew quorum unexpectedly expired")
-	}
-	if validUntil != previous {
-		t.Fatalf("validUntil = %d, want previous %d", validUntil, previous)
-	}
-}
-
-func TestRenewUsesLaterQuorumValidUntil(t *testing.T) {
-	const start uint64 = 1_000_000
-	previous := start + 1_000
-	responses := renewResponses(2_000, 2_500, 3_000)
-
-	validUntil, quorumValid := renewQuorumValidity(start, start, previous, responses)
-	if !quorumValid {
-		t.Fatal("Renew quorum unexpectedly expired")
-	}
-	want := start + 1_900
-	if validUntil != want {
-		t.Fatalf("validUntil = %d, want %d", validUntil, want)
 	}
 }
 
@@ -162,26 +120,4 @@ func TestBestAcquireQuorumUsesEverySupportedThreshold(t *testing.T) {
 			t.Fatalf("quorum %d did not succeed at threshold", quorum)
 		}
 	}
-}
-
-func acquireResponses(ttls ...uint64) []*redleasev1.AcquireResponse {
-	responses := make([]*redleasev1.AcquireResponse, len(ttls))
-	for i, ttl := range ttls {
-		responses[i] = &redleasev1.AcquireResponse{
-			Status: redleasev1.LeaseStatus_LEASE_STATUS_OK,
-			TtlMs:  ttl,
-		}
-	}
-	return responses
-}
-
-func renewResponses(ttls ...uint64) []*redleasev1.RenewResponse {
-	responses := make([]*redleasev1.RenewResponse, len(ttls))
-	for i, ttl := range ttls {
-		responses[i] = &redleasev1.RenewResponse{
-			Status: redleasev1.LeaseStatus_LEASE_STATUS_OK,
-			TtlMs:  ttl,
-		}
-	}
-	return responses
 }

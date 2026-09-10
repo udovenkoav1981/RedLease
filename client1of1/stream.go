@@ -173,7 +173,7 @@ func (g *streamGeneration) register() (*streamFuture, uint64, error) {
 	}, requestID, nil
 }
 
-func (g *streamGeneration) complete(requestID uint64, result streamResult) bool {
+func (g *streamGeneration) complete(requestID uint64, result streamResult) {
 	g.stateMu.Lock()
 	pending := g.pending[requestID]
 	if pending != nil {
@@ -181,10 +181,9 @@ func (g *streamGeneration) complete(requestID uint64, result streamResult) bool 
 	}
 	g.stateMu.Unlock()
 	if pending == nil {
-		return false
+		return
 	}
 	pending <- result
-	return true
 }
 
 func (g *streamGeneration) receive() {

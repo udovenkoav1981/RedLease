@@ -44,53 +44,6 @@ func candidateValidUntil(operationStart uint64, ttlMilliseconds Milliseconds) ui
 	return boottime.Add(operationStart, uint64(ttlMilliseconds-safetyMargin))
 }
 
-func selectQuorumValidUntil(candidates []uint64) uint64 {
-	validUntil := candidates[0]
-	for _, candidate := range candidates[1:] {
-		if candidate < validUntil {
-			validUntil = candidate
-		}
-	}
-	return validUntil
-}
-
-func acquireQuorumValidity(
-	operationStart uint64,
-	now uint64,
-	responses []*redleasev1.AcquireResponse,
-) (uint64, bool) {
-	candidates := make([]uint64, len(responses))
-	for i, response := range responses {
-		if response == nil || !isSuccessfulAcquire(response.GetStatus()) {
-			return 0, false
-		}
-		candidates[i] = candidateValidUntil(operationStart, Milliseconds(response.GetTtlMs()))
-	}
-
-	validUntil := selectQuorumValidUntil(candidates)
-	return validUntil, now < validUntil
-}
-
-func renewQuorumValidity(
-	operationStart uint64,
-	now uint64,
-	previousValidUntil uint64,
-	responses []*redleasev1.RenewResponse,
-) (uint64, bool) {
-	candidates := make([]uint64, len(responses))
-	for i, response := range responses {
-		if response == nil || response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
-			return previousValidUntil, false
-		}
-		candidates[i] = candidateValidUntil(operationStart, Milliseconds(response.GetTtlMs()))
-	}
-
-	quorumValidUntil := selectQuorumValidUntil(candidates)
-	validUntil := max(previousValidUntil, quorumValidUntil)
-
-	return validUntil, now < quorumValidUntil
-}
-
 func isSuccessfulAcquire(status redleasev1.LeaseStatus) bool {
 	return status == redleasev1.LeaseStatus_LEASE_STATUS_OK ||
 		status == redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED

@@ -226,7 +226,6 @@ func (c *Client) manageStream() {
 			slog.Bool("reconnected", unavailable),
 			slog.Uint64("attempt", uint64(attempt+1)),
 		)
-		unavailable = false
 		attempt = 0
 
 		select {

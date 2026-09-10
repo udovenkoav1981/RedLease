@@ -312,7 +312,7 @@ func (g *streamGeneration) register(requestID uint64, call *pendingStreamCall) e
 	return nil
 }
 
-func (g *streamGeneration) complete(requestID uint64, result streamCallResult) bool {
+func (g *streamGeneration) complete(requestID uint64, result streamCallResult) {
 	g.pendingMu.Lock()
 	call := g.pending[requestID]
 	if call != nil {
@@ -321,10 +321,9 @@ func (g *streamGeneration) complete(requestID uint64, result streamCallResult) b
 	g.pendingMu.Unlock()
 
 	if call == nil {
-		return false
+		return
 	}
 	call.result <- result
-	return true
 }
 
 func (g *streamGeneration) sendLoop() {

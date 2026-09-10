@@ -489,7 +489,7 @@ func TestCapacityCleanupReclaimsExpiredLeaseFromAnotherShard(t *testing.T) {
 
 	firstKey := "key-0"
 	firstShard := s.shardIndex(firstKey)
-	secondKey := ""
+	var secondKey string
 	for sequence := 1; ; sequence++ {
 		candidate := "key-" + strconv.Itoa(sequence)
 		if s.shardIndex(candidate) != firstShard {
@@ -833,7 +833,7 @@ func TestDeleteExpiredLeases(t *testing.T) {
 func TestLeaseStreamRejectsRequestDuringQuarantine(t *testing.T) {
 	s := newTestServer(t, 1_000, 1)
 
-	stream := newFakeLeaseStream(acquireRequest(1, []byte("key"), 1, 1000))
+	stream := newFakeLeaseStream(acquireRequest(1, []byte("key"), 1))
 	errDone := make(chan error, 1)
 	go func() { errDone <- s.LeaseStream(stream) }()
 
@@ -896,8 +896,8 @@ func TestLeaseStreamPreservesSameKeyFIFO(t *testing.T) {
 	shard := s.shards[s.shardIndex(string(key))]
 	unblockShard := blockShard(t, shard, string(key))
 	stream := newFakeLeaseStream(
-		acquireRequest(1, key, 1, 1000),
-		acquireRequest(2, key, 1, 1000),
+		acquireRequest(1, key, 1),
+		acquireRequest(2, key, 1),
 	)
 	errDone := make(chan error, 1)
 	go func() { errDone <- s.LeaseStream(stream) }()
@@ -945,8 +945,8 @@ func TestLeaseStreamCanReplyOutOfOrderAcrossShards(t *testing.T) {
 		string(firstKey),
 	)
 	stream := newFakeLeaseStream(
-		acquireRequest(1, firstKey, 1, 1000),
-		acquireRequest(2, secondKey, 2, 1000),
+		acquireRequest(1, firstKey, 1),
+		acquireRequest(2, secondKey, 2),
 	)
 	errDone := make(chan error, 1)
 	go func() { errDone <- s.LeaseStream(stream) }()
@@ -1054,7 +1054,7 @@ func (s *fakeLeaseStream) Context() context.Context     { return s.ctx }
 func (s *fakeLeaseStream) SendMsg(any) error            { return nil }
 func (s *fakeLeaseStream) RecvMsg(any) error            { return nil }
 
-func acquireRequest(requestID uint64, key []byte, sequence, ttlMS uint64) *redleasev1.ClientRequest {
+func acquireRequest(requestID uint64, key []byte, sequence uint64) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		RequestId: requestID,
 		Operation: &redleasev1.ClientRequest_Acquire{Acquire: &redleasev1.AcquireRequest{
@@ -1064,7 +1064,7 @@ func acquireRequest(requestID uint64, key []byte, sequence, ttlMS uint64) *redle
 				BootId:   1,
 				LeaseSeq: sequence,
 			},
-			RequestedTtlMs: ttlMS,
+			RequestedTtlMs: 1000,
 		}},
 	}
 }
