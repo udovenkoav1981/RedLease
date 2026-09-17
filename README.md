@@ -163,4 +163,5 @@ if lease.Valid() {
 
 - [Requirements](Requirements.md) — требования к системе.
 - [Architecture](Architecture.md) — протокол и архитектурные решения.
+- [Нагрузочный тест](cmd/redlease-load/README.md) — матрица коротких lease для `client1of1` и общего `client` на отдельно запущенных серверах.
 - [MIT License](LICENSE).
