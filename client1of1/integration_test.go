@@ -22,6 +22,41 @@ import (
 	redleaseserver "github.com/udovenkoav1981/RedLease/server"
 )
 
+func TestStandardGRPCClientWorksWithVTProtoServer(t *testing.T) {
+	cluster := newIntegrationServer(t)
+	connection, err := grpc.NewClient(
+		"passthrough:///standard-client-test",
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+			return cluster.listener.Dial()
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	stream, err := redleasev1.NewRedLeaseClient(connection).LeaseStream(ctx)
+	if err != nil {
+		t.Fatalf("LeaseStream: %v", err)
+	}
+	if err := stream.Send(&redleasev1.ClientRequest{
+		RequestId: 1,
+		Operation: &redleasev1.ClientRequest_GetTtl{GetTtl: &redleasev1.GetTTLRequest{}},
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	response, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	if response.GetRequestId() != 1 || response.GetGetTtl().GetConfiguredMaxTtlMs() != 5000 {
+		t.Fatalf("GetTTL response = %v, want request ID 1 and TTL 5000", response)
+	}
+}
+
 func TestClientAndServerEndToEnd(t *testing.T) {
 	cluster := newIntegrationServer(t)
 	firstClient := cluster.newClient(t, 1)
@@ -242,7 +277,7 @@ func newIntegrationServer(t *testing.T) *integrationServer {
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(redleaseserver.VTProtoServerOption())
 	leaseServer.Register(grpcServer)
 	go func() {
 		_ = grpcServer.Serve(listener)

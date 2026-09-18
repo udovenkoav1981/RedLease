@@ -84,9 +84,15 @@ leaseServer, err := redleaseserver.New(redleaseserver.Config{
 	Logger:  logger,
 })
 
-grpcServer := grpc.NewServer() // add transport credentials in production
+grpcServer := grpc.NewServer(redleaseserver.VTProtoServerOption()) // add transport credentials in production
 leaseServer.Register(grpcServer)
 ```
+
+`VTProtoServerOption` включает быструю сериализацию vtprotobuf. Для встроенного
+server эту опцию нужно передать при создании gRPC server; клиентские библиотеки
+используют её автоматически. Формат protobuf-сообщений не меняется. Если на
+одном gRPC server размещены другие сервисы с собственным codec, учитывайте,
+что `VTProtoServerOption` принудительно задаёт codec для всего gRPC server.
 
 Регистрация collector в отдельном registry и публикация `/metrics`:
 

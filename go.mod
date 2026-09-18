@@ -3,11 +3,13 @@ module github.com/udovenkoav1981/RedLease
 go 1.26.0
 
 tool (
+	github.com/planetscale/vtprotobuf/cmd/protoc-gen-go-vtproto
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc
 	google.golang.org/protobuf/cmd/protoc-gen-go
 )
 
 require (
+	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10
 	github.com/prometheus/client_golang v1.24.1
 	golang.org/x/sys v0.47.0
 	google.golang.org/grpc v1.83.2

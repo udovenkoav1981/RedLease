@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
+	"github.com/udovenkoav1981/RedLease/internal/vtcodec"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -48,7 +49,7 @@ func newGRPCStreamFactory(connection *grpc.ClientConn) *grpcStreamFactory {
 }
 
 func (f *grpcStreamFactory) open(ctx context.Context) (leaseClientStream, error) {
-	return f.client.LeaseStream(ctx)
+	return f.client.LeaseStream(ctx, grpc.ForceCodecV2(vtcodec.Codec{}))
 }
 
 func (f *grpcStreamFactory) close() error {

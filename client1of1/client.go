@@ -12,6 +12,7 @@ import (
 
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
 	"github.com/udovenkoav1981/RedLease/internal/leaseid"
+	"github.com/udovenkoav1981/RedLease/internal/vtcodec"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -197,7 +198,7 @@ func (c *Client) manageStream() {
 	retryBackoff := backoff.Default()
 	for {
 		streamContext, cancelStream := context.WithCancel(c.ctx)
-		stream, err := c.rpc.LeaseStream(streamContext)
+		stream, err := c.rpc.LeaseStream(streamContext, grpc.ForceCodecV2(vtcodec.Codec{}))
 		if err != nil {
 			cancelStream()
 			c.recordFailure(fmt.Errorf("open stream: %w", err))

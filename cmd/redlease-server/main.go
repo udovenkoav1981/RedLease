@@ -82,7 +82,7 @@ func run(args []string, flagOutput io.Writer, logger *slog.Logger) (runErr error
 		}
 	}()
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(server.VTProtoServerOption())
 	leaseServer.Register(grpcServer)
 	defer grpcServer.Stop()
 
