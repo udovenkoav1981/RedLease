@@ -46,7 +46,7 @@ type renewReplicaResult struct {
 
 // Renew attempts to extend this lease on a configured quorum. Failure leaves
 // the previously confirmed validUntil unchanged.
-func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
+func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 	l.renewMu.Lock()
 	defer l.renewMu.Unlock()
 
@@ -75,7 +75,7 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 	results := make(chan renewReplicaResult, serverCount)
 
 	for replica := range l.client.replicas {
-		request := newRenewRequest(l.key, l.id, ttl)
+		request := newRenewRequest(l.key, l.id, ttlMS)
 		//nolint:contextcheck // Submission and response collection intentionally have different lifetimes.
 		go l.submitRenew(
 			operationContext,
@@ -128,7 +128,7 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 				successful[result.replica] = true
 				candidates[result.replica] = candidateValidUntil(
 					operationStart,
-					Milliseconds(result.response.GetTtlMs()),
+					result.response.GetTtlMs(),
 				)
 				if now < candidates[result.replica] {
 					l.markConfirmed(result.replica, candidates[result.replica])
@@ -245,7 +245,7 @@ func (l *Lease) collectRemainingRenewResults(
 
 		candidate := candidateValidUntil(
 			operationStart,
-			Milliseconds(result.response.GetTtlMs()),
+			result.response.GetTtlMs(),
 		)
 		if boottime.Now() < candidate {
 			l.markConfirmed(result.replica, candidate)
@@ -271,13 +271,13 @@ func (l *Lease) renewCancellationError(callerContext context.Context) error {
 	return nil
 }
 
-func newRenewRequest(key []byte, id leaseid.LeaseID, ttl Milliseconds) *redleasev1.ClientRequest {
+func newRenewRequest(key []byte, id leaseid.LeaseID, ttlMS uint64) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Renew{
 			Renew: &redleasev1.RenewRequest{
 				Key:            bytes.Clone(key),
 				LeaseId:        id.Protobuf(),
-				RequestedTtlMs: uint64(ttl),
+				RequestedTtlMs: ttlMS,
 			},
 		},
 	}

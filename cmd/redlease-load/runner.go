@@ -21,7 +21,7 @@ import (
 )
 
 type loadLease interface {
-	Valid() bool
+	RemainingTTLms() uint64
 	Release()
 }
 
@@ -36,7 +36,7 @@ type oneClient struct{ client *client1of1.Client }
 func (c oneClient) WaitReady(ctx context.Context) error { return c.client.WaitReady(ctx) }
 func (c oneClient) Close() error                        { return c.client.Close() }
 func (c oneClient) Acquire(ctx context.Context, key []byte, ttl uint64) (loadLease, error) {
-	lease, err := c.client.Acquire(ctx, key, client1of1.Milliseconds(ttl))
+	lease, err := c.client.Acquire(ctx, key, ttl)
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +48,7 @@ type quorumClient struct{ client *client.Client }
 func (c quorumClient) WaitReady(ctx context.Context) error { return c.client.WaitReady(ctx) }
 func (c quorumClient) Close() error                        { return c.client.Close() }
 func (c quorumClient) Acquire(ctx context.Context, key []byte, ttl uint64) (loadLease, error) {
-	lease, err := c.client.Acquire(ctx, key, client.Milliseconds(ttl))
+	lease, err := c.client.Acquire(ctx, key, ttl)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +213,7 @@ func work(ctx context.Context, instance loadClient, prefix []byte, config *optio
 		stats.latencies.observe(elapsed)
 		stats.totalLatency += elapsed
 		held := backoff.Wait(ctx, config.hold)
-		if held && !lease.Valid() {
+		if held && lease.RemainingTTLms() == 0 {
 			stats.expired++
 		}
 		lease.Release()

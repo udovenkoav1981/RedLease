@@ -70,7 +70,7 @@ func (l *Lease) healReplicas(replicas []int) int {
 	submissions := make(chan acquireSubmission, len(replicas))
 
 	for _, replica := range replicas {
-		request := newAcquireRequest(l.key, l.id, l.requestedTTL)
+		request := newAcquireRequest(l.key, l.id, l.requestedTTLMS)
 		go l.client.submitAcquire(
 			submitContext,
 			l.ctx,
@@ -99,7 +99,7 @@ func (l *Lease) healReplicas(replicas []int) int {
 
 		candidate := candidateValidUntil(
 			operationStart,
-			Milliseconds(result.response.GetTtlMs()),
+			result.response.GetTtlMs(),
 		)
 		if boottime.Now() < candidate {
 			l.markConfirmed(result.replica, candidate)

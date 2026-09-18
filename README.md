@@ -138,7 +138,7 @@ lease, err := client.Acquire(ctx, []byte("resource/42"), 3000)
 defer lease.Release()
 
 // Проверка непосредственно перед запуском защищённой операции.
-if lease.Valid() {
+if lease.RemainingTTLms() > 0 {
 	protectedOperation(ctx)
 }
 ```
@@ -152,7 +152,7 @@ if lease.Valid() {
 сам запускает cleanup частично приобретённых locks; retry и randomized backoff
 остаются ответственностью вызывающего приложения. Для долгой защищённой
 операции вызывайте `Lease.Renew` до истечения текущего quorum и контролируйте
-`Lease.Valid()` или `Lease.RemainingTTL()`.
+`Lease.RemainingTTLms()` в обоих клиентах.
 
 `Lease.Release()` немедленно делает локальный lease невалидным и выполняет
 сетевое освобождение асинхронно. Не создавайте и не закрывайте `Client` для

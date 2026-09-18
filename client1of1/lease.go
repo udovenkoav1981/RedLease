@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	safetyMargin   = Milliseconds(100)
-	protocolMaxTTL = 5 * time.Second
+	safetyMarginMS uint64 = 100
+	protocolMaxTTL        = 5 * time.Second
 )
 
 var (
@@ -78,22 +78,12 @@ type Lease struct {
 	releaseOnce sync.Once
 }
 
-func newLease(client *Client, id leaseid.LeaseID, key []byte, now uint64) *Lease {
-	return &Lease{
-		client:    client,
-		id:        id,
-		key:       bytes.Clone(key),
-		now:       now,
-		lifecycle: leaseActive,
-	}
-}
-
 // Acquire makes one attempt to establish a currently valid lease. The caller
 // owns retry policy; every new call uses a new lease ID.
 func (c *Client) Acquire(
 	ctx context.Context,
 	key []byte,
-	ttl Milliseconds,
+	ttlMS uint64,
 ) (*Lease, error) {
 	if err := c.cancellationError(ctx); err != nil {
 		return nil, &operationError{kind: ErrNotAcquired, cause: err}
@@ -103,11 +93,18 @@ func (c *Client) Acquire(
 	}
 
 	id := c.idGenerator.Next()
-	operationStart := boottime.Now()
-	lease := newLease(c, id, key, operationStart)
+
+	lease := Lease{
+		client:    c,
+		id:        id,
+		key:       bytes.Clone(key),
+		now:       boottime.Now(),
+		lifecycle: leaseActive,
+	}
+
 	operationContext, cancelOperation := c.operationContext(ctx)
 	accepted := false
-	future, err := c.submit(operationContext, newAcquireRequest(lease.key, id, ttl))
+	future, err := c.submit(operationContext, newAcquireRequest(lease.key, id, ttlMS))
 	if err == nil {
 		var response *redleasev1.ServerResponse
 		response, err = future.await(operationContext)
@@ -117,7 +114,7 @@ func (c *Client) Acquire(
 	}
 	cancelOperation()
 	if err == nil && accepted {
-		return lease, nil
+		return &lease, nil
 	}
 
 	c.release(lease.key, id) //nolint:contextcheck // Cleanup must outlive caller cancellation.
@@ -138,7 +135,7 @@ func (l *Lease) acceptAcquireResponse(
 	switch acquire.GetStatus() {
 	case redleasev1.LeaseStatus_LEASE_STATUS_OK,
 		redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED:
-		validUntil := candidateValidUntil(l.now, Milliseconds(acquire.GetTtlMs()))
+		validUntil := candidateValidUntil(l.now, acquire.GetTtlMs())
 		if boottime.Now() >= validUntil {
 			return false, nil
 		}
@@ -155,13 +152,8 @@ func (l *Lease) acceptAcquireResponse(
 	}
 }
 
-// Key returns a copy of the lease key.
-func (l *Lease) Key() []byte {
-	return bytes.Clone(l.key)
-}
-
-// RemainingTTL returns the remaining local validity in milliseconds.
-func (l *Lease) RemainingTTL() Milliseconds {
+// RemainingTTLms returns the remaining local validity in milliseconds.
+func (l *Lease) RemainingTTLms() uint64 {
 	l.stateMu.RLock()
 	validUntil := l.validUntil
 	active := l.lifecycle == leaseActive
@@ -169,17 +161,12 @@ func (l *Lease) RemainingTTL() Milliseconds {
 	if !active {
 		return 0
 	}
-	return Milliseconds(boottime.Remaining(validUntil, boottime.Now()))
-}
-
-// Valid reports whether a new protected operation may start now.
-func (l *Lease) Valid() bool {
-	return l.RemainingTTL() != 0
+	return boottime.Remaining(validUntil, boottime.Now())
 }
 
 // Renew attempts to extend this lease on its lock-server. Failure leaves the
 // previously confirmed validUntil unchanged.
-func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
+func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 	l.renewMu.Lock()
 	defer l.renewMu.Unlock()
 
@@ -195,7 +182,7 @@ func (l *Lease) Renew(ctx context.Context, ttl Milliseconds) error {
 	renewed := false
 	future, err := l.client.submit(
 		operationContext,
-		newRenewRequest(l.key, l.id, ttl),
+		newRenewRequest(l.key, l.id, ttlMS),
 	)
 	if err == nil {
 		var response *redleasev1.ServerResponse
@@ -225,7 +212,7 @@ func (l *Lease) acceptRenewResponse(
 	if renew.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
 		return false, nil
 	}
-	validUntil := candidateValidUntil(l.now, Milliseconds(renew.GetTtlMs()))
+	validUntil := candidateValidUntil(l.now, renew.GetTtlMs())
 	if boottime.Now() >= validUntil {
 		return false, nil
 	}
@@ -253,8 +240,6 @@ func (l *Lease) Release() {
 		go func() {
 			// Ensure the Release is ordered after any Renew which had already
 			// started when local validity was revoked.
-			l.renewMu.Lock()
-			l.renewMu.Unlock()
 			l.client.release(l.key, l.id)
 
 			l.stateMu.Lock()
@@ -326,11 +311,11 @@ func (c *Client) releaseResponseOK(
 		status == redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE
 }
 
-func candidateValidUntil(operationStart uint64, ttl Milliseconds) uint64 {
-	if ttl <= safetyMargin {
+func candidateValidUntil(operationStart, ttlMS uint64) uint64 {
+	if ttlMS <= safetyMarginMS {
 		return operationStart
 	}
-	return boottime.Add(operationStart, uint64(ttl-safetyMargin))
+	return boottime.Add(operationStart, ttlMS-safetyMarginMS)
 }
 
 func releaseRetryWindow(responseTimeout time.Duration) time.Duration {
@@ -341,22 +326,22 @@ func releaseRetryWindow(responseTimeout time.Duration) time.Duration {
 	return protocolMaxTTL + responseTimeout
 }
 
-func newAcquireRequest(key []byte, id leaseid.LeaseID, ttl Milliseconds) *redleasev1.ClientRequest {
+func newAcquireRequest(key []byte, id leaseid.LeaseID, ttlMS uint64) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Acquire{Acquire: &redleasev1.AcquireRequest{
 			Key:            bytes.Clone(key),
 			LeaseId:        id.Protobuf(),
-			RequestedTtlMs: uint64(ttl),
+			RequestedTtlMs: ttlMS,
 		}},
 	}
 }
 
-func newRenewRequest(key []byte, id leaseid.LeaseID, ttl Milliseconds) *redleasev1.ClientRequest {
+func newRenewRequest(key []byte, id leaseid.LeaseID, ttlMS uint64) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Renew{Renew: &redleasev1.RenewRequest{
 			Key:            bytes.Clone(key),
 			LeaseId:        id.Protobuf(),
-			RequestedTtlMs: uint64(ttl),
+			RequestedTtlMs: ttlMS,
 		}},
 	}
 }

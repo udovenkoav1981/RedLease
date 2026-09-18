@@ -48,7 +48,7 @@ func TestClientAndServersEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first client Acquire: %v", err)
 	}
-	if !firstLease.Valid() {
+	if firstLease.RemainingTTLms() == 0 {
 		t.Fatal("first client received an invalid lease")
 	}
 
@@ -68,7 +68,7 @@ func TestClientAndServersEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first lease Renew: %v", err)
 	}
-	if !firstLease.Valid() || firstLease.RemainingTTL() == 0 {
+	if firstLease.RemainingTTLms() == 0 {
 		t.Fatal("Renew did not leave first lease valid")
 	}
 
@@ -96,7 +96,7 @@ func TestClientAcquiresWithTwoUnavailableServersEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire with two unavailable servers: %v", err)
 	}
-	if !lease.Valid() {
+	if lease.RemainingTTLms() == 0 {
 		t.Fatal("Acquire with two unavailable servers returned an invalid lease")
 	}
 	lease.Release()
@@ -124,7 +124,7 @@ func TestClientUsesHeterogeneousServerTTLsEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire with heterogeneous TTLs: %v", err)
 	}
-	remaining := lease.RemainingTTL()
+	remaining := lease.RemainingTTLms()
 	if remaining == 0 {
 		t.Fatal("heterogeneous TTL quorum is already invalid")
 	}
@@ -215,7 +215,7 @@ func TestFullClusterRestartDoesNotRestoreOldLeaseEndToEnd(t *testing.T) {
 	}
 
 	waitForServerActivation()
-	if oldLease.Valid() {
+	if oldLease.RemainingTTLms() != 0 {
 		t.Fatal("old lease remained locally valid after full restart quarantine")
 	}
 
@@ -527,7 +527,7 @@ func acquireEventually(
 	t *testing.T,
 	client *redleaseclient.Client,
 	key []byte,
-	ttl redleaseclient.Milliseconds,
+	ttl uint64,
 	timeout time.Duration,
 ) *redleaseclient.Lease {
 	t.Helper()

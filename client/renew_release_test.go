@@ -55,8 +55,8 @@ func TestLeaseRenewExtendsValidity(t *testing.T) {
 	if leaseValidUntil(lease) <= previous {
 		t.Fatalf("Renew did not extend previous validity %d", previous)
 	}
-	if lease.requestedTTL != 1_000 {
-		t.Fatalf("Renew changed healing requestedTTL to %d", lease.requestedTTL)
+	if lease.requestedTTLMS != 1_000 {
+		t.Fatalf("Renew changed healing requestedTTL to %d", lease.requestedTTLMS)
 	}
 
 	for replica := testQuorumSize; replica < testServerCount; replica++ {
@@ -162,7 +162,7 @@ func TestLeaseFailedRenewKeepsPreviousValidity(t *testing.T) {
 	if got := leaseValidUntil(lease); got != previous {
 		t.Fatalf("failed Renew changed validity from %d to %d", previous, got)
 	}
-	if !lease.Valid() {
+	if lease.RemainingTTLms() == 0 {
 		t.Fatal("failed Renew revoked the previous live quorum")
 	}
 	waitForConfirmedReplicas(t, lease, [testServerCount]bool{true, true, false, false, false})
@@ -212,11 +212,8 @@ func TestLeaseConcurrentRenewAndReleasePreservesWireOrderAndNoResurrection(t *te
 	renewRequests := harness.receiveRenewRequests(t)
 
 	lease.Release()
-	if lease.Valid() {
+	if lease.RemainingTTLms() != 0 {
 		t.Fatal("Release did not invalidate lease immediately")
-	}
-	if remaining := lease.RemainingTTL(); remaining != 0 {
-		t.Fatalf("Release left remaining TTL %d", remaining)
 	}
 
 	// These responses arrive after Release has transitioned the lease out of
@@ -241,7 +238,7 @@ func TestLeaseConcurrentRenewAndReleasePreservesWireOrderAndNoResurrection(t *te
 	}
 	waitForLeaseReleased(t, lease)
 
-	if lease.Valid() || lease.RemainingTTL() != 0 {
+	if lease.RemainingTTLms() != 0 {
 		t.Fatal("late Renew resurrected released lease")
 	}
 	if got := lease.confirmedReplicas(); !slices.Equal(got, make([]bool, testServerCount)) {
@@ -255,11 +252,8 @@ func TestLeaseReleaseIsImmediateIdempotentAndFansOut(t *testing.T) {
 
 	lease.Release()
 	lease.Release()
-	if lease.Valid() {
+	if lease.RemainingTTLms() != 0 {
 		t.Fatal("Release did not invalidate lease immediately")
-	}
-	if remaining := lease.RemainingTTL(); remaining != 0 {
-		t.Fatalf("Release left remaining TTL %d", remaining)
 	}
 
 	releases := harness.receiveReleaseRequests(t)
@@ -340,7 +334,7 @@ func TestConfirmedReplicaExpiresIndependently(t *testing.T) {
 	if got := acquired.lease.confirmedReplicas(); !slices.Equal(got, want[:]) {
 		t.Fatalf("confirmed replicas after expiry = %v, want %v", got, want)
 	}
-	if !acquired.lease.Valid() {
+	if acquired.lease.RemainingTTLms() == 0 {
 		t.Fatal("one expired replica invalidated the selected quorum")
 	}
 }
@@ -353,13 +347,13 @@ func acquireFullyConfirmedLease(
 	t *testing.T,
 	harness *acquireHarness,
 	key string,
-	ttl Milliseconds,
+	ttl uint64,
 ) *Lease {
 	t.Helper()
 	result := startClientAcquire(harness.client, context.Background(), []byte(key), ttl)
 	requests := harness.receiveAcquireRequests(t)
 	for replica, request := range requests {
-		harness.respondAcquire(replica, request, redleasev1.LeaseStatus_LEASE_STATUS_OK, uint64(ttl))
+		harness.respondAcquire(replica, request, redleasev1.LeaseStatus_LEASE_STATUS_OK, ttl)
 	}
 	acquired := receiveAcquireCallResult(t, result)
 	if acquired.err != nil {
@@ -369,7 +363,7 @@ func acquireFullyConfirmedLease(
 	return acquired.lease
 }
 
-func startLeaseRenew(lease *Lease, ctx context.Context, ttl Milliseconds) <-chan renewCallResult {
+func startLeaseRenew(lease *Lease, ctx context.Context, ttl uint64) <-chan renewCallResult {
 	result := make(chan renewCallResult, 1)
 	go func() { result <- renewCallResult{err: lease.Renew(ctx, ttl)} }()
 	return result

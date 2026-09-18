@@ -14,19 +14,16 @@ func TestLeaseValidityUsesBootTimeBoundary(t *testing.T) {
 	lease := newLease(client, leaseid.LeaseID{}, []byte("key"), 1_000)
 	lease.setAcquireValidity(boottime.Add(boottime.Now(), 1_000))
 
-	if !lease.Valid() {
+	if lease.RemainingTTLms() == 0 {
 		t.Fatal("lease is not valid before validUntil")
 	}
-	remaining := lease.RemainingTTL()
+	remaining := lease.RemainingTTLms()
 	if remaining == 0 || remaining > 1_000 {
 		t.Fatalf("remaining TTL = %d, want 1..1000", remaining)
 	}
 	lease.setAcquireValidity(boottime.Now())
-	if lease.Valid() {
+	if lease.RemainingTTLms() != 0 {
 		t.Fatal("lease is valid at validUntil boundary")
-	}
-	if remaining := lease.RemainingTTL(); remaining != 0 {
-		t.Fatalf("expired lease remaining TTL = %d, want 0", remaining)
 	}
 }
 
@@ -60,8 +57,7 @@ func TestLeaseImmutableGettersAndConcurrentState(t *testing.T) {
 		}
 	}()
 	for range iterations {
-		_ = lease.RemainingTTL()
-		_ = lease.Valid()
+		_ = lease.RemainingTTLms()
 		if !bytes.Equal(lease.Key(), []byte("key")) {
 			t.Fatal("lease key mutated")
 		}

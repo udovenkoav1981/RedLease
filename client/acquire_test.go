@@ -32,7 +32,7 @@ func TestClientAcquireThreeOKEstablishesValidity(t *testing.T) {
 	if got := leaseValidUntil(acquired.lease); got != wantValidUntil {
 		t.Fatalf("validUntil = %d, want %d", got, wantValidUntil)
 	}
-	if !acquired.lease.Valid() {
+	if acquired.lease.RemainingTTLms() == 0 {
 		t.Fatal("newly acquired lease is not valid")
 	}
 	if id := acquired.lease.id; id.ClientID != 19 || id.Sequence != 1 {
@@ -112,7 +112,7 @@ func TestClientAcquireUsesEverySupportedQuorum(t *testing.T) {
 			if acquired.err != nil {
 				t.Fatalf("Acquire at quorum: %v", acquired.err)
 			}
-			if !acquired.lease.Valid() {
+			if acquired.lease.RemainingTTLms() == 0 {
 				t.Fatal("Acquire at quorum returned an invalid lease")
 			}
 
@@ -499,7 +499,7 @@ func startClientAcquire(
 	client *Client,
 	ctx context.Context,
 	key []byte,
-	ttl Milliseconds,
+	ttl uint64,
 ) <-chan acquireCallResult {
 	result := make(chan acquireCallResult, 1)
 	go func() {

@@ -16,7 +16,7 @@ const (
 	// Quorum3Of5 selects three required responses from five servers.
 	Quorum3Of5
 
-	safetyMargin = Milliseconds(100)
+	safetyMarginMS uint64 = 100
 )
 
 func (q Quorum) parameters() (serverCount, quorumSize int, valid bool) {
@@ -37,11 +37,11 @@ func (q Quorum) size() int {
 	return size
 }
 
-func candidateValidUntil(operationStart uint64, ttlMilliseconds Milliseconds) uint64 {
-	if ttlMilliseconds <= safetyMargin {
+func candidateValidUntil(operationStart, ttlMS uint64) uint64 {
+	if ttlMS <= safetyMarginMS {
 		return operationStart
 	}
-	return boottime.Add(operationStart, uint64(ttlMilliseconds-safetyMargin))
+	return boottime.Add(operationStart, ttlMS-safetyMarginMS)
 }
 
 func isSuccessfulAcquire(status redleasev1.LeaseStatus) bool {

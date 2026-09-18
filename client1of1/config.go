@@ -10,9 +10,6 @@ import (
 
 const defaultResponseTimeout = time.Second
 
-// Milliseconds is the unit used for lease TTL values in the API and protocol.
-type Milliseconds uint64
-
 // Config controls a client connected to one lock-server.
 type Config struct {
 	// ClientID must be unique among simultaneously running client processes.

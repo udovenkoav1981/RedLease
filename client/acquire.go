@@ -61,7 +61,7 @@ type acquireReplicaResult struct {
 func (c *Client) Acquire(
 	ctx context.Context,
 	key []byte,
-	ttl Milliseconds,
+	ttlMS uint64,
 ) (*Lease, error) {
 	if c.ctx.Err() != nil {
 		return nil, &notAcquiredError{cause: ErrClientClosed}
@@ -71,7 +71,7 @@ func (c *Client) Acquire(
 	}
 
 	id := c.idGenerator.Next()
-	lease := newLease(c, id, key, ttl)
+	lease := newLease(c, id, key, ttlMS)
 	operationStart := lease.now
 	serverCount := len(c.replicas)
 	quorumSize := c.quorum.size()
@@ -88,7 +88,7 @@ func (c *Client) Acquire(
 	results := make(chan acquireReplicaResult, serverCount)
 
 	for replica := range c.replicas {
-		request := newAcquireRequest(lease.key, id, ttl)
+		request := newAcquireRequest(lease.key, id, ttlMS)
 		//nolint:contextcheck // Submission and response collection intentionally have different lifetimes.
 		go c.submitAcquire(
 			operationContext,
@@ -135,7 +135,7 @@ func (c *Client) Acquire(
 				successful[result.replica] = true
 				candidates[result.replica] = candidateValidUntil(
 					operationStart,
-					Milliseconds(result.response.GetTtlMs()),
+					result.response.GetTtlMs(),
 				)
 				if now < candidates[result.replica] {
 					lease.markConfirmed(result.replica, candidates[result.replica])
@@ -263,7 +263,7 @@ func (c *Client) collectRemainingAcquireResults(
 			isSuccessfulAcquire(result.response.GetStatus()) {
 			candidate := candidateValidUntil(
 				operationStart,
-				Milliseconds(result.response.GetTtlMs()),
+				result.response.GetTtlMs(),
 			)
 			if boottime.Now() < candidate {
 				lease.markConfirmed(result.replica, candidate)
@@ -313,13 +313,13 @@ func bestAcquireQuorum(
 	return validities[len(validities)-quorumSize], true
 }
 
-func newAcquireRequest(key []byte, id leaseid.LeaseID, ttl Milliseconds) *redleasev1.ClientRequest {
+func newAcquireRequest(key []byte, id leaseid.LeaseID, ttlMS uint64) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Acquire{
 			Acquire: &redleasev1.AcquireRequest{
 				Key:            bytes.Clone(key),
 				LeaseId:        id.Protobuf(),
-				RequestedTtlMs: uint64(ttl),
+				RequestedTtlMs: ttlMS,
 			},
 		},
 	}

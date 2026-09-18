@@ -20,13 +20,13 @@ const (
 // Lease is a locally confirmed distributed lease. Its validity is based only
 // on the quorum selected by Acquire; later replica responses never extend it.
 type Lease struct {
-	client       *Client
-	id           leaseid.LeaseID
-	key          []byte
-	requestedTTL Milliseconds
-	now          uint64
-	ctx          context.Context //nolint:containedctx // Lease owns healing and cancellation lifecycle.
-	cancel       context.CancelFunc
+	client         *Client
+	id             leaseid.LeaseID
+	key            []byte
+	requestedTTLMS uint64
+	now            uint64
+	ctx            context.Context //nolint:containedctx // Lease owns healing and cancellation lifecycle.
+	cancel         context.CancelFunc
 
 	stateMu        sync.RWMutex
 	lifecycle      leaseLifecycle
@@ -40,13 +40,13 @@ type Lease struct {
 	releaseDone chan struct{}
 }
 
-func newLease(client *Client, id leaseid.LeaseID, key []byte, requestedTTL Milliseconds) *Lease {
+func newLease(client *Client, id leaseid.LeaseID, key []byte, requestedTTLMS uint64) *Lease {
 	ctx, cancel := context.WithCancel(client.ctx)
 	return &Lease{
 		client:         client,
 		id:             id,
 		key:            bytes.Clone(key),
-		requestedTTL:   requestedTTL,
+		requestedTTLMS: requestedTTLMS,
 		now:            boottime.Now(),
 		confirmedUntil: make([]uint64, len(client.replicas)),
 		ctx:            ctx,
@@ -61,8 +61,8 @@ func (l *Lease) Key() []byte {
 	return bytes.Clone(l.key)
 }
 
-// RemainingTTL returns the remaining local validity in milliseconds.
-func (l *Lease) RemainingTTL() Milliseconds {
+// RemainingTTLms returns the remaining local validity in milliseconds.
+func (l *Lease) RemainingTTLms() uint64 {
 	l.stateMu.RLock()
 	now := boottime.Now()
 	validUntil := l.validUntil
@@ -71,12 +71,7 @@ func (l *Lease) RemainingTTL() Milliseconds {
 	if !active {
 		return 0
 	}
-	return Milliseconds(boottime.Remaining(validUntil, now))
-}
-
-// Valid reports whether a new protected operation may start now.
-func (l *Lease) Valid() bool {
-	return l.RemainingTTL() != 0
+	return boottime.Remaining(validUntil, now)
 }
 
 func (l *Lease) setAcquireValidity(validUntil uint64) {

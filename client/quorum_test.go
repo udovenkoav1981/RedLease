@@ -64,7 +64,7 @@ func TestAcquireQuorumAcceptsAlreadyOwned(t *testing.T) {
 
 func TestCandidateTTLOutOfDurationRangeDoesNotWrap(t *testing.T) {
 	const start uint64 = 1_000_000
-	candidate := candidateValidUntil(start, Milliseconds(math.MaxUint64))
+	candidate := candidateValidUntil(start, math.MaxUint64)
 	if candidate <= start {
 		t.Fatalf("overflowed candidate %d is not after start %d", candidate, start)
 	}

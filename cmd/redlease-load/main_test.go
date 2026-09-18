@@ -110,8 +110,8 @@ func TestAdaptersReturnNilLeaseOnFailedAcquire(t *testing.T) {
 
 type fakeLoadLease struct{ releases *atomic.Uint64 }
 
-func (l fakeLoadLease) Valid() bool { return true }
-func (l fakeLoadLease) Release()    { l.releases.Add(1) }
+func (l fakeLoadLease) RemainingTTLms() uint64 { return 1 }
+func (l fakeLoadLease) Release()               { l.releases.Add(1) }
 
 type fakeLoadClient struct{ releases *atomic.Uint64 }
 

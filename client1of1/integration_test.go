@@ -35,8 +35,8 @@ func TestClientAndServerEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Acquire: %v", err)
 	}
-	if !firstLease.Valid() || firstLease.RemainingTTL() > 900 {
-		t.Fatalf("first lease remaining TTL = %dms", firstLease.RemainingTTL())
+	if firstLease.RemainingTTLms() == 0 || firstLease.RemainingTTLms() > 900 {
+		t.Fatalf("first lease remaining TTL = %dms", firstLease.RemainingTTLms())
 	}
 
 	ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
@@ -55,7 +55,7 @@ func TestClientAndServerEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Renew: %v", err)
 	}
-	if !firstLease.Valid() {
+	if firstLease.RemainingTTLms() == 0 {
 		t.Fatal("renewed lease is invalid")
 	}
 
@@ -104,7 +104,7 @@ func TestConcurrentLeasesShareOneStream(t *testing.T) {
 				errorsSeen <- err
 				return
 			}
-			if !lease.Valid() {
+			if lease.RemainingTTLms() == 0 {
 				errorsSeen <- errors.New("Acquire returned an invalid lease")
 				return
 			}
@@ -298,7 +298,7 @@ func acquireEventually(
 	t *testing.T,
 	client *redleaseclient.Client,
 	key []byte,
-	ttl redleaseclient.Milliseconds,
+	ttl uint64,
 ) *redleaseclient.Lease {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
