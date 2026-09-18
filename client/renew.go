@@ -6,7 +6,6 @@ import (
 	"errors"
 
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
-	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -75,7 +74,7 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 	results := make(chan renewReplicaResult, serverCount)
 
 	for replica := range l.client.replicas {
-		request := newRenewRequest(l.key, l.id, ttlMS)
+		request := l.client.newRenewRequest(l.key, l.sequence, ttlMS)
 		//nolint:contextcheck // Submission and response collection intentionally have different lifetimes.
 		go l.submitRenew(
 			operationContext,
@@ -271,12 +270,12 @@ func (l *Lease) renewCancellationError(callerContext context.Context) error {
 	return nil
 }
 
-func newRenewRequest(key []byte, id leaseid.LeaseID, ttlMS uint64) *redleasev1.ClientRequest {
+func (c *Client) newRenewRequest(key []byte, sequence, ttlMS uint64) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Renew{
 			Renew: &redleasev1.RenewRequest{
 				Key:            bytes.Clone(key),
-				LeaseId:        id.Protobuf(),
+				LeaseId:        &redleasev1.LeaseID{ClientId: c.clientID, BootId: c.bootID, LeaseSeq: sequence},
 				RequestedTtlMs: ttlMS,
 			},
 		},

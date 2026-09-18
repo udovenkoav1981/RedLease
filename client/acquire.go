@@ -7,7 +7,6 @@ import (
 	"slices"
 
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
-	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
@@ -70,12 +69,8 @@ func (c *Client) Acquire(
 		return nil, &notAcquiredError{cause: ErrKeyTooLarge}
 	}
 
-	id := leaseid.LeaseID{
-		ClientID: c.clientID,
-		BootID:   c.bootID,
-		Sequence: c.nextSequence.Add(1),
-	}
-	lease := newLease(c, id, key, ttlMS)
+	sequence := c.nextSequence.Add(1)
+	lease := newLease(c, sequence, key, ttlMS)
 	operationStart := lease.now
 	serverCount := len(c.replicas)
 	quorumSize := c.quorum.size()
@@ -92,7 +87,7 @@ func (c *Client) Acquire(
 	results := make(chan acquireReplicaResult, serverCount)
 
 	for replica := range c.replicas {
-		request := newAcquireRequest(lease.key, id, ttlMS)
+		request := c.newAcquireRequest(lease.key, sequence, ttlMS)
 		//nolint:contextcheck // Submission and response collection intentionally have different lifetimes.
 		go c.submitAcquire(
 			operationContext,
@@ -113,7 +108,7 @@ func (c *Client) Acquire(
 	if err := c.acquireCancellationError(ctx); err != nil {
 		cancelCollection()
 		lease.cancel()
-		c.cleanupFailedAcquire(lease.key, id) //nolint:contextcheck // Cleanup must outlive caller cancellation.
+		c.cleanupFailedAcquire(lease.key, sequence) //nolint:contextcheck // Cleanup must outlive caller cancellation.
 		return nil, &notAcquiredError{cause: err}
 	}
 
@@ -200,7 +195,7 @@ func (c *Client) Acquire(
 
 	cancelCollection()
 	lease.cancel()
-	c.cleanupFailedAcquire(lease.key, id) //nolint:contextcheck // Cleanup must outlive caller cancellation.
+	c.cleanupFailedAcquire(lease.key, sequence) //nolint:contextcheck // Cleanup must outlive caller cancellation.
 	if keyLimitSeen {
 		firstFailure = errors.Join(firstFailure, ErrKeyLimitReached)
 	}
@@ -294,8 +289,8 @@ func acquireQuorumStillPossible(
 	return usable+remaining >= quorumSize
 }
 
-func (c *Client) cleanupFailedAcquire(key []byte, id leaseid.LeaseID) {
-	c.releaseAll(key, id)
+func (c *Client) cleanupFailedAcquire(key []byte, sequence uint64) {
+	c.releaseAll(key, sequence)
 }
 
 func bestAcquireQuorum(
@@ -317,24 +312,24 @@ func bestAcquireQuorum(
 	return validities[len(validities)-quorumSize], true
 }
 
-func newAcquireRequest(key []byte, id leaseid.LeaseID, ttlMS uint64) *redleasev1.ClientRequest {
+func (c *Client) newAcquireRequest(key []byte, sequence, ttlMS uint64) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Acquire{
 			Acquire: &redleasev1.AcquireRequest{
 				Key:            bytes.Clone(key),
-				LeaseId:        id.Protobuf(),
+				LeaseId:        &redleasev1.LeaseID{ClientId: c.clientID, BootId: c.bootID, LeaseSeq: sequence},
 				RequestedTtlMs: ttlMS,
 			},
 		},
 	}
 }
 
-func newReleaseRequest(key []byte, id leaseid.LeaseID) *redleasev1.ClientRequest {
+func (c *Client) newReleaseRequest(key []byte, sequence uint64) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Release{
 			Release: &redleasev1.ReleaseRequest{
 				Key:     bytes.Clone(key),
-				LeaseId: id.Protobuf(),
+				LeaseId: &redleasev1.LeaseID{ClientId: c.clientID, BootId: c.bootID, LeaseSeq: sequence},
 			},
 		},
 	}

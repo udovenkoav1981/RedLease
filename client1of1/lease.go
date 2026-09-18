@@ -10,7 +10,6 @@ import (
 
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
-	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
@@ -65,10 +64,10 @@ const (
 
 // Lease is a locally confirmed lease on the configured lock-server.
 type Lease struct {
-	client *Client
-	id     leaseid.LeaseID
-	key    []byte
-	now    uint64
+	client   *Client
+	sequence uint64
+	key      []byte
+	now      uint64
 
 	stateMu    sync.RWMutex
 	lifecycle  leaseLifecycle
@@ -92,15 +91,11 @@ func (c *Client) Acquire(
 		return nil, &operationError{kind: ErrNotAcquired, cause: ErrKeyTooLarge}
 	}
 
-	id := leaseid.LeaseID{
-		ClientID: c.clientID,
-		BootID:   c.bootID,
-		Sequence: c.nextSequence.Add(1),
-	}
+	sequence := c.nextSequence.Add(1)
 
 	lease := Lease{
 		client:    c,
-		id:        id,
+		sequence:  sequence,
 		key:       bytes.Clone(key),
 		now:       boottime.Now(),
 		lifecycle: leaseActive,
@@ -108,7 +103,7 @@ func (c *Client) Acquire(
 
 	operationContext, cancelOperation := c.operationContext(ctx)
 	accepted := false
-	future, err := c.submit(operationContext, newAcquireRequest(lease.key, id, ttlMS))
+	future, err := c.submit(operationContext, c.newAcquireRequest(lease.key, sequence, ttlMS))
 	if err == nil {
 		var response *redleasev1.ServerResponse
 		response, err = future.await(operationContext)
@@ -121,7 +116,7 @@ func (c *Client) Acquire(
 		return &lease, nil
 	}
 
-	c.release(lease.key, id) //nolint:contextcheck // Cleanup must outlive caller cancellation.
+	c.release(lease.key, sequence) //nolint:contextcheck // Cleanup must outlive caller cancellation.
 	return nil, &operationError{kind: ErrNotAcquired, cause: err}
 }
 
@@ -186,7 +181,7 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 	renewed := false
 	future, err := l.client.submit(
 		operationContext,
-		newRenewRequest(l.key, l.id, ttlMS),
+		l.client.newRenewRequest(l.key, l.sequence, ttlMS),
 	)
 	if err == nil {
 		var response *redleasev1.ServerResponse
@@ -244,7 +239,7 @@ func (l *Lease) Release() {
 		go func() {
 			// Ensure the Release is ordered after any Renew which had already
 			// started when local validity was revoked.
-			l.client.release(l.key, l.id)
+			l.client.release(l.key, l.sequence)
 
 			l.stateMu.Lock()
 			l.lifecycle = leaseReleased
@@ -253,22 +248,22 @@ func (l *Lease) Release() {
 	})
 }
 
-func (c *Client) release(key []byte, id leaseid.LeaseID) {
+func (c *Client) release(key []byte, sequence uint64) {
 	retryContext, cancelRetries := context.WithTimeout(
 		c.ctx,
 		releaseRetryWindow(c.responseTimeout),
 	)
 	initialContext, cancelInitial := context.WithTimeout(retryContext, c.responseTimeout)
-	future, _ := c.submit(initialContext, newReleaseRequest(key, id))
+	future, _ := c.submit(initialContext, c.newReleaseRequest(key, sequence))
 	cancelInitial()
-	go c.retryRelease(retryContext, cancelRetries, key, id, future)
+	go c.retryRelease(retryContext, cancelRetries, key, sequence, future)
 }
 
 func (c *Client) retryRelease(
 	ctx context.Context,
 	cancel context.CancelFunc,
 	key []byte,
-	id leaseid.LeaseID,
+	sequence uint64,
 	future *streamFuture,
 ) {
 	defer cancel()
@@ -284,9 +279,9 @@ func (c *Client) retryRelease(
 					"release cleanup did not complete before retry deadline",
 					slog.String("operation", "release"),
 					slog.String("key", string(key)),
-					slog.Uint64("lease_client_id", uint64(id.ClientID)),
-					slog.Uint64("lease_boot_id", uint64(id.BootID)),
-					slog.Uint64("lease_sequence", id.Sequence),
+					slog.Uint64("lease_client_id", uint64(c.clientID)),
+					slog.Uint64("lease_boot_id", uint64(c.bootID)),
+					slog.Uint64("lease_sequence", sequence),
 				)
 			}
 			return
@@ -294,7 +289,7 @@ func (c *Client) retryRelease(
 		attempt++
 
 		submitContext, cancelSubmit := context.WithTimeout(ctx, c.responseTimeout)
-		future, _ = c.submit(submitContext, newReleaseRequest(key, id))
+		future, _ = c.submit(submitContext, c.newReleaseRequest(key, sequence))
 		cancelSubmit()
 	}
 }
@@ -330,31 +325,31 @@ func releaseRetryWindow(responseTimeout time.Duration) time.Duration {
 	return protocolMaxTTL + responseTimeout
 }
 
-func newAcquireRequest(key []byte, id leaseid.LeaseID, ttlMS uint64) *redleasev1.ClientRequest {
+func (c *Client) newAcquireRequest(key []byte, sequence, ttlMS uint64) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Acquire{Acquire: &redleasev1.AcquireRequest{
 			Key:            bytes.Clone(key),
-			LeaseId:        id.Protobuf(),
+			LeaseId:        &redleasev1.LeaseID{ClientId: c.clientID, BootId: c.bootID, LeaseSeq: sequence},
 			RequestedTtlMs: ttlMS,
 		}},
 	}
 }
 
-func newRenewRequest(key []byte, id leaseid.LeaseID, ttlMS uint64) *redleasev1.ClientRequest {
+func (c *Client) newRenewRequest(key []byte, sequence, ttlMS uint64) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Renew{Renew: &redleasev1.RenewRequest{
 			Key:            bytes.Clone(key),
-			LeaseId:        id.Protobuf(),
+			LeaseId:        &redleasev1.LeaseID{ClientId: c.clientID, BootId: c.bootID, LeaseSeq: sequence},
 			RequestedTtlMs: ttlMS,
 		}},
 	}
 }
 
-func newReleaseRequest(key []byte, id leaseid.LeaseID) *redleasev1.ClientRequest {
+func (c *Client) newReleaseRequest(key []byte, sequence uint64) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Release{Release: &redleasev1.ReleaseRequest{
 			Key:     bytes.Clone(key),
-			LeaseId: id.Protobuf(),
+			LeaseId: &redleasev1.LeaseID{ClientId: c.clientID, BootId: c.bootID, LeaseSeq: sequence},
 		}},
 	}
 }

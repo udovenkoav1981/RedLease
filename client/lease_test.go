@@ -6,12 +6,11 @@ import (
 	"testing"
 
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
-	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 )
 
 func TestLeaseValidityUsesBootTimeBoundary(t *testing.T) {
 	client := testLeaseClient()
-	lease := newLease(client, leaseid.LeaseID{}, []byte("key"), 1_000)
+	lease := newLease(client, 0, []byte("key"), 1_000)
 	lease.setAcquireValidity(boottime.Add(boottime.Now(), 1_000))
 
 	if lease.RemainingTTLms() == 0 {
@@ -29,7 +28,7 @@ func TestLeaseValidityUsesBootTimeBoundary(t *testing.T) {
 
 func TestLeaseConfirmationCannotBeShortenedByOlderResponse(t *testing.T) {
 	client := testLeaseClient()
-	lease := newLease(client, leaseid.LeaseID{}, []byte("key"), 1_000)
+	lease := newLease(client, 0, []byte("key"), 1_000)
 	now := boottime.Now()
 	later := boottime.Add(now, 2_000)
 
@@ -44,7 +43,7 @@ func TestLeaseConfirmationCannotBeShortenedByOlderResponse(t *testing.T) {
 func TestLeaseImmutableGettersAndConcurrentState(t *testing.T) {
 	client := testLeaseClient()
 	key := []byte("key")
-	lease := newLease(client, leaseid.LeaseID{ClientID: 1, BootID: 2, Sequence: 3}, key, 1_000)
+	lease := newLease(client, 3, key, 1_000)
 	lease.setAcquireValidity(boottime.Add(boottime.Now(), 1_000))
 	key[0] = 'X'
 

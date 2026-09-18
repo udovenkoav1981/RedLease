@@ -70,7 +70,7 @@ func (l *Lease) healReplicas(replicas []int) int {
 	submissions := make(chan acquireSubmission, len(replicas))
 
 	for _, replica := range replicas {
-		request := newAcquireRequest(l.key, l.id, l.requestedTTLMS)
+		request := l.client.newAcquireRequest(l.key, l.sequence, l.requestedTTLMS)
 		go l.client.submitAcquire(
 			submitContext,
 			l.ctx,

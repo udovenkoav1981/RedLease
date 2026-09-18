@@ -34,7 +34,7 @@ func TestClientAcquireThreeOKEstablishesValidity(t *testing.T) {
 	if acquired.lease.RemainingTTLms() == 0 {
 		t.Fatal("newly acquired lease is not valid")
 	}
-	if id := acquired.lease.id; id.ClientID != 19 || id.Sequence != 1 {
+	if id := requests[0].GetAcquire().GetLeaseId(); id.GetClientId() != 19 || id.GetBootId() != harness.client.bootID || id.GetLeaseSeq() != acquired.lease.sequence || acquired.lease.sequence != 1 {
 		t.Fatalf("unexpected lease ID: %+v", id)
 	}
 
@@ -400,7 +400,7 @@ func TestClientAcquireConcurrentCalls(t *testing.T) {
 		if acquired.err != nil {
 			t.Fatalf("concurrent Acquire: %v", acquired.err)
 		}
-		sequence := acquired.lease.id.Sequence
+		sequence := acquired.lease.sequence
 		if _, duplicate := seen[sequence]; duplicate {
 			t.Fatalf("duplicate lease sequence %d", sequence)
 		}

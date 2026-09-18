@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
-	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -37,14 +36,14 @@ func (l *Lease) Release() {
 
 // releaseAll waits for one submission attempt on every replica, then leaves
 // response handling and bounded retries in the background.
-func (c *Client) releaseAll(key []byte, id leaseid.LeaseID) {
+func (c *Client) releaseAll(key []byte, sequence uint64) {
 	serverCount := len(c.replicas)
 	retryContext, cancelRetries := context.WithTimeout(c.ctx, releaseRetryWindow(c.responseTimeout))
 	initialContext, cancelInitial := context.WithTimeout(retryContext, c.responseTimeout)
 
 	submissions := make(chan releaseSubmission, serverCount)
 	for replica := range c.replicas {
-		request := newReleaseRequest(key, id)
+		request := c.newReleaseRequest(key, sequence)
 		go func() {
 			future, _ := c.replicas[replica].submit(initialContext, request)
 			submissions <- releaseSubmission{replica: replica, future: future}
@@ -66,7 +65,7 @@ func (c *Client) releaseAll(key []byte, id leaseid.LeaseID) {
 				retryContext,
 				submission.replica,
 				key,
-				id,
+				sequence,
 				submission.future,
 			) {
 				retries.failed.Or(uint64(1) << uint(submission.replica))
@@ -82,9 +81,9 @@ func (c *Client) releaseAll(key []byte, id leaseid.LeaseID) {
 				"release cleanup did not complete before retry deadline",
 				slog.String("operation", "release"),
 				slog.String("key", string(key)),
-				slog.Uint64("lease_client_id", uint64(id.ClientID)),
-				slog.Uint64("lease_boot_id", uint64(id.BootID)),
-				slog.Uint64("lease_sequence", id.Sequence),
+				slog.Uint64("lease_client_id", uint64(c.clientID)),
+				slog.Uint64("lease_boot_id", uint64(c.bootID)),
+				slog.Uint64("lease_sequence", sequence),
 				slog.Any("replica_indices", replicaIndices(failed, serverCount)),
 			)
 		}
@@ -105,7 +104,7 @@ func (c *Client) retryReleaseReplica(
 	ctx context.Context,
 	replica int,
 	key []byte,
-	id leaseid.LeaseID,
+	sequence uint64,
 	future *streamFuture,
 ) bool {
 	retryBackoff := backoff.Default()
@@ -121,7 +120,7 @@ func (c *Client) retryReleaseReplica(
 		attempt++
 
 		submitContext, cancelSubmit := context.WithTimeout(ctx, c.responseTimeout)
-		future, _ = c.replicas[replica].submit(submitContext, newReleaseRequest(key, id))
+		future, _ = c.replicas[replica].submit(submitContext, c.newReleaseRequest(key, sequence))
 		cancelSubmit()
 	}
 }

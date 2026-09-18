@@ -6,7 +6,6 @@ import (
 	"sync"
 
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
-	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 )
 
 type leaseLifecycle uint8
@@ -21,7 +20,7 @@ const (
 // on the quorum selected by Acquire; later replica responses never extend it.
 type Lease struct {
 	client         *Client
-	id             leaseid.LeaseID
+	sequence       uint64
 	key            []byte
 	requestedTTLMS uint64
 	now            uint64
@@ -40,11 +39,11 @@ type Lease struct {
 	releaseDone chan struct{}
 }
 
-func newLease(client *Client, id leaseid.LeaseID, key []byte, requestedTTLMS uint64) *Lease {
+func newLease(client *Client, sequence uint64, key []byte, requestedTTLMS uint64) *Lease {
 	ctx, cancel := context.WithCancel(client.ctx)
 	return &Lease{
 		client:         client,
-		id:             id,
+		sequence:       sequence,
 		key:            bytes.Clone(key),
 		requestedTTLMS: requestedTTLMS,
 		now:            boottime.Now(),
@@ -163,7 +162,7 @@ func (l *Lease) startRelease() {
 
 func (l *Lease) finishRelease() {
 	l.submitBatches.Wait()
-	l.client.releaseAll(l.key, l.id)
+	l.client.releaseAll(l.key, l.sequence)
 
 	l.stateMu.Lock()
 	l.lifecycle = leaseReleased

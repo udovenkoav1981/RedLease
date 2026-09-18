@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -49,14 +48,15 @@ func TestStreamGenerationMultiplexesOutOfOrderResponses(t *testing.T) {
 	}
 	generation := newStreamGeneration(stream, cancelStream)
 	defer generation.Close()
+	client := &Client{}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	first, err := generation.submit(ctx, newReleaseRequest([]byte("first"), leaseid.LeaseID{}))
+	first, err := generation.submit(ctx, client.newReleaseRequest([]byte("first"), 0))
 	if err != nil {
 		t.Fatalf("submit first: %v", err)
 	}
-	second, err := generation.submit(ctx, newReleaseRequest([]byte("second"), leaseid.LeaseID{}))
+	second, err := generation.submit(ctx, client.newReleaseRequest([]byte("second"), 0))
 	if err != nil {
 		t.Fatalf("submit second: %v", err)
 	}
@@ -92,9 +92,10 @@ func TestStreamGenerationCancellationUnblocksAwait(t *testing.T) {
 	}
 	generation := newStreamGeneration(stream, cancelStream)
 	defer generation.Close()
+	client := &Client{}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	future, err := generation.submit(ctx, newReleaseRequest([]byte("key"), leaseid.LeaseID{}))
+	future, err := generation.submit(ctx, client.newReleaseRequest([]byte("key"), 0))
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -113,10 +114,11 @@ func TestStreamGenerationDeadlineUnblocksSend(t *testing.T) {
 	}
 	generation := newStreamGeneration(stream, cancelStream)
 	defer generation.Close()
+	client := &Client{}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
-	if _, err := generation.submit(ctx, newReleaseRequest([]byte("key"), leaseid.LeaseID{})); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := generation.submit(ctx, client.newReleaseRequest([]byte("key"), 0)); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("submit error = %v, want context.DeadlineExceeded", err)
 	}
 }
