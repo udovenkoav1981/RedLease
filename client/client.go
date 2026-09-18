@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -23,14 +24,14 @@ var ErrClientClosed = errors.New("RedLease client closed")
 // lock-server.
 type Client struct {
 	clientID        uint32
+	bootID          uint32
+	nextSequence    atomic.Uint64
 	quorum          Quorum
 	servers         []ServerConfig
 	responseTimeout time.Duration
 	logger          *slog.Logger
 
 	replicas []*replicaConn
-
-	idGenerator *leaseid.Generator
 
 	ctx    context.Context //nolint:containedctx // Client owns this lifecycle context.
 	cancel context.CancelFunc
@@ -46,9 +47,14 @@ func New(config Config) (*Client, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
+	bootID, err := leaseid.NewBootID()
+	if err != nil {
+		return nil, err
+	}
 
 	client := &Client{
 		clientID: config.ClientID,
+		bootID:   bootID,
 		quorum:   config.Quorum,
 		servers:  make([]ServerConfig, len(config.Servers)),
 		replicas: make([]*replicaConn, len(config.Servers)),
@@ -69,13 +75,7 @@ func New(config Config) (*Client, error) {
 		}
 	}
 
-	idGenerator, err := leaseid.NewGenerator(client.clientID)
-	if err != nil {
-		return nil, err
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
-	client.idGenerator = idGenerator
 	client.ctx = ctx
 	client.cancel = cancel
 

@@ -70,7 +70,11 @@ func (c *Client) Acquire(
 		return nil, &notAcquiredError{cause: ErrKeyTooLarge}
 	}
 
-	id := c.idGenerator.Next()
+	id := leaseid.LeaseID{
+		ClientID: c.clientID,
+		BootID:   c.bootID,
+		Sequence: c.nextSequence.Add(1),
+	}
 	lease := newLease(c, id, key, ttlMS)
 	operationStart := lease.now
 	serverCount := len(c.replicas)

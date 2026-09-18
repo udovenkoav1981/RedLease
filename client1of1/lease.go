@@ -92,7 +92,11 @@ func (c *Client) Acquire(
 		return nil, &operationError{kind: ErrNotAcquired, cause: ErrKeyTooLarge}
 	}
 
-	id := c.idGenerator.Next()
+	id := leaseid.LeaseID{
+		ClientID: c.clientID,
+		BootID:   c.bootID,
+		Sequence: c.nextSequence.Add(1),
+	}
 
 	lease := Lease{
 		client:    c,

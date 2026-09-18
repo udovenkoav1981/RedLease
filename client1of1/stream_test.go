@@ -133,14 +133,11 @@ func TestFailedAcquireSubmitsCleanupReleaseBeforeReturning(t *testing.T) {
 
 	clientContext, cancelClient := context.WithCancel(context.Background())
 	defer cancelClient()
-	idGenerator, err := leaseid.NewGenerator(7)
-	if err != nil {
-		t.Fatalf("new lease ID generator: %v", err)
-	}
 	client := &Client{
+		clientID:        7,
+		bootID:          1,
 		responseTimeout: 100 * time.Millisecond,
 		logger:          slog.New(slog.DiscardHandler),
-		idGenerator:     idGenerator,
 		ctx:             clientContext,
 		cancel:          cancelClient,
 		generation:      generation,
@@ -173,6 +170,9 @@ func TestFailedAcquireSubmitsCleanupReleaseBeforeReturning(t *testing.T) {
 	select {
 	case releaseRequest := <-stream.requests:
 		acquireID := acquireRequest.GetAcquire().GetLeaseId()
+		if acquireID.GetClientId() != 7 || acquireID.GetBootId() != 1 || acquireID.GetLeaseSeq() != 1 {
+			t.Fatalf("unexpected first Acquire lease ID: %+v", acquireID)
+		}
 		if releaseRequest.GetRelease() == nil {
 			t.Fatal("cleanup request is not Release")
 		}

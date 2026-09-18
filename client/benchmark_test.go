@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -49,11 +48,8 @@ func BenchmarkLeaseRenew(b *testing.B) {
 func newBenchmarkClient(b *testing.B) *Client {
 	b.Helper()
 	client, factories := newClientWithScriptedReplicasWithoutCleanup()
-	generator, err := leaseid.NewGenerator(1)
-	if err != nil {
-		b.Fatalf("new lease ID generator: %v", err)
-	}
-	client.idGenerator = generator
+	client.clientID = 1
+	client.bootID = 1
 	client.responseTimeout = time.Second
 
 	done := make(chan struct{})

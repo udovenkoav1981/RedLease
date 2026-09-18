@@ -1,4 +1,4 @@
-// Package leaseid generates process-unique lease identifiers shared by the
+// Package leaseid provides lease identifiers and random boot IDs shared by the
 // RedLease client implementations.
 package leaseid
 
@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-	"sync/atomic"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
@@ -27,31 +26,12 @@ func (id LeaseID) Protobuf() *redleasev1.LeaseID {
 	}
 }
 
-// Generator generates lease IDs for one client process.
-type Generator struct {
-	clientID     uint32
-	bootID       uint32
-	nextSequence atomic.Uint64
-}
-
-// NewGenerator constructs a generator with a cryptographically random boot ID.
-func NewGenerator(clientID uint32) (*Generator, error) {
+// NewBootID generates a cryptographically random boot ID for one client process.
+func NewBootID() (uint32, error) {
 	var bootIDBytes [4]byte
 	if _, err := rand.Read(bootIDBytes[:]); err != nil {
-		return nil, fmt.Errorf("generate boot ID: %w", err)
+		return 0, fmt.Errorf("generate boot ID: %w", err)
 	}
 
-	return &Generator{
-		clientID: clientID,
-		bootID:   binary.BigEndian.Uint32(bootIDBytes[:]),
-	}, nil
-}
-
-// Next returns the next lease ID. The sequence starts at one.
-func (g *Generator) Next() LeaseID {
-	return LeaseID{
-		ClientID: g.clientID,
-		BootID:   g.bootID,
-		Sequence: g.nextSequence.Add(1),
-	}
+	return binary.BigEndian.Uint32(bootIDBytes[:]), nil
 }

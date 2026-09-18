@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -35,9 +36,11 @@ func (e *serverUnavailableError) Unwrap() error {
 
 // Client owns one persistent reconnecting stream to one lock-server.
 type Client struct {
+	clientID        uint32
+	bootID          uint32
+	nextSequence    atomic.Uint64
 	responseTimeout time.Duration
 	logger          *slog.Logger
-	idGenerator     *leaseid.Generator
 
 	connection *grpc.ClientConn
 	rpc        redleasev1.RedLeaseClient
@@ -63,7 +66,7 @@ func New(config Config) (*Client, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	idGenerator, err := leaseid.NewGenerator(config.ClientID)
+	bootID, err := leaseid.NewBootID()
 	if err != nil {
 		return nil, err
 	}
@@ -74,18 +77,19 @@ func New(config Config) (*Client, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	client := &Client{
+		clientID:        config.ClientID,
+		bootID:          bootID,
 		responseTimeout: defaultResponseTimeout,
 		logger: config.Logger.With(
 			slog.String("component", "redlease-client"),
 			slog.Uint64("client_id", uint64(config.ClientID)),
 			slog.String("server_target", config.Target),
 		),
-		idGenerator: idGenerator,
-		connection:  connection,
-		rpc:         redleasev1.NewRedLeaseClient(connection),
-		ctx:         ctx,
-		cancel:      cancel,
-		changed:     make(chan struct{}),
+		connection: connection,
+		rpc:        redleasev1.NewRedLeaseClient(connection),
+		ctx:        ctx,
+		cancel:     cancel,
+		changed:    make(chan struct{}),
 	}
 	if config.ResponseTimeout != 0 {
 		client.responseTimeout = time.Duration(config.ResponseTimeout) * time.Millisecond

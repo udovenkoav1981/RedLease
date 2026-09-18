@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
@@ -68,11 +67,8 @@ func TestClientAcquireUsesEverySupportedQuorum(t *testing.T) {
 			quorum := test.quorum
 			client, factories := newClientForQuorum(quorum)
 			client.responseTimeout = 500 * time.Millisecond
-			generator, err := leaseid.NewGenerator(19)
-			if err != nil {
-				t.Fatalf("new lease ID generator: %v", err)
-			}
-			client.idGenerator = generator
+			client.clientID = 19
+			client.bootID = 1
 			t.Cleanup(func() { _ = client.Close() })
 
 			serverCount, quorumSize, _ := quorum.parameters()
@@ -427,11 +423,8 @@ type acquireCallResult struct {
 func newAcquireHarness(t *testing.T) *acquireHarness {
 	t.Helper()
 	client, factories := newClientWithScriptedReplicasWithoutCleanup()
-	generator, err := leaseid.NewGenerator(19)
-	if err != nil {
-		t.Fatalf("new lease ID generator: %v", err)
-	}
-	client.idGenerator = generator
+	client.clientID = 19
+	client.bootID = 1
 	client.responseTimeout = 500 * time.Millisecond
 
 	harness := &acquireHarness{client: client, factories: factories}
