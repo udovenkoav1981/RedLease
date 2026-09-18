@@ -115,7 +115,7 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	clients := flags.String("clients", defaultClients, "comma-separated client counts")
 	leases := flags.String("leases-per-client", defaultLeases, "comma-separated concurrent lease counts per client")
 	duration := flags.Duration("duration", 5*time.Second, "measurement time per matrix cell")
-	hold := flags.Duration("hold", 50*time.Millisecond, "simulated work time while holding each lease")
+	hold := flags.Duration("hold", 10*time.Millisecond, "simulated work time while holding each lease")
 	ttlMS := flags.Uint64("ttl-ms", defaultTTLMS, "requested lease TTL in milliseconds (101..5000)")
 	responseTimeout := defaultTimeoutMS
 	flags.Func("response-timeout-ms", "per-server response timeout in milliseconds", func(raw string) error {

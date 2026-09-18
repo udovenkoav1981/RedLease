@@ -31,6 +31,16 @@ func TestParseOptions(t *testing.T) {
 	}
 }
 
+func TestDefaultHold(t *testing.T) {
+	config, err := parseOptions([]string{"-targets=127.0.0.1:50051"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseOptions: %v", err)
+	}
+	if config.hold != 10*time.Millisecond {
+		t.Fatalf("default hold = %s, want 10ms", config.hold)
+	}
+}
+
 func TestParseOptionsRejectsInvalidValues(t *testing.T) {
 	for _, args := range [][]string{
 		{"-targets=127.0.0.1:50051,127.0.0.1:50051"},
