@@ -267,7 +267,7 @@ func (s *Server) acquireLocked(
 	shard.addLease(
 		op.key,
 		op.leaseID,
-		boottime.Add(now, effectiveTTLMS),
+		now+effectiveTTLMS,
 	)
 	return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK, effectiveTTLMS), false
 }
@@ -314,7 +314,7 @@ func (s *Server) renew(shard *leaseShard, op operation, now uint64) *redleasev1.
 	}
 
 	effectiveTTLMS := min(op.requestedTTLMS, s.config.MaxTTL)
-	candidate := boottime.Add(now, effectiveTTLMS)
+	candidate := now + effectiveTTLMS
 	if candidate > current.deadline {
 		current.deadline = candidate
 		heap.Fix(&shard.deadlines, current.heapIndex)

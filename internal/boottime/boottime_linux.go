@@ -3,11 +3,7 @@
 // Package boottime provides suspend-aware monotonic time on Linux.
 package boottime
 
-import (
-	"math"
-
-	"golang.org/x/sys/unix"
-)
+import "golang.org/x/sys/unix"
 
 const (
 	millisecondsPerSecond     = 1_000
@@ -21,14 +17,6 @@ func Now() uint64 {
 		panic("boottime: clock_gettime: " + err.Error())
 	}
 	return uint64(value.Sec)*millisecondsPerSecond + uint64(value.Nsec)/nanosecondsPerMillisecond
-}
-
-// Add returns instant plus milliseconds, saturating on overflow.
-func Add(instant, milliseconds uint64) uint64 {
-	if milliseconds > math.MaxUint64-instant {
-		return math.MaxUint64
-	}
-	return instant + milliseconds
 }
 
 // Remaining returns whole milliseconds until deadline.

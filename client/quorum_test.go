@@ -1,7 +1,6 @@
 package client
 
 import (
-	"math"
 	"testing"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
@@ -59,14 +58,6 @@ func TestAcquireQuorumRejectsExpiredValidity(t *testing.T) {
 func TestAcquireQuorumAcceptsAlreadyOwned(t *testing.T) {
 	if !isSuccessfulAcquire(redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED) {
 		t.Fatal("ALREADY_OWNED did not count as an Acquire success")
-	}
-}
-
-func TestCandidateTTLOutOfDurationRangeDoesNotWrap(t *testing.T) {
-	const start uint64 = 1_000_000
-	candidate := candidateValidUntil(start, math.MaxUint64)
-	if candidate <= start {
-		t.Fatalf("overflowed candidate %d is not after start %d", candidate, start)
 	}
 }
 

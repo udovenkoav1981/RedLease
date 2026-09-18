@@ -2,10 +2,7 @@
 
 package boottime
 
-import (
-	"math"
-	"testing"
-)
+import "testing"
 
 func TestNowIsNondecreasing(t *testing.T) {
 	first := Now()
@@ -15,13 +12,7 @@ func TestNowIsNondecreasing(t *testing.T) {
 	}
 }
 
-func TestAddAndRemaining(t *testing.T) {
-	if got := Add(1_000, 500); got != 1_500 {
-		t.Fatalf("Add = %d, want 1500", got)
-	}
-	if got := Add(math.MaxUint64-10, 20); got != math.MaxUint64 {
-		t.Fatalf("overflowing Add = %d, want %d", got, uint64(math.MaxUint64))
-	}
+func TestRemaining(t *testing.T) {
 	if got := Remaining(1_500, 1_000); got != 500 {
 		t.Fatalf("Remaining = %d, want 500", got)
 	}

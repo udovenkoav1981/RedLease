@@ -314,7 +314,7 @@ func candidateValidUntil(operationStart, ttlMS uint64) uint64 {
 	if ttlMS <= safetyMarginMS {
 		return operationStart
 	}
-	return boottime.Add(operationStart, ttlMS-safetyMarginMS)
+	return operationStart + (ttlMS - safetyMarginMS)
 }
 
 func releaseRetryWindow(responseTimeout time.Duration) time.Duration {

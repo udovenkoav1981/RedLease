@@ -11,7 +11,7 @@ import (
 func TestLeaseValidityUsesBootTimeBoundary(t *testing.T) {
 	client := testLeaseClient()
 	lease := newLease(client, 0, []byte("key"), 1_000)
-	lease.setAcquireValidity(boottime.Add(boottime.Now(), 1_000))
+	lease.setAcquireValidity(boottime.Now() + 1_000)
 
 	if lease.RemainingTTLms() == 0 {
 		t.Fatal("lease is not valid before validUntil")
@@ -30,10 +30,10 @@ func TestLeaseConfirmationCannotBeShortenedByOlderResponse(t *testing.T) {
 	client := testLeaseClient()
 	lease := newLease(client, 0, []byte("key"), 1_000)
 	now := boottime.Now()
-	later := boottime.Add(now, 2_000)
+	later := now + 2_000
 
 	lease.markConfirmed(0, later)
-	lease.markConfirmed(0, boottime.Add(now, 1_000))
+	lease.markConfirmed(0, now+1_000)
 
 	if got := lease.confirmedUntil[0]; got != later {
 		t.Fatalf("confirmed until = %d, want %d", got, later)
@@ -44,7 +44,7 @@ func TestLeaseImmutableGettersAndConcurrentState(t *testing.T) {
 	client := testLeaseClient()
 	key := []byte("key")
 	lease := newLease(client, 3, key, 1_000)
-	lease.setAcquireValidity(boottime.Add(boottime.Now(), 1_000))
+	lease.setAcquireValidity(boottime.Now() + 1_000)
 	key[0] = 'X'
 
 	const iterations = 1_000
@@ -52,7 +52,7 @@ func TestLeaseImmutableGettersAndConcurrentState(t *testing.T) {
 	go func() {
 		defer close(done)
 		for iteration := range iterations {
-			lease.markConfirmed(iteration%testServerCount, boottime.Add(boottime.Now(), 1_000))
+			lease.markConfirmed(iteration%testServerCount, boottime.Now()+1_000)
 		}
 	}()
 	for range iterations {

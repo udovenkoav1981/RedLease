@@ -1,9 +1,6 @@
 package client
 
-import (
-	"github.com/udovenkoav1981/RedLease/internal/boottime"
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
-)
+import redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 
 // Quorum selects one supported majority configuration.
 type Quorum uint8
@@ -41,7 +38,7 @@ func candidateValidUntil(operationStart, ttlMS uint64) uint64 {
 	if ttlMS <= safetyMarginMS {
 		return operationStart
 	}
-	return boottime.Add(operationStart, ttlMS-safetyMarginMS)
+	return operationStart + (ttlMS - safetyMarginMS)
 }
 
 func isSuccessfulAcquire(status redleasev1.LeaseStatus) bool {
