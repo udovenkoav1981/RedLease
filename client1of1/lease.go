@@ -138,9 +138,7 @@ func (l *Lease) acceptAcquireResponse(
 		if boottime.Now() >= validUntil {
 			return false, nil
 		}
-		l.stateMu.Lock()
 		l.validUntil = validUntil
-		l.stateMu.Unlock()
 		return true, nil
 	case redleasev1.LeaseStatus_LEASE_STATUS_KEY_LIMIT_REACHED:
 		return false, ErrKeyLimitReached
