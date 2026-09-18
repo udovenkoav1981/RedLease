@@ -4,17 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"sync"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
 var (
-	errNilStreamRequest   = errors.New("nil stream request")
-	errNilStreamResponse  = errors.New("nil stream response")
-	errRequestIDExhausted = errors.New("stream request ID exhausted")
-	errStreamClosed       = errors.New("stream closed")
+	errNilStreamRequest  = errors.New("nil stream request")
+	errNilStreamResponse = errors.New("nil stream response")
+	errStreamClosed      = errors.New("stream closed")
 )
 
 type leaseClientStream interface {
@@ -66,11 +64,10 @@ type streamGeneration struct {
 	sendToken chan struct{}
 	done      chan struct{}
 
-	stateMu            sync.Mutex
-	nextRequestID      uint64
-	requestIDExhausted bool
-	pending            map[uint64]chan streamResult
-	terminalErr        error
+	stateMu       sync.Mutex
+	nextRequestID uint64
+	pending       map[uint64]chan streamResult
+	terminalErr   error
 
 	terminateOnce sync.Once
 	receiver      sync.WaitGroup
@@ -108,10 +105,6 @@ func (g *streamGeneration) submit(
 
 	future, requestID, err := g.register()
 	if err != nil {
-		if errors.Is(err, errRequestIDExhausted) {
-			g.terminate(err)
-			return nil, g.err()
-		}
 		return nil, err
 	}
 	wireRequest := &redleasev1.ClientRequest{
@@ -154,16 +147,8 @@ func (g *streamGeneration) register() (*streamFuture, uint64, error) {
 	if g.terminalErr != nil {
 		return nil, 0, g.terminalErr
 	}
-	if g.requestIDExhausted {
-		return nil, 0, errRequestIDExhausted
-	}
-
 	requestID := g.nextRequestID
-	if requestID == math.MaxUint64 {
-		g.requestIDExhausted = true
-	} else {
-		g.nextRequestID++
-	}
+	g.nextRequestID++
 	result := make(chan streamResult, 1)
 	g.pending[requestID] = result
 	return &streamFuture{

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"sync"
 	"time"
 
@@ -12,10 +11,9 @@ import (
 )
 
 var (
-	errNilStreamRequest   = errors.New("nil stream request")
-	errNilStreamResponse  = errors.New("nil stream response")
-	errRequestIDExhausted = errors.New("stream request ID exhausted")
-	errStreamClosed       = errors.New("stream generation closed")
+	errNilStreamRequest  = errors.New("nil stream request")
+	errNilStreamResponse = errors.New("nil stream response")
+	errStreamClosed      = errors.New("stream generation closed")
 )
 
 // leaseClientStream is implemented by the generated gRPC bidirectional client
@@ -153,9 +151,8 @@ type streamGeneration struct {
 	sendQueue chan *outboundStreamRequest
 	done      chan struct{}
 
-	requestIDMu        sync.Mutex
-	nextRequestID      uint64
-	requestIDExhausted bool
+	requestIDMu   sync.Mutex
+	nextRequestID uint64
 
 	pendingMu   sync.Mutex
 	pending     map[uint64]*pendingStreamCall
@@ -201,11 +198,7 @@ func (g *streamGeneration) submit(
 		return nil, errNilStreamRequest
 	}
 
-	requestID, err := g.allocateRequestID()
-	if err != nil {
-		g.terminate(err)
-		return nil, g.err()
-	}
+	requestID := g.allocateRequestID()
 
 	call := &pendingStreamCall{result: make(chan streamCallResult, 1)}
 	if err := g.register(requestID, call); err != nil {
@@ -284,21 +277,13 @@ func (g *streamGeneration) Close() error {
 	return g.closeSendErr
 }
 
-func (g *streamGeneration) allocateRequestID() (uint64, error) {
+func (g *streamGeneration) allocateRequestID() uint64 {
 	g.requestIDMu.Lock()
 	defer g.requestIDMu.Unlock()
 
-	if g.requestIDExhausted {
-		return 0, errRequestIDExhausted
-	}
-
 	requestID := g.nextRequestID
-	if requestID == math.MaxUint64 {
-		g.requestIDExhausted = true
-	} else {
-		g.nextRequestID++
-	}
-	return requestID, nil
+	g.nextRequestID++
+	return requestID
 }
 
 func (g *streamGeneration) register(requestID uint64, call *pendingStreamCall) error {

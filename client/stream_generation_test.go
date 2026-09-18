@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"errors"
-	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -287,21 +286,6 @@ func TestStreamGenerationCloseFailureCompletesPendingAndIsIdempotent(t *testing.
 	if calls := stream.closeSendCalls.Load(); calls != 1 {
 		t.Fatalf("CloseSend called %d times, want 1", calls)
 	}
-}
-
-func TestStreamGenerationRequestIDExhaustionFailsGenerationWithoutReuse(t *testing.T) {
-	generation, stream := newTestStreamGeneration(t)
-	generation.nextRequestID = math.MaxUint64
-
-	lastResult := startStreamCall(generation, acquireStreamRequest("last"))
-	lastRequest := receiveSentRequest(t, stream)
-	if lastRequest.GetRequestId() != math.MaxUint64 {
-		t.Fatalf("last request ID = %d, want %d", lastRequest.GetRequestId(), uint64(math.MaxUint64))
-	}
-
-	_, err := generation.call(context.Background(), acquireStreamRequest("overflow"))
-	assertTransportCause(t, err, errRequestIDExhausted)
-	assertTransportCause(t, receiveCallResult(t, lastResult).err, errRequestIDExhausted)
 }
 
 func TestStreamGenerationConcurrentCalls(t *testing.T) {
