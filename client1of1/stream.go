@@ -218,17 +218,10 @@ func (g *streamGeneration) sendRequest(outbound *outboundStreamRequest) error {
 		return g.stream.Send(outbound.request)
 	}
 
-	sent := make(chan struct{})
 	timer := time.AfterFunc(max(time.Until(outbound.deadline), 0), func() {
-		select {
-		case <-sent:
-			return
-		default:
-			g.terminate(fmt.Errorf("send deadline: %w", context.DeadlineExceeded))
-		}
+		g.terminate(fmt.Errorf("send deadline: %w", context.DeadlineExceeded))
 	})
 	err := g.stream.Send(outbound.request)
-	close(sent)
 	timer.Stop()
 	return err
 }
