@@ -6,18 +6,14 @@ import (
 	"log/slog"
 	"net"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	redleaseclient "github.com/udovenkoav1981/RedLease/client1of1"
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 	redleaseserver "github.com/udovenkoav1981/RedLease/server"
 )
 
@@ -117,108 +113,6 @@ func TestConcurrentLeasesShareOneStream(t *testing.T) {
 	close(errorsSeen)
 	for err := range errorsSeen {
 		t.Errorf("concurrent Acquire: %v", err)
-	}
-}
-
-func TestAmbiguousAcquireIsReleasedAfterReconnect(t *testing.T) {
-	listener := bufconn.Listen(1 << 20)
-	service := &disconnectAfterAcquireServer{
-		acquired: make(chan *redleasev1.ClientRequest, 1),
-		released: make(chan *redleasev1.ClientRequest, 1),
-	}
-	grpcServer := grpc.NewServer()
-	redleasev1.RegisterRedLeaseServer(grpcServer, service)
-	go func() { _ = grpcServer.Serve(listener) }()
-	t.Cleanup(func() {
-		grpcServer.Stop()
-		_ = listener.Close()
-	})
-
-	client, err := redleaseclient.New(redleaseclient.Config{
-		ClientID: 4,
-		Target:   "passthrough:///ambiguous-acquire-test",
-		DialOptions: []grpc.DialOption{
-			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
-				return listener.Dial()
-			}),
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-		},
-		Logger:          slog.New(slog.DiscardHandler),
-		ResponseTimeout: 500,
-	})
-	if err != nil {
-		t.Fatalf("client.New: %v", err)
-	}
-	t.Cleanup(func() { _ = client.Close() })
-	waitReady(t, client)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	lease, err := client.Acquire(ctx, 3, 1000)
-	cancel()
-	if !errors.Is(err, redleaseclient.ErrNotAcquired) {
-		t.Fatalf("Acquire error = %v, want ErrNotAcquired", err)
-	}
-	if lease != nil {
-		t.Fatal("ambiguous Acquire returned a lease")
-	}
-
-	var acquireRequest, releaseRequest *redleasev1.ClientRequest
-	select {
-	case acquireRequest = <-service.acquired:
-	case <-time.After(2 * time.Second):
-		t.Fatal("server did not receive Acquire")
-	}
-	select {
-	case releaseRequest = <-service.released:
-	case <-time.After(2 * time.Second):
-		t.Fatal("server did not receive cleanup Release after reconnect")
-	}
-	acquireID := acquireRequest.GetAcquire().GetLeaseId()
-	releaseID := releaseRequest.GetRelease().GetLeaseId()
-	if acquireID.GetClientId() != releaseID.GetClientId() ||
-		acquireID.GetBootId() != releaseID.GetBootId() ||
-		acquireID.GetLeaseSeq() != releaseID.GetLeaseSeq() {
-		t.Fatal("cleanup after reconnect used a different lease ID")
-	}
-}
-
-type disconnectAfterAcquireServer struct {
-	redleasev1.UnimplementedRedLeaseServer
-
-	streamCount atomic.Uint32
-	acquired    chan *redleasev1.ClientRequest
-	released    chan *redleasev1.ClientRequest
-}
-
-func (s *disconnectAfterAcquireServer) LeaseStream(
-	stream grpc.BidiStreamingServer[redleasev1.ClientRequest, redleasev1.ServerResponse],
-) error {
-	if s.streamCount.Add(1) == 1 {
-		request, err := stream.Recv()
-		if err != nil {
-			return err
-		}
-		s.acquired <- request
-		return status.Error(codes.Unavailable, "response deliberately lost")
-	}
-
-	for {
-		request, err := stream.Recv()
-		if err != nil {
-			return err
-		}
-		if request.GetRelease() == nil {
-			continue
-		}
-		s.released <- request
-		if err := stream.Send(&redleasev1.ServerResponse{
-			RequestId: request.GetRequestId(),
-			Result: &redleasev1.ServerResponse_Release{Release: &redleasev1.ReleaseResponse{
-				Status: redleasev1.LeaseStatus_LEASE_STATUS_OK,
-			}},
-		}); err != nil {
-			return err
-		}
 	}
 }
 

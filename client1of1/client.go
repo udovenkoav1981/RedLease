@@ -160,6 +160,25 @@ func (c *Client) submit(
 	ctx context.Context,
 	request *redleasev1.ClientRequest,
 ) (*streamFuture, error) {
+	generation, err := c.currentGeneration()
+	if err != nil {
+		return nil, err
+	}
+	return generation.submit(ctx, request)
+}
+
+func (c *Client) submitNoResponse(
+	ctx context.Context,
+	request *redleasev1.ClientRequest,
+) error {
+	generation, err := c.currentGeneration()
+	if err != nil {
+		return err
+	}
+	return generation.submitNoResponse(ctx, request)
+}
+
+func (c *Client) currentGeneration() (*streamGeneration, error) {
 	c.stateMu.Lock()
 	generation := c.generation
 	cause := c.lastErr
@@ -171,7 +190,7 @@ func (c *Client) submit(
 	if generation == nil {
 		return nil, &serverUnavailableError{cause: cause}
 	}
-	return generation.submit(ctx, request)
+	return generation, nil
 }
 
 func (c *Client) operationContext(caller context.Context) (context.Context, func()) {

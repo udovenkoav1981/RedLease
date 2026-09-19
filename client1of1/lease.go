@@ -3,19 +3,13 @@ package client1of1
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"sync"
-	"time"
 
-	"github.com/udovenkoav1981/RedLease/internal/backoff"
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
-const (
-	safetyMarginMS uint64 = 100
-	protocolMaxTTL        = 5 * time.Second
-)
+const safetyMarginMS uint64 = 100
 
 var (
 	// ErrNotAcquired identifies an Acquire which did not establish a currently
@@ -54,7 +48,6 @@ type leaseLifecycle uint8
 
 const (
 	leaseActive leaseLifecycle = iota
-	leaseReleasing
 	leaseReleased
 )
 
@@ -214,86 +207,24 @@ func (l *Lease) acceptRenewResponse(
 	return true, nil
 }
 
-// Release immediately makes the local lease invalid and asynchronously sends
-// an idempotent best-effort Release to the server. Repeated calls do nothing.
+// Release immediately makes the local lease invalid and queues one idempotent
+// best-effort Release to the server. It does not wait for a server response.
+// Repeated calls do nothing.
 func (l *Lease) Release() {
 	l.releaseOnce.Do(func() {
 		l.stateMu.Lock()
-		l.lifecycle = leaseReleasing
+		l.lifecycle = leaseReleased
 		l.validUntil = 0
 		l.stateMu.Unlock()
 
-		go func() {
-			// Ensure the Release is ordered after any Renew which had already
-			// started when local validity was revoked.
-			l.client.release(l.key, l.sequence)
-
-			l.stateMu.Lock()
-			l.lifecycle = leaseReleased
-			l.stateMu.Unlock()
-		}()
+		l.client.release(l.key, l.sequence)
 	})
 }
 
 func (c *Client) release(key, sequence uint64) {
-	retryContext, cancelRetries := context.WithTimeout(
-		c.ctx,
-		releaseRetryWindow(c.responseTimeout),
-	)
-	initialContext, cancelInitial := context.WithTimeout(retryContext, c.responseTimeout)
-	future, _ := c.submit(initialContext, c.newReleaseRequest(key, sequence))
-	cancelInitial()
-	go c.retryRelease(retryContext, cancelRetries, key, sequence, future)
-}
-
-func (c *Client) retryRelease(
-	ctx context.Context,
-	cancel context.CancelFunc,
-	key uint64,
-	sequence uint64,
-	future *streamFuture,
-) {
+	ctx, cancel := context.WithTimeout(c.ctx, c.responseTimeout)
 	defer cancel()
-	var attempt uint
-	retryBackoff := backoff.Default()
-	for {
-		if future != nil && c.releaseResponseOK(ctx, future) {
-			return
-		}
-		if !backoff.Wait(ctx, retryBackoff.Duration(attempt)) {
-			if ctx.Err() == context.DeadlineExceeded && c.ctx.Err() == nil {
-				c.logger.Warn(
-					"release cleanup did not complete before retry deadline",
-					slog.String("operation", "release"),
-					slog.Uint64("key", key),
-					slog.Uint64("lease_client_id", uint64(c.clientID)),
-					slog.Uint64("lease_boot_id", uint64(c.bootID)),
-					slog.Uint64("lease_sequence", sequence),
-				)
-			}
-			return
-		}
-		attempt++
-
-		submitContext, cancelSubmit := context.WithTimeout(ctx, c.responseTimeout)
-		future, _ = c.submit(submitContext, c.newReleaseRequest(key, sequence))
-		cancelSubmit()
-	}
-}
-
-func (c *Client) releaseResponseOK(
-	ctx context.Context,
-	future *streamFuture,
-) bool {
-	responseContext, cancelResponse := context.WithTimeout(ctx, c.responseTimeout)
-	defer cancelResponse()
-	response, err := future.await(responseContext)
-	if err != nil || response.GetRelease() == nil {
-		return false
-	}
-	status := response.GetRelease().GetStatus()
-	return status == redleasev1.LeaseStatus_LEASE_STATUS_OK ||
-		status == redleasev1.LeaseStatus_LEASE_STATUS_NOT_READY
+	_ = c.submitNoResponse(ctx, c.newReleaseRequest(key, sequence))
 }
 
 func candidateValidUntil(operationStart, ttlMS uint64) uint64 {
@@ -301,14 +232,6 @@ func candidateValidUntil(operationStart, ttlMS uint64) uint64 {
 		return operationStart
 	}
 	return operationStart + (ttlMS - safetyMarginMS)
-}
-
-func releaseRetryWindow(responseTimeout time.Duration) time.Duration {
-	maximum := time.Duration(1<<63 - 1)
-	if responseTimeout > maximum-protocolMaxTTL {
-		return maximum
-	}
-	return protocolMaxTTL + responseTimeout
 }
 
 func (c *Client) newAcquireRequest(key, sequence, ttlMS uint64) *redleasev1.ClientRequest {

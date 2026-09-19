@@ -59,7 +59,7 @@ enum-полем `Quorum`: `Quorum1Of1`, `Quorum2Of3` или `Quorum3Of5`. Пол
 `Target`. Реализация не является wrapper над универсальным клиентом и не
 содержит fan-out, выбор quorum, replica masks или background healing. При этом
 она сохраняет общий wire protocol, multiplexing по `requestID`, reconnect,
-правила validity и cleanup после неуспешного Acquire.
+правила validity и однократную отправку cleanup после неуспешного Acquire.
 
 ## 2. Топология общения клиент-сервер
 
@@ -361,6 +361,16 @@ if current.leaseID == requested.leaseID:
 
 Обычный Release может быть асинхронным best-effort.
 
+`client1of1` однократно пытается синхронно поместить `Release` в FIFO send
+queue, после чего возвращает управление, не ожидая отправки в stream или ответа
+server. При успешном enqueue следующая операция, последовательно вызванная
+после `Lease.Release()`, попадает в тот же stream после него. Ответ на `Release`
+клиенту не нужен и игнорируется. При разрыве stream запрос не повторяется:
+неосвобождённый lease остаётся на server до TTL. Запоздалый `Release` содержит
+прежний `leaseID` и не может удалить новый lease того же key.
+
+Универсальный `client` сохраняет bounded retry `Release` по отдельным replicas.
+
 ### 5.6. GetTTL
 
 `GetTTL()` возвращает `configuredMaxTTL`, загруженный из конфигурации
@@ -558,9 +568,12 @@ Client не логирует успешные `Acquire` и `Renew`, а такж�
   stream разрывается;
 - `INFO`, когда stream устанавливается; после периода недоступности запись
   содержит `reconnected=true`;
-- один `WARN` на lease, если bounded retry асинхронного `Release` завершился,
-  не получив приемлемый ответ от lock-server; универсальный client агрегирует
-  в этой записи все не ответившие replicas.
+- один `WARN` на lease универсального `client`, если bounded retry асинхронного
+  `Release` завершился без приемлемого ответа; запись агрегирует все не
+  ответившие replicas.
+
+`client1of1` не повторяет `Release`, не ожидает его ответ и не логирует результат
+этой best-effort операции.
 
 Повторные неудачные попытки reconnect во время одного периода недоступности не
 логируются. Новая `WARN`-запись возможна только после восстановления stream и

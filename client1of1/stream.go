@@ -108,13 +108,38 @@ func (g *streamGeneration) submit(
 	ctx context.Context,
 	request *redleasev1.ClientRequest,
 ) (*streamFuture, error) {
-	if request == nil {
-		return nil, errNilStreamRequest
-	}
-
-	future, requestID, err := g.register()
+	result := make(chan streamResult, 1)
+	requestID, err := g.enqueue(ctx, request, result)
 	if err != nil {
 		return nil, err
+	}
+	return &streamFuture{
+		generation: g,
+		requestID:  requestID,
+		result:     result,
+	}, nil
+}
+
+func (g *streamGeneration) submitNoResponse(
+	ctx context.Context,
+	request *redleasev1.ClientRequest,
+) error {
+	_, err := g.enqueue(ctx, request, nil)
+	return err
+}
+
+func (g *streamGeneration) enqueue(
+	ctx context.Context,
+	request *redleasev1.ClientRequest,
+	result chan streamResult,
+) (uint64, error) {
+	if request == nil {
+		return 0, errNilStreamRequest
+	}
+
+	requestID, err := g.register(result)
+	if err != nil {
+		return 0, err
 	}
 	request.RequestId = requestID
 	deadline, _ := ctx.Deadline()
@@ -124,32 +149,29 @@ func (g *streamGeneration) submit(
 	case g.sendQueue <- outbound:
 	case <-ctx.Done():
 		g.complete(requestID, streamResult{err: ctx.Err()})
-		return nil, ctx.Err()
+		return 0, ctx.Err()
 	case <-g.done:
-		return nil, g.err()
+		return 0, g.err()
 	}
 
 	if err := g.err(); err != nil {
-		return nil, err
+		return 0, err
 	}
-	return future, nil
+	return requestID, nil
 }
 
-func (g *streamGeneration) register() (*streamFuture, uint64, error) {
+func (g *streamGeneration) register(result chan streamResult) (uint64, error) {
 	g.stateMu.Lock()
 	defer g.stateMu.Unlock()
 	if g.terminalErr != nil {
-		return nil, 0, g.terminalErr
+		return 0, g.terminalErr
 	}
 	requestID := g.nextRequestID
 	g.nextRequestID++
-	result := make(chan streamResult, 1)
-	g.pending[requestID] = result
-	return &streamFuture{
-		generation: g,
-		requestID:  requestID,
-		result:     result,
-	}, requestID, nil
+	if result != nil {
+		g.pending[requestID] = result
+	}
+	return requestID, nil
 }
 
 func (g *streamGeneration) complete(requestID uint64, result streamResult) {

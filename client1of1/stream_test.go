@@ -147,7 +147,7 @@ func TestFailedAcquireQueuesCleanupRelease(t *testing.T) {
 	client := &Client{
 		clientID:        7,
 		bootID:          1,
-		responseTimeout: 100 * time.Millisecond,
+		responseTimeout: 10 * time.Millisecond,
 		logger:          slog.New(slog.DiscardHandler),
 		ctx:             clientContext,
 		cancel:          cancelClient,
@@ -193,9 +193,21 @@ func TestFailedAcquireQueuesCleanupRelease(t *testing.T) {
 			acquireID.GetLeaseSeq() != releaseID.GetLeaseSeq() {
 			t.Fatal("cleanup Release used a different lease ID")
 		}
-		stream.responses <- releaseServerResponse(releaseRequest.GetRequestId())
+
+		generation.stateMu.Lock()
+		_, waitsForResponse := generation.pending[releaseRequest.GetRequestId()]
+		generation.stateMu.Unlock()
+		if waitsForResponse {
+			t.Fatal("cleanup Release waits for a server response")
+		}
 	case <-time.After(time.Second):
 		t.Fatal("failed Acquire did not send cleanup Release")
+	}
+
+	select {
+	case request := <-stream.requests:
+		t.Fatalf("failed Acquire retried cleanup Release: %+v", request)
+	case <-time.After(5 * client.responseTimeout):
 	}
 }
 
