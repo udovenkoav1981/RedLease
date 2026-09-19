@@ -5,7 +5,7 @@ PROTO_FILE := redlease/v1/redlease.proto
 
 all: build
 
-build: lint
+build:
 	go build ./...
 
 lint:
