@@ -1,7 +1,6 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -13,7 +12,7 @@ import (
 
 func TestBackgroundHealingRetriesMissingReplicasToFiveOfFive(t *testing.T) {
 	harness := newAcquireHarness(t)
-	result := startClientAcquire(harness.client, context.Background(), []byte("heal"), 2_000)
+	result := startClientAcquire(harness.client, context.Background(), uint64(1), 2_000)
 	initial := harness.receiveAcquireRequests(t)
 
 	for replica := range testQuorumSize {
@@ -68,7 +67,7 @@ func TestBackgroundHealingRetriesMissingReplicasToFiveOfFive(t *testing.T) {
 
 func TestBackgroundHealingReattachesReplicaAfterStaleRenew(t *testing.T) {
 	harness := newAcquireHarness(t)
-	lease := acquireFullyConfirmedLease(t, harness, "restart-heal", 2_000)
+	lease := acquireFullyConfirmedLease(t, harness, 2, 2_000)
 
 	renewResult := startLeaseRenew(lease, context.Background(), 3_000)
 	renewRequests := harness.receiveRenewRequests(t)
@@ -109,7 +108,7 @@ func TestBackgroundHealingReattachesReplicaAfterStaleRenew(t *testing.T) {
 
 func TestBackgroundHealingContinuesAfterReplicaReconnect(t *testing.T) {
 	harness := newAcquireHarness(t)
-	result := startClientAcquire(harness.client, context.Background(), []byte("reconnect-heal"), 5_000)
+	result := startClientAcquire(harness.client, context.Background(), uint64(1), 5_000)
 	initial := harness.receiveAcquireRequests(t)
 
 	for replica := range testQuorumSize {
@@ -149,7 +148,7 @@ func TestBackgroundHealingContinuesAfterReplicaReconnect(t *testing.T) {
 
 func TestBackgroundHealingStopsAfterLocalValidityExpires(t *testing.T) {
 	harness := newAcquireHarness(t)
-	result := startClientAcquire(harness.client, context.Background(), []byte("expired-heal"), 1_000)
+	result := startClientAcquire(harness.client, context.Background(), uint64(1), 1_000)
 	initial := harness.receiveAcquireRequests(t)
 
 	for replica := range testQuorumSize {
@@ -188,7 +187,7 @@ func TestBackgroundHealingStopsAfterLocalValidityExpires(t *testing.T) {
 
 func TestBackgroundHealingStopsBeforeReleaseSubmission(t *testing.T) {
 	harness := newAcquireHarness(t)
-	result := startClientAcquire(harness.client, context.Background(), []byte("release-heal"), 2_000)
+	result := startClientAcquire(harness.client, context.Background(), uint64(1), 2_000)
 	initial := harness.receiveAcquireRequests(t)
 
 	for replica := range testQuorumSize {
@@ -235,7 +234,7 @@ func TestBackgroundHealingStopsBeforeReleaseSubmission(t *testing.T) {
 
 func TestBackgroundHealingDoesNotAcquireAfterReleaseAndReconnect(t *testing.T) {
 	harness := newAcquireHarness(t)
-	result := startClientAcquire(harness.client, context.Background(), []byte("release-reconnect"), 2_000)
+	result := startClientAcquire(harness.client, context.Background(), uint64(1), 2_000)
 	initial := harness.receiveAcquireRequests(t)
 
 	for replica := range testQuorumSize {
@@ -289,7 +288,7 @@ func assertHealingAcquire(
 	initial *redleasev1.ClientRequest,
 ) {
 	t.Helper()
-	if !bytes.Equal(healing.GetAcquire().GetKey(), initial.GetAcquire().GetKey()) {
+	if healing.GetAcquire().GetKey() != initial.GetAcquire().GetKey() {
 		t.Fatal("healing used a different key")
 	}
 	if !sameProtobufLeaseID(

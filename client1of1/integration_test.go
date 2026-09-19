@@ -3,7 +3,6 @@ package client1of1_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net"
 	"sync"
@@ -30,7 +29,7 @@ func TestClientAndServerEndToEnd(t *testing.T) {
 	waitReady(t, secondClient)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	firstLease, err := firstClient.Acquire(ctx, []byte("shared-key"), 1000)
+	firstLease, err := firstClient.Acquire(ctx, 1, 1000)
 	cancel()
 	if err != nil {
 		t.Fatalf("first Acquire: %v", err)
@@ -40,7 +39,7 @@ func TestClientAndServerEndToEnd(t *testing.T) {
 	}
 
 	ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
-	conflictingLease, err := secondClient.Acquire(ctx, []byte("shared-key"), 1000)
+	conflictingLease, err := secondClient.Acquire(ctx, 1, 1000)
 	cancel()
 	if !errors.Is(err, redleaseclient.ErrNotAcquired) {
 		t.Fatalf("conflicting Acquire error = %v, want ErrNotAcquired", err)
@@ -67,7 +66,7 @@ func TestClientAndServerEndToEnd(t *testing.T) {
 		!errors.Is(err, redleaseclient.ErrLeaseReleased) {
 		t.Fatalf("Renew after Release error = %v", err)
 	}
-	secondLease := acquireEventually(t, secondClient, []byte("shared-key"), 1000)
+	secondLease := acquireEventually(t, secondClient, 1, 1000)
 	secondLease.Release()
 }
 
@@ -77,7 +76,7 @@ func TestAcquireRejectsTTLConsumedBySafetyMargin(t *testing.T) {
 	waitReady(t, client)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	lease, err := client.Acquire(ctx, []byte("short"), 100)
+	lease, err := client.Acquire(ctx, 2, 100)
 	cancel()
 	if !errors.Is(err, redleaseclient.ErrNotAcquired) {
 		t.Fatalf("Acquire error = %v, want ErrNotAcquired", err)
@@ -95,11 +94,14 @@ func TestConcurrentLeasesShareOneStream(t *testing.T) {
 	const leaseCount = 64
 	var workers sync.WaitGroup
 	errorsSeen := make(chan error, leaseCount)
-	for index := range leaseCount {
+	key := uint64(1)
+	for range leaseCount {
+		leaseKey := key
+		key++
 		workers.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			lease, err := client.Acquire(ctx, []byte(fmt.Sprintf("key-%d", index)), 1000)
+			lease, err := client.Acquire(ctx, leaseKey, 1000)
 			if err != nil {
 				errorsSeen <- err
 				return
@@ -151,7 +153,7 @@ func TestAmbiguousAcquireIsReleasedAfterReconnect(t *testing.T) {
 	waitReady(t, client)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	lease, err := client.Acquire(ctx, []byte("ambiguous"), 1000)
+	lease, err := client.Acquire(ctx, 3, 1000)
 	cancel()
 	if !errors.Is(err, redleaseclient.ErrNotAcquired) {
 		t.Fatalf("Acquire error = %v, want ErrNotAcquired", err)
@@ -297,7 +299,7 @@ func waitReady(t *testing.T, client *redleaseclient.Client) {
 func acquireEventually(
 	t *testing.T,
 	client *redleaseclient.Client,
-	key []byte,
+	key uint64,
 	ttl uint64,
 ) *redleaseclient.Lease {
 	t.Helper()

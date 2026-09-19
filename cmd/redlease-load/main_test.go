@@ -100,7 +100,7 @@ func TestAdaptersReturnNilLeaseOnFailedAcquire(t *testing.T) {
 			})
 			cancelled, cancel := context.WithCancel(t.Context())
 			cancel()
-			lease, acquireErr := clients[0].Acquire(cancelled, []byte("cancelled"), config.ttlMS)
+			lease, acquireErr := clients[0].Acquire(cancelled, 1, config.ttlMS)
 			if acquireErr == nil || lease != nil {
 				t.Fatalf("Acquire = %v, %v; want nil lease and an error", lease, acquireErr)
 			}
@@ -117,7 +117,7 @@ type fakeLoadClient struct{ releases *atomic.Uint64 }
 
 func (c fakeLoadClient) WaitReady(context.Context) error { return nil }
 func (c fakeLoadClient) Close() error                    { return nil }
-func (c fakeLoadClient) Acquire(context.Context, []byte, uint64) (loadLease, error) {
+func (c fakeLoadClient) Acquire(context.Context, uint64, uint64) (loadLease, error) {
 	return fakeLoadLease(c), nil
 }
 
@@ -125,7 +125,7 @@ func TestMeasureWithoutServer(t *testing.T) {
 	var releases atomic.Uint64
 	config := options{duration: 30 * time.Millisecond, hold: time.Millisecond, ttlMS: 500}
 	clients := []loadClient{fakeLoadClient{releases: &releases}, fakeLoadClient{releases: &releases}}
-	result := measure(t.Context(), clients, 2, &config, "unique-case-prefix")
+	result := measure(t.Context(), clients, 2, &config, 12345)
 	if result.succeeded == 0 || result.succeeded != releases.Load() || result.failed != 0 {
 		t.Fatalf("measure = %+v, releases = %d", result, releases.Load())
 	}

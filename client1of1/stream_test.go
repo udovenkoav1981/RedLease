@@ -52,11 +52,11 @@ func TestStreamGenerationMultiplexesOutOfOrderResponses(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	first, err := generation.submit(ctx, client.newReleaseRequest([]byte("first"), 0))
+	first, err := generation.submit(ctx, client.newReleaseRequest(1, 0))
 	if err != nil {
 		t.Fatalf("submit first: %v", err)
 	}
-	second, err := generation.submit(ctx, client.newReleaseRequest([]byte("second"), 0))
+	second, err := generation.submit(ctx, client.newReleaseRequest(2, 0))
 	if err != nil {
 		t.Fatalf("submit second: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestStreamGenerationCancellationUnblocksAwait(t *testing.T) {
 	client := &Client{}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	future, err := generation.submit(ctx, client.newReleaseRequest([]byte("key"), 0))
+	future, err := generation.submit(ctx, client.newReleaseRequest(1, 0))
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestStreamGenerationDeadlineUnblocksSend(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
-	if _, err := generation.submit(ctx, client.newReleaseRequest([]byte("key"), 0)); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := generation.submit(ctx, client.newReleaseRequest(1, 0)); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("submit error = %v, want context.DeadlineExceeded", err)
 	}
 }
@@ -159,7 +159,7 @@ func TestFailedAcquireSubmitsCleanupReleaseBeforeReturning(t *testing.T) {
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	lease, err := client.Acquire(ctx, []byte("busy"), 1000)
+	lease, err := client.Acquire(ctx, 1, 1000)
 	cancel()
 	if !errors.Is(err, ErrNotAcquired) {
 		t.Fatalf("Acquire error = %v, want ErrNotAcquired", err)

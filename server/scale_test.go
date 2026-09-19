@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"strconv"
 	"testing"
 	"time"
 
@@ -30,7 +29,7 @@ func TestServerHandlesTenThousandActiveLeases(t *testing.T) {
 	if !s.dispatch(context.Background().Done(), shardJob{
 		operation: operation{
 			kind:           operationAcquire,
-			key:            "over-limit",
+			key:            10001,
 			leaseID:        leaseID{clientID: 3, bootID: 3, leaseSeq: 1},
 			requestedTTLMS: uint64(ProtocolMaxTTL / time.Millisecond),
 		},
@@ -68,7 +67,7 @@ func submitAcquireBatch(
 		op := operation{
 			requestID:      uint64(sequence),
 			kind:           operationAcquire,
-			key:            strconv.Itoa(sequence),
+			key:            uint64(sequence),
 			leaseID:        leaseID{clientID: clientID, bootID: clientID, leaseSeq: uint64(sequence)},
 			requestedTTLMS: uint64(ProtocolMaxTTL / time.Millisecond),
 		}

@@ -43,19 +43,19 @@ message ServerResponse {
 }
 
 message AcquireRequest {
-  bytes key = 1;
+  uint64 key = 1;
   LeaseID lease_id = 2;
   uint64 requested_ttl_ms = 3;
 }
 
 message RenewRequest {
-  bytes key = 1;
+  uint64 key = 1;
   LeaseID lease_id = 2;
   uint64 requested_ttl_ms = 3;
 }
 
 message ReleaseRequest {
-  bytes key = 1;
+  uint64 key = 1;
   LeaseID lease_id = 2;
 }
 
@@ -68,7 +68,8 @@ enum LeaseStatus {
   LEASE_STATUS_STALE = 3;
   LEASE_STATUS_NOT_READY = 4;
   LEASE_STATUS_KEY_LIMIT_REACHED = 5;
-  LEASE_STATUS_KEY_TOO_LARGE = 6;
+  reserved 6;
+  reserved "LEASE_STATUS_KEY_TOO_LARGE";
 }
 
 message AcquireResponse {

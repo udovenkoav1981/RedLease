@@ -36,7 +36,7 @@ func (l *Lease) Release() {
 
 // releaseAll waits for one submission attempt on every replica, then leaves
 // response handling and bounded retries in the background.
-func (c *Client) releaseAll(key []byte, sequence uint64) {
+func (c *Client) releaseAll(key, sequence uint64) {
 	serverCount := len(c.replicas)
 	retryContext, cancelRetries := context.WithTimeout(c.ctx, releaseRetryWindow(c.responseTimeout))
 	initialContext, cancelInitial := context.WithTimeout(retryContext, c.responseTimeout)
@@ -80,7 +80,7 @@ func (c *Client) releaseAll(key []byte, sequence uint64) {
 			c.logger.Warn(
 				"release cleanup did not complete before retry deadline",
 				slog.String("operation", "release"),
-				slog.String("key", string(key)),
+				slog.Uint64("key", key),
 				slog.Uint64("lease_client_id", uint64(c.clientID)),
 				slog.Uint64("lease_boot_id", uint64(c.bootID)),
 				slog.Uint64("lease_sequence", sequence),
@@ -103,7 +103,7 @@ func replicaIndices(mask uint64, serverCount int) []int {
 func (c *Client) retryReleaseReplica(
 	ctx context.Context,
 	replica int,
-	key []byte,
+	key uint64,
 	sequence uint64,
 	future *streamFuture,
 ) bool {
@@ -138,8 +138,7 @@ func (c *Client) releaseResponseOK(ctx context.Context, future *streamFuture) bo
 	// without applying any lease mutation. There is nothing from the previous
 	// process incarnation left to clean on that replica.
 	return status == redleasev1.LeaseStatus_LEASE_STATUS_OK ||
-		status == redleasev1.LeaseStatus_LEASE_STATUS_NOT_READY ||
-		status == redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE
+		status == redleasev1.LeaseStatus_LEASE_STATUS_NOT_READY
 }
 
 func releaseRetryWindow(responseTimeout time.Duration) time.Duration {

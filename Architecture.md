@@ -21,7 +21,7 @@ Failure tolerance          F = N - Q = 0, 1 or 2 respectively
 Storage                    RAM only
 Disk persistence           none
 Default per-server maxKeys 10 000
-Maximum key size           2048 bytes
+Key type                   uint64
 Expired lease cleanup      lazy/on-demand + background every minute
 Protocol maximum TTL       5 s
 Per-server configuredMaxTTL <= Protocol maximum TTL
@@ -233,9 +233,9 @@ GetTTL()
 нет. Нулевой `requestedTTL` допустим: новый lease с таким TTL не даёт клиенту
 положительной validity, а Renew не сокращает уже существующий deadline.
 
-Максимальный размер key во всех lease-операциях равен 2048 байтам. Сервер
-проверяет это ограничение независимо от клиента и возвращает
-`KEY_TOO_LARGE`. Клиентская библиотека отклоняет oversized key до fan-out.
+Key во всех lease-операциях имеет тип `uint64`. Клиент передаёт его в wire
+protocol без копирования и преобразования, а server использует напрямую как
+ключ `map[uint64]*lease`.
 
 ### 5.1. Acquire
 

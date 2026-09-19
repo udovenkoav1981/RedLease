@@ -160,7 +160,7 @@ func New(c Config) (*Server, error) {
 
 	for i := range s.shards {
 		shard := &leaseShard{
-			leases: make(map[string]*lease),
+			leases: make(map[uint64]*lease),
 			jobs:   make(chan shardJob, config.ShardQueueDepth),
 		}
 		s.shards[i] = shard

@@ -226,7 +226,7 @@ func (s *Server) decodeRequest(request *redleasev1.ClientRequest) (operation, *r
 		return operation{
 			requestID:      request.GetRequestId(),
 			kind:           operationAcquire,
-			key:            string(value.Acquire.GetKey()),
+			key:            value.Acquire.GetKey(),
 			leaseID:        makeLeaseID(value.Acquire.GetLeaseId()),
 			requestedTTLMS: value.Acquire.GetRequestedTtlMs(),
 		}, nil, nil
@@ -238,7 +238,7 @@ func (s *Server) decodeRequest(request *redleasev1.ClientRequest) (operation, *r
 		return operation{
 			requestID:      request.GetRequestId(),
 			kind:           operationRenew,
-			key:            string(value.Renew.GetKey()),
+			key:            value.Renew.GetKey(),
 			leaseID:        makeLeaseID(value.Renew.GetLeaseId()),
 			requestedTTLMS: value.Renew.GetRequestedTtlMs(),
 		}, nil, nil
@@ -250,7 +250,7 @@ func (s *Server) decodeRequest(request *redleasev1.ClientRequest) (operation, *r
 		return operation{
 			requestID: request.GetRequestId(),
 			kind:      operationRelease,
-			key:       string(value.Release.GetKey()),
+			key:       value.Release.GetKey(),
 			leaseID:   makeLeaseID(value.Release.GetLeaseId()),
 		}, nil, nil
 

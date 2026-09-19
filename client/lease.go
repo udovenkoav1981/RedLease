@@ -1,7 +1,6 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"sync"
 
@@ -21,7 +20,7 @@ const (
 type Lease struct {
 	client         *Client
 	sequence       uint64
-	key            []byte
+	key            uint64
 	requestedTTLMS uint64
 	now            uint64
 	ctx            context.Context //nolint:containedctx // Lease owns healing and cancellation lifecycle.
@@ -39,12 +38,12 @@ type Lease struct {
 	releaseDone chan struct{}
 }
 
-func newLease(client *Client, sequence uint64, key []byte, requestedTTLMS uint64) *Lease {
+func newLease(client *Client, sequence, key, requestedTTLMS uint64) *Lease {
 	ctx, cancel := context.WithCancel(client.ctx)
 	return &Lease{
 		client:         client,
 		sequence:       sequence,
-		key:            bytes.Clone(key),
+		key:            key,
 		requestedTTLMS: requestedTTLMS,
 		now:            boottime.Now(),
 		confirmedUntil: make([]uint64, len(client.replicas)),
@@ -55,9 +54,9 @@ func newLease(client *Client, sequence uint64, key []byte, requestedTTLMS uint64
 	}
 }
 
-// Key returns a copy of the lease key.
-func (l *Lease) Key() []byte {
-	return bytes.Clone(l.key)
+// Key returns the lease key.
+func (l *Lease) Key() uint64 {
+	return l.key
 }
 
 // RemainingTTLms returns the remaining local validity in milliseconds.

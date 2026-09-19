@@ -14,9 +14,9 @@ import (
 func TestStreamGenerationCorrelatesOutOfOrderResponses(t *testing.T) {
 	generation, stream := newTestStreamGeneration(t)
 
-	firstResult := startStreamCall(generation, acquireStreamRequest("first"))
+	firstResult := startStreamCall(generation, acquireStreamRequest(1))
 	firstRequest := receiveSentRequest(t, stream)
-	secondResult := startStreamCall(generation, acquireStreamRequest("second"))
+	secondResult := startStreamCall(generation, acquireStreamRequest(2))
 	secondRequest := receiveSentRequest(t, stream)
 
 	stream.receive <- fakeReceive{
@@ -42,7 +42,7 @@ func TestStreamGenerationCorrelatesOutOfOrderResponses(t *testing.T) {
 func TestStreamGenerationCallRemainsSubmitAndAwaitWrapper(t *testing.T) {
 	generation, stream := newTestStreamGeneration(t)
 
-	result := startStreamCall(generation, acquireStreamRequest("wrapper"))
+	result := startStreamCall(generation, acquireStreamRequest(1))
 	request := receiveSentRequest(t, stream)
 	stream.receive <- fakeReceive{
 		response: streamResponse(request.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
@@ -64,7 +64,7 @@ func TestStreamGenerationCallRemainsSubmitAndAwaitWrapper(t *testing.T) {
 func TestStreamFutureBuffersResponseBeforeAwait(t *testing.T) {
 	generation, stream := newTestStreamGeneration(t)
 
-	future, err := generation.submit(context.Background(), acquireStreamRequest("buffered"))
+	future, err := generation.submit(context.Background(), acquireStreamRequest(1))
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestStreamFutureBuffersResponseBeforeAwait(t *testing.T) {
 func TestStreamSubmitReturnsAfterWriterAcceptanceBeforeSendCompletes(t *testing.T) {
 	generation, stream := newTestStreamGeneration(t)
 
-	submission := startStreamSubmit(generation, context.Background(), acquireStreamRequest("barrier"))
+	submission := startStreamSubmit(generation, context.Background(), acquireStreamRequest(1))
 	stream.waitForSendAttempt(t)
 
 	// fake Send cannot complete until the test receives from stream.sent.
@@ -122,7 +122,7 @@ func TestStreamSubmitSendFailureCompletesAcceptedFuture(t *testing.T) {
 	sendFailure := errors.New("send failure")
 	generation, stream := newTestStreamGenerationWithOptions(t, fakeStreamOptions{sendErr: sendFailure})
 
-	submission := startStreamSubmit(generation, context.Background(), acquireStreamRequest("request"))
+	submission := startStreamSubmit(generation, context.Background(), acquireStreamRequest(1))
 	stream.waitForSendAttempt(t)
 	submitted := receiveSubmitResult(t, submission)
 	if submitted.err != nil {
@@ -139,14 +139,14 @@ func TestStreamSubmitSendFailureCompletesAcceptedFuture(t *testing.T) {
 func TestStreamSubmitCancellationBeforeWriterAcceptanceDoesNotSend(t *testing.T) {
 	generation, stream := newTestStreamGeneration(t)
 
-	first, err := generation.submit(context.Background(), acquireStreamRequest("first"))
+	first, err := generation.submit(context.Background(), acquireStreamRequest(1))
 	if err != nil {
 		t.Fatalf("first submit: %v", err)
 	}
 	stream.waitForSendAttempt(t)
 
 	secondContext, cancelSecond := context.WithCancel(context.Background())
-	secondSubmission := startStreamSubmit(generation, secondContext, acquireStreamRequest("canceled"))
+	secondSubmission := startStreamSubmit(generation, secondContext, acquireStreamRequest(2))
 	cancelSecond()
 	second := receiveSubmitResult(t, secondSubmission)
 	if !errors.Is(second.err, context.Canceled) {
@@ -175,7 +175,7 @@ func TestStreamSubmitCancellationAfterWriterAcceptanceReturnsFuture(t *testing.T
 	generation, stream := newTestStreamGeneration(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	submission := startStreamSubmit(generation, ctx, acquireStreamRequest("accepted"))
+	submission := startStreamSubmit(generation, ctx, acquireStreamRequest(1))
 	stream.waitForSendAttempt(t)
 	cancel()
 
@@ -201,7 +201,7 @@ func TestStreamResponseTimeoutTerminatesBlockedSend(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 
-	result := startStreamCallWithContext(generation, ctx, acquireStreamRequest("blocked-send"))
+	result := startStreamCallWithContext(generation, ctx, acquireStreamRequest(1))
 	stream.waitForSendAttempt(t)
 	received := receiveCallResult(t, result)
 	if !errors.Is(received.err, context.DeadlineExceeded) {
@@ -220,7 +220,7 @@ func TestStreamGenerationTimeoutAndLateResponseDoNotBlockAnotherCall(t *testing.
 
 	timeoutContext, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	firstResult := startStreamCallWithContext(generation, timeoutContext, acquireStreamRequest("omitted"))
+	firstResult := startStreamCallWithContext(generation, timeoutContext, acquireStreamRequest(1))
 	firstRequest := receiveSentRequest(t, stream)
 
 	first := receiveCallResult(t, firstResult)
@@ -232,7 +232,7 @@ func TestStreamGenerationTimeoutAndLateResponseDoNotBlockAnotherCall(t *testing.
 	// ignored. A later request on the same generation still completes normally.
 	stream.receive <- fakeReceive{response: streamResponse(firstRequest.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK)}
 
-	secondResult := startStreamCall(generation, acquireStreamRequest("next"))
+	secondResult := startStreamCall(generation, acquireStreamRequest(2))
 	secondRequest := receiveSentRequest(t, stream)
 	stream.receive <- fakeReceive{response: streamResponse(secondRequest.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK)}
 
@@ -245,9 +245,9 @@ func TestStreamGenerationTimeoutAndLateResponseDoNotBlockAnotherCall(t *testing.
 func TestStreamGenerationReceiveFailureCompletesAllPendingCalls(t *testing.T) {
 	generation, stream := newTestStreamGeneration(t)
 
-	firstResult := startStreamCall(generation, acquireStreamRequest("first"))
+	firstResult := startStreamCall(generation, acquireStreamRequest(1))
 	receiveSentRequest(t, stream)
-	secondResult := startStreamCall(generation, acquireStreamRequest("second"))
+	secondResult := startStreamCall(generation, acquireStreamRequest(2))
 	receiveSentRequest(t, stream)
 
 	receiveFailure := errors.New("receive failure")
@@ -256,7 +256,7 @@ func TestStreamGenerationReceiveFailureCompletesAllPendingCalls(t *testing.T) {
 	assertTransportCause(t, receiveCallResult(t, firstResult).err, receiveFailure)
 	assertTransportCause(t, receiveCallResult(t, secondResult).err, receiveFailure)
 
-	_, err := generation.call(context.Background(), acquireStreamRequest("after failure"))
+	_, err := generation.call(context.Background(), acquireStreamRequest(1))
 	assertTransportCause(t, err, receiveFailure)
 }
 
@@ -264,7 +264,7 @@ func TestStreamGenerationSendFailureIsTransportError(t *testing.T) {
 	sendFailure := errors.New("send failure")
 	generation, stream := newTestStreamGenerationWithOptions(t, fakeStreamOptions{sendErr: sendFailure})
 
-	result := startStreamCall(generation, acquireStreamRequest("request"))
+	result := startStreamCall(generation, acquireStreamRequest(1))
 	stream.waitForSendAttempt(t)
 	assertTransportCause(t, receiveCallResult(t, result).err, sendFailure)
 }
@@ -273,7 +273,7 @@ func TestStreamGenerationCloseFailureCompletesPendingAndIsIdempotent(t *testing.
 	closeFailure := errors.New("close failure")
 	generation, stream := newTestStreamGenerationWithOptions(t, fakeStreamOptions{closeErr: closeFailure})
 
-	result := startStreamCall(generation, acquireStreamRequest("pending"))
+	result := startStreamCall(generation, acquireStreamRequest(1))
 	receiveSentRequest(t, stream)
 
 	if err := generation.Close(); !errors.Is(err, closeFailure) {
@@ -294,7 +294,7 @@ func TestStreamGenerationConcurrentCalls(t *testing.T) {
 	const calls = 128
 	results := make([]<-chan streamCallResult, calls)
 	for i := range calls {
-		results[i] = startStreamCall(generation, acquireStreamRequest("key"))
+		results[i] = startStreamCall(generation, acquireStreamRequest(uint64(i+1)))
 	}
 
 	requests := make([]*redleasev1.ClientRequest, calls)
@@ -485,10 +485,10 @@ func assertTransportCause(t *testing.T, err, cause error) {
 	}
 }
 
-func acquireStreamRequest(key string) *redleasev1.ClientRequest {
+func acquireStreamRequest(key uint64) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Acquire{
-			Acquire: &redleasev1.AcquireRequest{Key: []byte(key)},
+			Acquire: &redleasev1.AcquireRequest{Key: key},
 		},
 	}
 }

@@ -16,13 +16,13 @@ func TestRetryReleaseReplicaDistinguishesDeadlineFromCancellation(t *testing.T) 
 
 	deadlineContext, cancelDeadline := context.WithDeadline(context.Background(), time.Now())
 	defer cancelDeadline()
-	if exhausted := client.retryReleaseReplica(deadlineContext, 0, nil, 0, nil); !exhausted {
+	if exhausted := client.retryReleaseReplica(deadlineContext, 0, 0, 0, nil); !exhausted {
 		t.Fatal("release retry deadline was not reported as exhausted")
 	}
 
 	canceledContext, cancel := context.WithCancel(context.Background())
 	cancel()
-	if exhausted := client.retryReleaseReplica(canceledContext, 0, nil, 0, nil); exhausted {
+	if exhausted := client.retryReleaseReplica(canceledContext, 0, 0, 0, nil); exhausted {
 		t.Fatal("release retry cancellation was reported as deadline exhaustion")
 	}
 }
@@ -35,7 +35,7 @@ func TestReplicaIndices(t *testing.T) {
 
 func TestLeaseRenewExtendsValidity(t *testing.T) {
 	harness := newAcquireHarness(t)
-	lease := acquireFullyConfirmedLease(t, harness, "renew", 1_000)
+	lease := acquireFullyConfirmedLease(t, harness, 1, 1_000)
 	previous := leaseValidUntil(lease)
 
 	result := startLeaseRenew(lease, context.Background(), 3_000)
@@ -65,7 +65,7 @@ func TestLeaseRenewExtendsValidity(t *testing.T) {
 
 func TestLeaseNowIsAcquireStartAndChangesAtRenewStart(t *testing.T) {
 	harness := newAcquireHarness(t)
-	lease := acquireFullyConfirmedLease(t, harness, "operation-time", 2_000)
+	lease := acquireFullyConfirmedLease(t, harness, 1, 2_000)
 	storedAcquireStart := leaseNow(lease)
 	time.Sleep(time.Millisecond)
 	result := startLeaseRenew(lease, context.Background(), 2_000)
@@ -89,7 +89,7 @@ func TestLateAcquireResponseKeepsAcquireNowAfterRenewStarts(t *testing.T) {
 	acquireResult := startClientAcquire(
 		harness.client,
 		context.Background(),
-		[]byte("late-operation-time"),
+		uint64(1),
 		2_000,
 	)
 	acquireRequests := harness.receiveAcquireRequests(t)
@@ -141,7 +141,7 @@ func TestLateAcquireResponseKeepsAcquireNowAfterRenewStarts(t *testing.T) {
 
 func TestLeaseFailedRenewKeepsPreviousValidity(t *testing.T) {
 	harness := newAcquireHarness(t)
-	lease := acquireFullyConfirmedLease(t, harness, "failed-renew", 2_000)
+	lease := acquireFullyConfirmedLease(t, harness, 1, 2_000)
 	previous := leaseValidUntil(lease)
 
 	result := startLeaseRenew(lease, context.Background(), 4_000)
@@ -169,11 +169,11 @@ func TestLeaseFailedRenewKeepsPreviousValidity(t *testing.T) {
 
 func TestLeaseRenewCanUseQuorumAfterUnacceptedSubmitTimesOut(t *testing.T) {
 	harness := newAcquireHarness(t)
-	lease := acquireFullyConfirmedLease(t, harness, "renew-barrier-timeout", 2_000)
+	lease := acquireFullyConfirmedLease(t, harness, 1, 2_000)
 	harness.client.responseTimeout = 30 * time.Millisecond
 
 	fifthGeneration := currentReplicaGeneration(t, harness.client.replicas[4])
-	blocker, err := fifthGeneration.submit(context.Background(), acquireStreamRequest("renew-blocker"))
+	blocker, err := fifthGeneration.submit(context.Background(), acquireStreamRequest(1))
 	if err != nil {
 		t.Fatalf("submit blocker: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestLeaseRenewCanUseQuorumAfterUnacceptedSubmitTimesOut(t *testing.T) {
 
 func TestLeaseConcurrentRenewAndReleasePreservesWireOrderAndNoResurrection(t *testing.T) {
 	harness := newAcquireHarness(t)
-	lease := acquireFullyConfirmedLease(t, harness, "renew-release", 2_000)
+	lease := acquireFullyConfirmedLease(t, harness, 1, 2_000)
 
 	renewResult := startLeaseRenew(lease, context.Background(), 4_000)
 	renewRequests := harness.receiveRenewRequests(t)
@@ -247,7 +247,7 @@ func TestLeaseConcurrentRenewAndReleasePreservesWireOrderAndNoResurrection(t *te
 
 func TestLeaseReleaseIsImmediateIdempotentAndFansOut(t *testing.T) {
 	harness := newAcquireHarness(t)
-	lease := acquireFullyConfirmedLease(t, harness, "release", 2_000)
+	lease := acquireFullyConfirmedLease(t, harness, 1, 2_000)
 
 	lease.Release()
 	lease.Release()
@@ -277,7 +277,7 @@ func TestLeaseReleaseIsImmediateIdempotentAndFansOut(t *testing.T) {
 
 func TestFailedAcquireCleanupRetriesAfterReplicaReconnect(t *testing.T) {
 	harness := newAcquireHarness(t)
-	result := startClientAcquire(harness.client, context.Background(), []byte("retry-cleanup"), 2_000)
+	result := startClientAcquire(harness.client, context.Background(), uint64(1), 2_000)
 	requests := harness.receiveAcquireRequests(t)
 
 	harness.respondAcquire(0, requests[0], redleasev1.LeaseStatus_LEASE_STATUS_OK, 2_000)
@@ -312,7 +312,7 @@ func TestFailedAcquireCleanupRetriesAfterReplicaReconnect(t *testing.T) {
 
 func TestConfirmedReplicaExpiresIndependently(t *testing.T) {
 	harness := newAcquireHarness(t)
-	result := startClientAcquire(harness.client, context.Background(), []byte("confirmed-expiry"), 2_000)
+	result := startClientAcquire(harness.client, context.Background(), uint64(1), 2_000)
 	requests := harness.receiveAcquireRequests(t)
 
 	for replica := range testQuorumSize {
@@ -345,11 +345,11 @@ type renewCallResult struct {
 func acquireFullyConfirmedLease(
 	t *testing.T,
 	harness *acquireHarness,
-	key string,
+	key uint64,
 	ttl uint64,
 ) *Lease {
 	t.Helper()
-	result := startClientAcquire(harness.client, context.Background(), []byte(key), ttl)
+	result := startClientAcquire(harness.client, context.Background(), key, ttl)
 	requests := harness.receiveAcquireRequests(t)
 	for replica, request := range requests {
 		harness.respondAcquire(replica, request, redleasev1.LeaseStatus_LEASE_STATUS_OK, ttl)

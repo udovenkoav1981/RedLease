@@ -67,7 +67,7 @@ func TestReplicaConnRetriesOpenFailure(t *testing.T) {
 	connection := newTestReplicaConn(t, factory)
 	waitForReplicaError(t, connection, openFailure)
 
-	_, err := connection.call(context.Background(), acquireStreamRequest("unavailable"))
+	_, err := connection.call(context.Background(), acquireStreamRequest(1))
 	assertReplicaUnavailableCause(t, err, openFailure)
 
 	stream := newReplicaFakeStream()
@@ -93,7 +93,7 @@ func TestReplicaConnReconnectsAfterGenerationFailure(t *testing.T) {
 	waitForReplicaState(t, connection, false, false)
 	waitForReplicaState(t, connection, true, false)
 
-	result := startReplicaCall(connection, acquireStreamRequest("after reconnect"))
+	result := startReplicaCall(connection, acquireStreamRequest(1))
 	request := receiveSentRequest(t, secondStream)
 	secondStream.receive <- fakeReceive{
 		response: streamResponse(request.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
@@ -116,7 +116,7 @@ func TestReplicaConnReconnectsWhenRequestDeadlineBreaksBlockedSend(t *testing.T)
 	defer cancel()
 	result := make(chan streamCallResult, 1)
 	go func() {
-		response, err := connection.call(ctx, acquireStreamRequest("blocked-send"))
+		response, err := connection.call(ctx, acquireStreamRequest(1))
 		result <- streamCallResult{response: response, err: err}
 	}()
 	firstStream.waitForSendAttempt(t)
@@ -126,7 +126,7 @@ func TestReplicaConnReconnectsWhenRequestDeadlineBreaksBlockedSend(t *testing.T)
 	waitForReplicaState(t, connection, false, false)
 	waitForReplicaState(t, connection, true, false)
 
-	secondResult := startReplicaCall(connection, acquireStreamRequest("after blocked send"))
+	secondResult := startReplicaCall(connection, acquireStreamRequest(2))
 	request := receiveSentRequest(t, secondStream)
 	secondStream.receive <- fakeReceive{
 		response: streamResponse(request.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
@@ -140,7 +140,7 @@ func TestReplicaConnCallWhenUnavailable(t *testing.T) {
 	factory := newScriptedStreamFactory()
 	connection := newTestReplicaConn(t, factory)
 
-	_, err := connection.call(context.Background(), acquireStreamRequest("key"))
+	_, err := connection.call(context.Background(), acquireStreamRequest(1))
 	if _, ok := errors.AsType[*replicaUnavailableError](err); !ok {
 		t.Fatalf("error %v is not replicaUnavailableError", err)
 	}
@@ -155,7 +155,7 @@ func TestReplicaConnCloseStopsPendingCallAndFactory(t *testing.T) {
 	connection := newTestReplicaConnWithoutCleanup(factory)
 	waitForReplicaState(t, connection, true, false)
 
-	result := startReplicaCall(connection, acquireStreamRequest("pending"))
+	result := startReplicaCall(connection, acquireStreamRequest(1))
 	receiveSentRequest(t, stream)
 
 	if err := connection.Close(); !errors.Is(err, closeFailure) {
@@ -174,7 +174,7 @@ func TestReplicaConnCloseStopsPendingCallAndFactory(t *testing.T) {
 		t.Fatalf("stream CloseSend calls = %d, want 1", calls)
 	}
 
-	_, err := connection.call(context.Background(), acquireStreamRequest("after close"))
+	_, err := connection.call(context.Background(), acquireStreamRequest(1))
 	assertReplicaUnavailableCause(t, err, errReplicaClosed)
 }
 
@@ -188,7 +188,7 @@ func TestReplicaConnConcurrentCalls(t *testing.T) {
 	const calls = 64
 	results := make([]<-chan streamCallResult, calls)
 	for i := range calls {
-		results[i] = startReplicaCall(connection, acquireStreamRequest("key"))
+		results[i] = startReplicaCall(connection, acquireStreamRequest(uint64(i+1)))
 	}
 
 	requests := make([]*redleasev1.ClientRequest, calls)

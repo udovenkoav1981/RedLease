@@ -1,13 +1,11 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"slices"
 
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
-	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -15,14 +13,9 @@ import (
 // currently valid configured quorum.
 var ErrNotAcquired = errors.New("RedLease lease not acquired")
 
-var (
-	// ErrKeyLimitReached means at least one server reported that its resident
-	// lease-key limit was reached during an unsuccessful Acquire.
-	ErrKeyLimitReached = errors.New("RedLease server key limit reached")
-
-	// ErrKeyTooLarge means the supplied key exceeds protocol.MaxKeyBytes.
-	ErrKeyTooLarge = errors.New("RedLease key is too large")
-)
+// ErrKeyLimitReached means at least one server reported that its resident
+// lease-key limit was reached during an unsuccessful Acquire.
+var ErrKeyLimitReached = errors.New("RedLease server key limit reached")
 
 type notAcquiredError struct {
 	cause error
@@ -55,20 +48,17 @@ type acquireReplicaResult struct {
 	err      error
 }
 
-// Acquire makes one attempt to establish a currently valid lease quorum. The
-// caller owns retry policy; every new call uses a new lease ID.
+// Acquire makes one attempt to establish a currently valid lease quorum for
+// the application-defined uint64 key. The caller owns retry policy; every new
+// call uses a new lease ID.
 func (c *Client) Acquire(
 	ctx context.Context,
-	key []byte,
+	key uint64,
 	ttlMS uint64,
 ) (*Lease, error) {
 	if c.ctx.Err() != nil {
 		return nil, &notAcquiredError{cause: ErrClientClosed}
 	}
-	if len(key) > protocol.MaxKeyBytes {
-		return nil, &notAcquiredError{cause: ErrKeyTooLarge}
-	}
-
 	sequence := c.nextSequence.Add(1)
 	lease := newLease(c, sequence, key, ttlMS)
 	operationStart := lease.now
@@ -117,7 +107,6 @@ func (c *Client) Acquire(
 		successful   = make([]bool, serverCount)
 		firstFailure error
 		keyLimitSeen bool
-		largeKeySeen bool
 		received     int
 	)
 
@@ -167,8 +156,6 @@ func (c *Client) Acquire(
 				switch result.response.GetStatus() {
 				case redleasev1.LeaseStatus_LEASE_STATUS_KEY_LIMIT_REACHED:
 					keyLimitSeen = true
-				case redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE:
-					largeKeySeen = true
 				default:
 					// Other statuses are represented by notAcquiredError below.
 				}
@@ -198,9 +185,6 @@ func (c *Client) Acquire(
 	c.cleanupFailedAcquire(lease.key, sequence) //nolint:contextcheck // Cleanup must outlive caller cancellation.
 	if keyLimitSeen {
 		firstFailure = errors.Join(firstFailure, ErrKeyLimitReached)
-	}
-	if largeKeySeen {
-		firstFailure = errors.Join(firstFailure, ErrKeyTooLarge)
 	}
 	return nil, &notAcquiredError{cause: firstFailure}
 }
@@ -289,7 +273,7 @@ func acquireQuorumStillPossible(
 	return usable+remaining >= quorumSize
 }
 
-func (c *Client) cleanupFailedAcquire(key []byte, sequence uint64) {
+func (c *Client) cleanupFailedAcquire(key, sequence uint64) {
 	c.releaseAll(key, sequence)
 }
 
@@ -312,11 +296,11 @@ func bestAcquireQuorum(
 	return validities[len(validities)-quorumSize], true
 }
 
-func (c *Client) newAcquireRequest(key []byte, sequence, ttlMS uint64) *redleasev1.ClientRequest {
+func (c *Client) newAcquireRequest(key, sequence, ttlMS uint64) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Acquire{
 			Acquire: &redleasev1.AcquireRequest{
-				Key:            bytes.Clone(key),
+				Key:            key,
 				LeaseId:        &redleasev1.LeaseID{ClientId: c.clientID, BootId: c.bootID, LeaseSeq: sequence},
 				RequestedTtlMs: ttlMS,
 			},
@@ -324,11 +308,11 @@ func (c *Client) newAcquireRequest(key []byte, sequence, ttlMS uint64) *redlease
 	}
 }
 
-func (c *Client) newReleaseRequest(key []byte, sequence uint64) *redleasev1.ClientRequest {
+func (c *Client) newReleaseRequest(key, sequence uint64) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Release{
 			Release: &redleasev1.ReleaseRequest{
-				Key:     bytes.Clone(key),
+				Key:     key,
 				LeaseId: &redleasev1.LeaseID{ClientId: c.clientID, BootId: c.bootID, LeaseSeq: sequence},
 			},
 		},

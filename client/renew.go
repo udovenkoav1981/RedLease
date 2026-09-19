@@ -1,7 +1,6 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"errors"
 
@@ -270,11 +269,11 @@ func (l *Lease) renewCancellationError(callerContext context.Context) error {
 	return nil
 }
 
-func (c *Client) newRenewRequest(key []byte, sequence, ttlMS uint64) *redleasev1.ClientRequest {
+func (c *Client) newRenewRequest(key, sequence, ttlMS uint64) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Renew{
 			Renew: &redleasev1.RenewRequest{
-				Key:            bytes.Clone(key),
+				Key:            key,
 				LeaseId:        &redleasev1.LeaseID{ClientId: c.clientID, BootId: c.bootID, LeaseSeq: sequence},
 				RequestedTtlMs: ttlMS,
 			},

@@ -1,7 +1,6 @@
 package client_test
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,8 +16,6 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	redleaseclient "github.com/udovenkoav1981/RedLease/client"
-	"github.com/udovenkoav1981/RedLease/internal/protocol"
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 	redleaseserver "github.com/udovenkoav1981/RedLease/server"
 )
 
@@ -41,7 +38,7 @@ func TestClientAndServersEndToEnd(t *testing.T) {
 	// production switch that could bypass this safety invariant.
 	waitForServerActivation()
 
-	key := []byte("integration-key")
+	key := uint64(1)
 	operationContext, cancelOperation := context.WithTimeout(context.Background(), 2*time.Second)
 	firstLease, err := firstClient.Acquire(operationContext, key, 5_000)
 	cancelOperation()
@@ -91,7 +88,7 @@ func TestClientAcquiresWithTwoUnavailableServersEndToEnd(t *testing.T) {
 	cluster.stopReplica(4)
 
 	operationContext, cancelOperation := context.WithTimeout(context.Background(), 2*time.Second)
-	lease, err := client.Acquire(operationContext, []byte("three-of-five"), 5_000)
+	lease, err := client.Acquire(operationContext, uint64(1), 5_000)
 	cancelOperation()
 	if err != nil {
 		t.Fatalf("Acquire with two unavailable servers: %v", err)
@@ -119,7 +116,7 @@ func TestClientUsesHeterogeneousServerTTLsEndToEnd(t *testing.T) {
 	waitForServerActivation()
 
 	operationContext, cancelOperation := context.WithTimeout(context.Background(), 2*time.Second)
-	lease, err := client.Acquire(operationContext, []byte("heterogeneous-ttl"), 5_000)
+	lease, err := client.Acquire(operationContext, uint64(1), 5_000)
 	cancelOperation()
 	if err != nil {
 		t.Fatalf("Acquire with heterogeneous TTLs: %v", err)
@@ -147,7 +144,7 @@ func TestLeaseHealsAfterServerRestartEndToEnd(t *testing.T) {
 	waitForServerActivation()
 
 	operationContext, cancelOperation := context.WithTimeout(context.Background(), 2*time.Second)
-	lease, err := client.Acquire(operationContext, []byte("restart-healing"), 5_000)
+	lease, err := client.Acquire(operationContext, uint64(1), 5_000)
 	cancelOperation()
 	if err != nil {
 		t.Fatalf("Acquire before restart: %v", err)
@@ -194,7 +191,7 @@ func TestFullClusterRestartDoesNotRestoreOldLeaseEndToEnd(t *testing.T) {
 	waitForServerActivation()
 
 	operationContext, cancelOperation := context.WithTimeout(context.Background(), 2*time.Second)
-	oldLease, err := firstClient.Acquire(operationContext, []byte("full-restart"), 5_000)
+	oldLease, err := firstClient.Acquire(operationContext, uint64(1), 5_000)
 	cancelOperation()
 	if err != nil {
 		t.Fatalf("Acquire before full restart: %v", err)
@@ -205,7 +202,7 @@ func TestFullClusterRestartDoesNotRestoreOldLeaseEndToEnd(t *testing.T) {
 	}
 
 	operationContext, cancelOperation = context.WithTimeout(context.Background(), 2*time.Second)
-	leaseDuringQuarantine, err := secondClient.Acquire(operationContext, []byte("full-restart"), 5_000)
+	leaseDuringQuarantine, err := secondClient.Acquire(operationContext, uint64(1), 5_000)
 	cancelOperation()
 	if !errors.Is(err, redleaseclient.ErrNotAcquired) {
 		t.Fatalf("Acquire during full-restart quarantine error = %v, want ErrNotAcquired", err)
@@ -219,7 +216,7 @@ func TestFullClusterRestartDoesNotRestoreOldLeaseEndToEnd(t *testing.T) {
 		t.Fatal("old lease remained locally valid after full restart quarantine")
 	}
 
-	newLease := acquireEventually(t, secondClient, []byte("full-restart"), 5_000, 3*time.Second)
+	newLease := acquireEventually(t, secondClient, uint64(1), 5_000, 3*time.Second)
 	newLease.Release()
 }
 
@@ -234,14 +231,14 @@ func TestServerKeyLimitEndToEnd(t *testing.T) {
 	waitForServerActivation()
 
 	operationContext, cancelOperation := context.WithTimeout(context.Background(), 2*time.Second)
-	firstLease, err := client.Acquire(operationContext, []byte("first-capacity-key"), 5_000)
+	firstLease, err := client.Acquire(operationContext, uint64(1), 5_000)
 	cancelOperation()
 	if err != nil {
 		t.Fatalf("first Acquire: %v", err)
 	}
 
 	operationContext, cancelOperation = context.WithTimeout(context.Background(), 2*time.Second)
-	limitedLease, err := client.Acquire(operationContext, []byte("over-capacity-key"), 5_000)
+	limitedLease, err := client.Acquire(operationContext, 2, 5_000)
 	cancelOperation()
 	if !errors.Is(err, redleaseclient.ErrNotAcquired) ||
 		!errors.Is(err, redleaseclient.ErrKeyLimitReached) {
@@ -255,71 +252,11 @@ func TestServerKeyLimitEndToEnd(t *testing.T) {
 	replacement := acquireEventually(
 		t,
 		client,
-		[]byte("replacement-capacity-key"),
+		2,
 		5_000,
 		2*time.Second,
 	)
 	replacement.Release()
-}
-
-func TestServerKeySizeLimitOverGRPC(t *testing.T) {
-	t.Parallel()
-	cluster := newIntegrationCluster(t)
-	defer cluster.close()
-	waitForServerActivation()
-
-	connection, err := grpc.NewClient(
-		"passthrough:///redlease-key-size",
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-			return cluster.dialReplica(ctx, 0)
-		}),
-	)
-	if err != nil {
-		t.Fatalf("create gRPC connection: %v", err)
-	}
-	defer closeResource(t, "gRPC connection", connection)
-
-	streamContext, cancelStream := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancelStream()
-	stream, err := redleasev1.NewRedLeaseClient(connection).LeaseStream(streamContext)
-	if err != nil {
-		t.Fatalf("open LeaseStream: %v", err)
-	}
-
-	acquire := func(requestID uint64, key []byte) redleasev1.LeaseStatus {
-		t.Helper()
-		err := stream.Send(&redleasev1.ClientRequest{
-			RequestId: requestID,
-			Operation: &redleasev1.ClientRequest_Acquire{Acquire: &redleasev1.AcquireRequest{
-				Key: key,
-				LeaseId: &redleasev1.LeaseID{
-					ClientId: 1,
-					BootId:   1,
-					LeaseSeq: requestID,
-				},
-				RequestedTtlMs: 5_000,
-			}},
-		})
-		if err != nil {
-			t.Fatalf("send Acquire %d: %v", requestID, err)
-		}
-		response, err := stream.Recv()
-		if err != nil {
-			t.Fatalf("receive Acquire %d: %v", requestID, err)
-		}
-		if response.GetRequestId() != requestID || response.GetAcquire() == nil {
-			t.Fatalf("Acquire %d response = %+v", requestID, response)
-		}
-		return response.GetAcquire().GetStatus()
-	}
-
-	if status := acquire(1, bytes.Repeat([]byte{'x'}, protocol.MaxKeyBytes+1)); status != redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE {
-		t.Fatalf("oversized Acquire = %s, want KEY_TOO_LARGE", status)
-	}
-	if status := acquire(2, bytes.Repeat([]byte{'x'}, protocol.MaxKeyBytes)); status != redleasev1.LeaseStatus_LEASE_STATUS_OK {
-		t.Fatalf("boundary-size Acquire = %s, want OK", status)
-	}
 }
 
 type integrationCluster struct {
@@ -526,7 +463,7 @@ func renewEventually(t *testing.T, lease *redleaseclient.Lease, timeout time.Dur
 func acquireEventually(
 	t *testing.T,
 	client *redleaseclient.Client,
-	key []byte,
+	key uint64,
 	ttl uint64,
 	timeout time.Duration,
 ) *redleaseclient.Lease {

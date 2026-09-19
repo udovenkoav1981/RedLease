@@ -1,7 +1,6 @@
 package client1of1
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -10,7 +9,6 @@ import (
 
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
-	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -25,8 +23,6 @@ var (
 	ErrNotAcquired = errors.New("RedLease 1/1 lease not acquired")
 	// ErrKeyLimitReached means the server cannot store another lease key.
 	ErrKeyLimitReached = errors.New("RedLease server key limit reached")
-	// ErrKeyTooLarge means the supplied key exceeds the protocol limit.
-	ErrKeyTooLarge = errors.New("RedLease key is too large")
 	// ErrNotRenewed identifies a Renew which did not establish new validity.
 	// Previously confirmed validity is not revoked.
 	ErrNotRenewed = errors.New("RedLease 1/1 lease not renewed")
@@ -66,7 +62,7 @@ const (
 type Lease struct {
 	client   *Client
 	sequence uint64
-	key      []byte
+	key      uint64
 	now      uint64
 
 	stateMu    sync.RWMutex
@@ -77,26 +73,23 @@ type Lease struct {
 	releaseOnce sync.Once
 }
 
-// Acquire makes one attempt to establish a currently valid lease. The caller
-// owns retry policy; every new call uses a new lease ID.
+// Acquire makes one attempt to establish a currently valid lease for the
+// application-defined uint64 key. The caller owns retry policy; every new call
+// uses a new lease ID.
 func (c *Client) Acquire(
 	ctx context.Context,
-	key []byte,
+	key uint64,
 	ttlMS uint64,
 ) (*Lease, error) {
 	if err := c.cancellationError(ctx); err != nil {
 		return nil, &operationError{kind: ErrNotAcquired, cause: err}
 	}
-	if len(key) > protocol.MaxKeyBytes {
-		return nil, &operationError{kind: ErrNotAcquired, cause: ErrKeyTooLarge}
-	}
-
 	sequence := c.nextSequence.Add(1)
 
 	lease := Lease{
 		client:    c,
 		sequence:  sequence,
-		key:       bytes.Clone(key),
+		key:       key,
 		now:       boottime.Now(),
 		lifecycle: leaseActive,
 	}
@@ -142,8 +135,6 @@ func (l *Lease) acceptAcquireResponse(
 		return true, nil
 	case redleasev1.LeaseStatus_LEASE_STATUS_KEY_LIMIT_REACHED:
 		return false, ErrKeyLimitReached
-	case redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE:
-		return false, ErrKeyTooLarge
 	default:
 		return false, nil
 	}
@@ -246,7 +237,7 @@ func (l *Lease) Release() {
 	})
 }
 
-func (c *Client) release(key []byte, sequence uint64) {
+func (c *Client) release(key, sequence uint64) {
 	retryContext, cancelRetries := context.WithTimeout(
 		c.ctx,
 		releaseRetryWindow(c.responseTimeout),
@@ -260,7 +251,7 @@ func (c *Client) release(key []byte, sequence uint64) {
 func (c *Client) retryRelease(
 	ctx context.Context,
 	cancel context.CancelFunc,
-	key []byte,
+	key uint64,
 	sequence uint64,
 	future *streamFuture,
 ) {
@@ -276,7 +267,7 @@ func (c *Client) retryRelease(
 				c.logger.Warn(
 					"release cleanup did not complete before retry deadline",
 					slog.String("operation", "release"),
-					slog.String("key", string(key)),
+					slog.Uint64("key", key),
 					slog.Uint64("lease_client_id", uint64(c.clientID)),
 					slog.Uint64("lease_boot_id", uint64(c.bootID)),
 					slog.Uint64("lease_sequence", sequence),
@@ -304,8 +295,7 @@ func (c *Client) releaseResponseOK(
 	}
 	status := response.GetRelease().GetStatus()
 	return status == redleasev1.LeaseStatus_LEASE_STATUS_OK ||
-		status == redleasev1.LeaseStatus_LEASE_STATUS_NOT_READY ||
-		status == redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE
+		status == redleasev1.LeaseStatus_LEASE_STATUS_NOT_READY
 }
 
 func candidateValidUntil(operationStart, ttlMS uint64) uint64 {
@@ -323,30 +313,30 @@ func releaseRetryWindow(responseTimeout time.Duration) time.Duration {
 	return protocolMaxTTL + responseTimeout
 }
 
-func (c *Client) newAcquireRequest(key []byte, sequence, ttlMS uint64) *redleasev1.ClientRequest {
+func (c *Client) newAcquireRequest(key, sequence, ttlMS uint64) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Acquire{Acquire: &redleasev1.AcquireRequest{
-			Key:            bytes.Clone(key),
+			Key:            key,
 			LeaseId:        &redleasev1.LeaseID{ClientId: c.clientID, BootId: c.bootID, LeaseSeq: sequence},
 			RequestedTtlMs: ttlMS,
 		}},
 	}
 }
 
-func (c *Client) newRenewRequest(key []byte, sequence, ttlMS uint64) *redleasev1.ClientRequest {
+func (c *Client) newRenewRequest(key, sequence, ttlMS uint64) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Renew{Renew: &redleasev1.RenewRequest{
-			Key:            bytes.Clone(key),
+			Key:            key,
 			LeaseId:        &redleasev1.LeaseID{ClientId: c.clientID, BootId: c.bootID, LeaseSeq: sequence},
 			RequestedTtlMs: ttlMS,
 		}},
 	}
 }
 
-func (c *Client) newReleaseRequest(key []byte, sequence uint64) *redleasev1.ClientRequest {
+func (c *Client) newReleaseRequest(key, sequence uint64) *redleasev1.ClientRequest {
 	return &redleasev1.ClientRequest{
 		Operation: &redleasev1.ClientRequest_Release{Release: &redleasev1.ReleaseRequest{
-			Key:     bytes.Clone(key),
+			Key:     key,
 			LeaseId: &redleasev1.LeaseID{ClientId: c.clientID, BootId: c.bootID, LeaseSeq: sequence},
 		}},
 	}

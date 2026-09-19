@@ -1,7 +1,6 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"testing"
 
@@ -10,7 +9,7 @@ import (
 
 func TestLeaseValidityUsesBootTimeBoundary(t *testing.T) {
 	client := testLeaseClient()
-	lease := newLease(client, 0, []byte("key"), 1_000)
+	lease := newLease(client, 0, uint64(1), 1_000)
 	lease.setAcquireValidity(boottime.Now() + 1_000)
 
 	if lease.RemainingTTLms() == 0 {
@@ -28,7 +27,7 @@ func TestLeaseValidityUsesBootTimeBoundary(t *testing.T) {
 
 func TestLeaseConfirmationCannotBeShortenedByOlderResponse(t *testing.T) {
 	client := testLeaseClient()
-	lease := newLease(client, 0, []byte("key"), 1_000)
+	lease := newLease(client, 0, uint64(1), 1_000)
 	now := boottime.Now()
 	later := now + 2_000
 
@@ -40,12 +39,11 @@ func TestLeaseConfirmationCannotBeShortenedByOlderResponse(t *testing.T) {
 	}
 }
 
-func TestLeaseImmutableGettersAndConcurrentState(t *testing.T) {
+func TestLeaseGetterAndConcurrentState(t *testing.T) {
 	client := testLeaseClient()
-	key := []byte("key")
+	key := uint64(1)
 	lease := newLease(client, 3, key, 1_000)
 	lease.setAcquireValidity(boottime.Now() + 1_000)
-	key[0] = 'X'
 
 	const iterations = 1_000
 	done := make(chan struct{})
@@ -57,8 +55,8 @@ func TestLeaseImmutableGettersAndConcurrentState(t *testing.T) {
 	}()
 	for range iterations {
 		_ = lease.RemainingTTLms()
-		if !bytes.Equal(lease.Key(), []byte("key")) {
-			t.Fatal("lease key mutated")
+		if lease.Key() != key {
+			t.Fatalf("lease key = %d, want %d", lease.Key(), key)
 		}
 	}
 	<-done

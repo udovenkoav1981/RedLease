@@ -20,7 +20,6 @@ func TestLeaseStatusNumericContract(t *testing.T) {
 		{name: "STALE", status: LeaseStatus_LEASE_STATUS_STALE, want: 3},
 		{name: "NOT_READY", status: LeaseStatus_LEASE_STATUS_NOT_READY, want: 4},
 		{name: "KEY_LIMIT_REACHED", status: LeaseStatus_LEASE_STATUS_KEY_LIMIT_REACHED, want: 5},
-		{name: "KEY_TOO_LARGE", status: LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE, want: 6},
 	}
 
 	for _, tt := range tests {
@@ -42,7 +41,7 @@ func TestClientRequestBinaryRoundTrip(t *testing.T) {
 			in: &ClientRequest{
 				RequestId: 1,
 				Operation: &ClientRequest_Acquire{Acquire: &AcquireRequest{
-					Key:            []byte{0x00, 0x7f, 0xff},
+					Key:            0,
 					LeaseId:        &LeaseID{ClientId: 11, BootId: 12, LeaseSeq: 13},
 					RequestedTtlMs: 0,
 				}},
@@ -53,7 +52,7 @@ func TestClientRequestBinaryRoundTrip(t *testing.T) {
 			in: &ClientRequest{
 				RequestId: math.MaxUint64,
 				Operation: &ClientRequest_Renew{Renew: &RenewRequest{
-					Key:            []byte("lease-key"),
+					Key:            math.MaxUint64,
 					LeaseId:        &LeaseID{ClientId: math.MaxUint32, BootId: math.MaxUint32, LeaseSeq: math.MaxUint64},
 					RequestedTtlMs: math.MaxUint64 - 1,
 				}},
@@ -64,7 +63,7 @@ func TestClientRequestBinaryRoundTrip(t *testing.T) {
 			in: &ClientRequest{
 				RequestId: 3,
 				Operation: &ClientRequest_Release{Release: &ReleaseRequest{
-					Key:     []byte("lease-key"),
+					Key:     42,
 					LeaseId: &LeaseID{ClientId: 21, BootId: 22, LeaseSeq: 23},
 				}},
 			},

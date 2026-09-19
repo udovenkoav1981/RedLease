@@ -1,14 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/hex"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"sync"
 	"time"
 
@@ -27,7 +25,7 @@ type loadLease interface {
 
 type loadClient interface {
 	WaitReady(ctx context.Context) error
-	Acquire(ctx context.Context, key []byte, ttl uint64) (loadLease, error)
+	Acquire(ctx context.Context, key, ttl uint64) (loadLease, error)
 	Close() error
 }
 
@@ -35,7 +33,7 @@ type oneClient struct{ client *client1of1.Client }
 
 func (c oneClient) WaitReady(ctx context.Context) error { return c.client.WaitReady(ctx) }
 func (c oneClient) Close() error                        { return c.client.Close() }
-func (c oneClient) Acquire(ctx context.Context, key []byte, ttl uint64) (loadLease, error) {
+func (c oneClient) Acquire(ctx context.Context, key, ttl uint64) (loadLease, error) {
 	lease, err := c.client.Acquire(ctx, key, ttl)
 	if err != nil {
 		return nil, err
@@ -47,7 +45,7 @@ type quorumClient struct{ client *client.Client }
 
 func (c quorumClient) WaitReady(ctx context.Context) error { return c.client.WaitReady(ctx) }
 func (c quorumClient) Close() error                        { return c.client.Close() }
-func (c quorumClient) Acquire(ctx context.Context, key []byte, ttl uint64) (loadLease, error) {
+func (c quorumClient) Acquire(ctx context.Context, key, ttl uint64) (loadLease, error) {
 	lease, err := c.client.Acquire(ctx, key, ttl)
 	if err != nil {
 		return nil, err
@@ -126,7 +124,7 @@ func runCase(
 	if err != nil {
 		return caseResult{}, err
 	}
-	var nonce [16]byte
+	var nonce [8]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return caseResult{}, fmt.Errorf("generate key prefix: %w", err)
 	}
@@ -138,7 +136,7 @@ func runCase(
 			return caseResult{}, fmt.Errorf("wait for client %d: %w", index, readyErr)
 		}
 	}
-	result = measure(ctx, clients, leaseCount, config, hex.EncodeToString(nonce[:]))
+	result = measure(ctx, clients, leaseCount, config, binary.LittleEndian.Uint64(nonce[:]))
 	settle := time.NewTimer(config.settleDuration())
 	defer settle.Stop()
 	select {
@@ -148,21 +146,31 @@ func runCase(
 	return result, ctx.Err()
 }
 
-func measure(ctx context.Context, clients []loadClient, leaseCount int, config *options, casePrefix string) caseResult {
+func measure(ctx context.Context, clients []loadClient, leaseCount int, config *options, keySeed uint64) caseResult {
 	stats := make([]workerStats, len(clients)*leaseCount)
+	keyStep := uint64(len(stats))
 	startSignal := make(chan struct{})
 	measurementCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var ready, workers sync.WaitGroup
+	workerKey := keySeed
 	for clientIndex, instance := range clients {
 		for workerIndex := range leaseCount {
 			position := clientIndex*leaseCount + workerIndex
-			prefix := []byte(fmt.Sprintf("load/%s/%d/%d/", casePrefix, clientIndex, workerIndex))
+			initialKey := workerKey
+			workerKey++
 			ready.Add(1)
 			workers.Go(func() {
 				ready.Done()
 				<-startSignal
-				work(measurementCtx, instance, prefix, config, &stats[position])
+				work(
+					measurementCtx,
+					instance,
+					initialKey,
+					keyStep,
+					config,
+					&stats[position],
+				)
 			})
 		}
 	}
@@ -181,13 +189,17 @@ func measure(ctx context.Context, clients []loadClient, leaseCount int, config *
 	return summarize(stats, len(clients), leaseCount, elapsed)
 }
 
-func work(ctx context.Context, instance loadClient, prefix []byte, config *options, stats *workerStats) {
-	var sequence uint64
+func work(
+	ctx context.Context,
+	instance loadClient,
+	key, keyStep uint64,
+	config *options,
+	stats *workerStats,
+) {
 	var failures uint
 	retryBackoff := backoff.Default()
 	for ctx.Err() == nil {
-		sequence++
-		key := strconv.AppendUint(bytes.Clone(prefix), sequence, decimalBase)
+		key += keyStep
 		started := time.Now()
 		lease, err := instance.Acquire(ctx, key, config.ttlMS)
 		elapsed := time.Since(started)

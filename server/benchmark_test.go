@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"strconv"
 	"testing"
 	"time"
 
@@ -27,7 +26,7 @@ func BenchmarkServerAcquireReleaseQueue(b *testing.B) {
 	b.ResetTimer()
 
 	for iteration := range b.N {
-		key := strconv.Itoa(iteration)
+		key := uint64(iteration)
 		id := leaseID{clientID: 1, bootID: 1, leaseSeq: uint64(iteration + 1)}
 		if !s.dispatch(ctx.Done(), shardJob{
 			operation: operation{

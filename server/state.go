@@ -10,7 +10,6 @@ import (
 	"sync"
 
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
-	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -38,7 +37,7 @@ func makeLeaseID(id *redleasev1.LeaseID) leaseID {
 }
 
 type lease struct {
-	key       string
+	key       uint64
 	id        leaseID
 	deadline  uint64
 	heapIndex int
@@ -77,7 +76,7 @@ func (h *leaseDeadlineHeap) Pop() any {
 type operation struct {
 	requestID      uint64
 	kind           operationKind
-	key            string
+	key            uint64
 	leaseID        leaseID
 	requestedTTLMS uint64
 }
@@ -89,7 +88,7 @@ type shardJob struct {
 
 type leaseShard struct {
 	mu        sync.Mutex
-	leases    map[string]*lease
+	leases    map[uint64]*lease
 	deadlines leaseDeadlineHeap
 	jobs      chan shardJob
 }
@@ -143,7 +142,7 @@ func (s *Server) failRecoveredPanic(scope string, recovered any) {
 	))
 }
 
-func (shard *leaseShard) addLease(key string, id leaseID, deadline uint64) {
+func (shard *leaseShard) addLease(key uint64, id leaseID, deadline uint64) {
 	current := &lease{
 		key:       key,
 		id:        id,
@@ -195,10 +194,6 @@ func (s *Server) apply(shard *leaseShard, op operation) *redleasev1.ServerRespon
 		return notReadyResponse(op)
 	}
 	s.operationTotals[op.kind].Add(1)
-	if len(op.key) > protocol.MaxKeyBytes {
-		return statusResponse(op, redleasev1.LeaseStatus_LEASE_STATUS_KEY_TOO_LARGE)
-	}
-
 	now := boottime.Now()
 	switch op.kind {
 	case operationAcquire:
@@ -381,7 +376,7 @@ func (s *Server) logLeaseOperation(
 	attrs := [...]slog.Attr{
 		slog.String("operation", operationName),
 		slog.String("reason", reason),
-		slog.String("key", op.key),
+		slog.Uint64("key", op.key),
 		slog.Uint64("request_id", op.requestID),
 		slog.Uint64("client_id", uint64(op.leaseID.clientID)),
 		slog.Uint64("boot_id", uint64(op.leaseID.bootID)),
@@ -478,8 +473,8 @@ func (s *Server) releaseKeys(count uint64) bool {
 
 var hashSeed = maphash.MakeSeed()
 
-func (s *Server) shardIndex(key string) int {
-	return int(maphash.String(hashSeed, key) % uint64(len(s.shards)))
+func (s *Server) shardIndex(key uint64) int {
+	return int(maphash.Comparable(hashSeed, key) % uint64(len(s.shards)))
 }
 
 func (s *Server) dispatch(ctxDone <-chan struct{}, job shardJob) bool {

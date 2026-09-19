@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -16,7 +15,7 @@ func BenchmarkClientAcquireRelease(b *testing.B) {
 	b.ResetTimer()
 
 	for iteration := range b.N {
-		key := strconv.AppendInt(nil, int64(iteration), 10)
+		key := uint64(iteration)
 		lease, err := client.Acquire(context.Background(), key, 5_000)
 		if err != nil {
 			b.Fatalf("Acquire: %v", err)
@@ -28,7 +27,7 @@ func BenchmarkClientAcquireRelease(b *testing.B) {
 
 func BenchmarkLeaseRenew(b *testing.B) {
 	client := newBenchmarkClient(b)
-	lease, err := client.Acquire(context.Background(), []byte("renew-benchmark"), 5_000)
+	lease, err := client.Acquire(context.Background(), uint64(1), 5_000)
 	if err != nil {
 		b.Fatalf("Acquire: %v", err)
 	}

@@ -134,7 +134,7 @@ client, err := client1of1.New(client1of1.Config{
 
 client.WaitReady(startupCtx)
 
-lease, err := client.Acquire(ctx, []byte("resource/42"), 3000)
+lease, err := client.Acquire(ctx, 42, 3000)
 defer lease.Release()
 
 // Проверка непосредственно перед запуском защищённой операции.
@@ -142,6 +142,9 @@ if lease.RemainingTTLms() > 0 {
 	protectedOperation(ctx)
 }
 ```
+
+`key` имеет тип `uint64`; стабильное сопоставление прикладных ресурсов с
+числовыми ключами выполняет вызывающее приложение.
 
 Для `Quorum2Of3` и `Quorum3Of5` используется универсальный package `client` со
 списком из трёх или пяти `Servers`. В production вместо
