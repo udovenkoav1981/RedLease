@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
@@ -14,6 +15,8 @@ var (
 	errNilStreamResponse = errors.New("nil stream response")
 	errStreamClosed      = errors.New("stream closed")
 )
+
+const sendQueueCapacity = 256
 
 type leaseClientStream interface {
 	Send(request *redleasev1.ClientRequest) error
@@ -46,6 +49,11 @@ type streamFuture struct {
 	result     chan streamResult
 }
 
+type outboundStreamRequest struct {
+	request  *redleasev1.ClientRequest
+	deadline time.Time
+}
+
 func (f *streamFuture) await(ctx context.Context) (*redleasev1.ServerResponse, error) {
 	select {
 	case result := <-f.result:
@@ -61,7 +69,7 @@ type streamGeneration struct {
 	stream leaseClientStream
 	cancel context.CancelFunc
 
-	sendToken chan struct{}
+	sendQueue chan *outboundStreamRequest
 	done      chan struct{}
 
 	stateMu       sync.Mutex
@@ -70,7 +78,7 @@ type streamGeneration struct {
 	terminalErr   error
 
 	terminateOnce sync.Once
-	receiver      sync.WaitGroup
+	workers       sync.WaitGroup
 	closeOnce     sync.Once
 	closeDone     chan struct{}
 }
@@ -82,19 +90,20 @@ func newStreamGeneration(
 	generation := &streamGeneration{
 		stream:    stream,
 		cancel:    cancel,
-		sendToken: make(chan struct{}, 1),
+		sendQueue: make(chan *outboundStreamRequest, sendQueueCapacity),
 		done:      make(chan struct{}),
 		pending:   make(map[uint64]chan streamResult),
 		closeDone: make(chan struct{}),
 	}
-	generation.sendToken <- struct{}{}
-	generation.receiver.Add(1)
+	generation.workers.Add(2)
+	go generation.send()
 	go generation.receive()
 	return generation
 }
 
-// submit returns only after Send has completed. This is the ordering barrier
-// used before a cleanup Release is submitted after an ambiguous mutation.
+// submit returns after the request has entered the FIFO send queue. This is
+// the ordering barrier used before a cleanup Release is submitted after an
+// ambiguous mutation.
 func (g *streamGeneration) submit(
 	ctx context.Context,
 	request *redleasev1.ClientRequest,
@@ -107,13 +116,12 @@ func (g *streamGeneration) submit(
 	if err != nil {
 		return nil, err
 	}
-	wireRequest := &redleasev1.ClientRequest{
-		RequestId: requestID,
-		Operation: request.GetOperation(),
-	}
+	request.RequestId = requestID
+	deadline, _ := ctx.Deadline()
+	outbound := &outboundStreamRequest{request: request, deadline: deadline}
 
 	select {
-	case <-g.sendToken:
+	case g.sendQueue <- outbound:
 	case <-ctx.Done():
 		g.complete(requestID, streamResult{err: ctx.Err()})
 		return nil, ctx.Err()
@@ -121,20 +129,6 @@ func (g *streamGeneration) submit(
 		return nil, g.err()
 	}
 
-	if err := g.err(); err != nil {
-		g.sendToken <- struct{}{}
-		return nil, err
-	}
-	stopSendWatch := context.AfterFunc(ctx, func() {
-		g.terminate(fmt.Errorf("send deadline: %w", ctx.Err()))
-	})
-	sendErr := g.stream.Send(wireRequest)
-	stopSendWatch()
-	g.sendToken <- struct{}{}
-	if sendErr != nil {
-		g.terminate(fmt.Errorf("send: %w", sendErr))
-		return nil, g.err()
-	}
 	if err := g.err(); err != nil {
 		return nil, err
 	}
@@ -171,8 +165,54 @@ func (g *streamGeneration) complete(requestID uint64, result streamResult) {
 	pending <- result
 }
 
+func (g *streamGeneration) send() {
+	defer g.workers.Done()
+	defer func() {
+		_ = g.stream.CloseSend()
+	}()
+
+	for {
+		select {
+		case <-g.done:
+			return
+		case outbound := <-g.sendQueue:
+			if err := g.err(); err != nil {
+				return
+			}
+			if !outbound.deadline.IsZero() && !time.Now().Before(outbound.deadline) {
+				g.complete(outbound.request.GetRequestId(), streamResult{err: context.DeadlineExceeded})
+				continue
+			}
+			if err := g.sendRequest(outbound); err != nil {
+				g.terminate(fmt.Errorf("send: %w", err))
+				return
+			}
+		}
+	}
+}
+
+func (g *streamGeneration) sendRequest(outbound *outboundStreamRequest) error {
+	if outbound.deadline.IsZero() {
+		return g.stream.Send(outbound.request)
+	}
+
+	sent := make(chan struct{})
+	timer := time.AfterFunc(max(time.Until(outbound.deadline), 0), func() {
+		select {
+		case <-sent:
+			return
+		default:
+			g.terminate(fmt.Errorf("send deadline: %w", context.DeadlineExceeded))
+		}
+	})
+	err := g.stream.Send(outbound.request)
+	close(sent)
+	timer.Stop()
+	return err
+}
+
 func (g *streamGeneration) receive() {
-	defer g.receiver.Done()
+	defer g.workers.Done()
 	for {
 		response, err := g.stream.Recv()
 		if err != nil {
@@ -215,10 +255,7 @@ func (g *streamGeneration) err() error {
 func (g *streamGeneration) Close() {
 	g.closeOnce.Do(func() {
 		g.terminate(errStreamClosed)
-		<-g.sendToken
-		_ = g.stream.CloseSend()
-		g.sendToken <- struct{}{}
-		g.receiver.Wait()
+		g.workers.Wait()
 		close(g.closeDone)
 	})
 	<-g.closeDone

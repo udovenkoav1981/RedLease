@@ -118,12 +118,21 @@ func TestStreamGenerationDeadlineUnblocksSend(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
-	if _, err := generation.submit(ctx, client.newReleaseRequest(1, 0)); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("submit error = %v, want context.DeadlineExceeded", err)
+	future, err := generation.submit(ctx, client.newReleaseRequest(1, 0))
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	select {
+	case <-generation.done:
+	case <-time.After(time.Second):
+		t.Fatal("blocked Send did not terminate the stream generation")
+	}
+	if _, err := future.await(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("await error = %v, want context.DeadlineExceeded", err)
 	}
 }
 
-func TestFailedAcquireSubmitsCleanupReleaseBeforeReturning(t *testing.T) {
+func TestFailedAcquireQueuesCleanupRelease(t *testing.T) {
 	streamContext, cancelStream := context.WithCancel(context.Background())
 	stream := &fakeLeaseStream{
 		ctx:       streamContext,
@@ -185,8 +194,8 @@ func TestFailedAcquireSubmitsCleanupReleaseBeforeReturning(t *testing.T) {
 			t.Fatal("cleanup Release used a different lease ID")
 		}
 		stream.responses <- releaseServerResponse(releaseRequest.GetRequestId())
-	default:
-		t.Fatal("failed Acquire returned before submitting cleanup Release")
+	case <-time.After(time.Second):
+		t.Fatal("failed Acquire did not send cleanup Release")
 	}
 }
 

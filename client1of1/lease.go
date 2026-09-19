@@ -168,10 +168,8 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 
 	operationContext, cancelOperation := l.client.operationContext(ctx)
 	renewed := false
-	future, err := l.client.submit(
-		operationContext,
-		l.client.newRenewRequest(l.key, l.sequence, ttlMS),
-	)
+	future, err := l.client.submit(operationContext, l.client.newRenewRequest(l.key, l.sequence, ttlMS))
+
 	if err == nil {
 		var response *redleasev1.ServerResponse
 		response, err = future.await(operationContext)
