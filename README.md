@@ -170,4 +170,5 @@ server lease ограничен TTL. Не создавайте и не закр�
 - [Requirements](Requirements.md) — требования к системе.
 - [Architecture](Architecture.md) — протокол и архитектурные решения.
 - [Нагрузочный тест](cmd/redlease-load/README.md) — матрица коротких lease для `client1of1` и общего `client` на отдельно запущенных серверах.
+- [Benchmark client1of1](client1of1/README.md) — throughput и latency одного клиента/stream через внешний TCP/gRPC server.
 - [MIT License](LICENSE).
