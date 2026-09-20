@@ -9,10 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/test/bufconn"
-
 	redleaseclient "github.com/udovenkoav1981/RedLease/client1of1"
 	redleaseserver "github.com/udovenkoav1981/RedLease/server"
 )
@@ -82,7 +78,7 @@ func TestAcquireRejectsTTLConsumedBySafetyMargin(t *testing.T) {
 	}
 }
 
-func TestConcurrentLeasesShareOneStream(t *testing.T) {
+func TestConcurrentLeasesShareOneConnection(t *testing.T) {
 	cluster := newIntegrationServer(t)
 	client := cluster.newClient(t, 3)
 	waitReady(t, client)
@@ -118,36 +114,36 @@ func TestConcurrentLeasesShareOneStream(t *testing.T) {
 
 type integrationServer struct {
 	t        *testing.T
-	listener *bufconn.Listener
-	grpc     *grpc.Server
+	listener net.Listener
 	lease    *redleaseserver.Server
 }
 
 func newIntegrationServer(t *testing.T) *integrationServer {
 	t.Helper()
-	listener := bufconn.Listen(1 << 20)
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
 	leaseServer, err := redleaseserver.New(redleaseserver.Config{
-		MaxTTL:                5000,
-		MaxKeys:               256,
-		Logger:                slog.New(slog.DiscardHandler),
-		SkipRestartQuarantine: true,
-		ShardCount:            8,
-		ShardQueueDepth:       64,
-		MaxInFlightPerStream:  256,
+		MaxTTL:                   5000,
+		MaxKeys:                  256,
+		Logger:                   slog.New(slog.DiscardHandler),
+		SkipRestartQuarantine:    true,
+		ShardCount:               8,
+		ShardQueueDepth:          64,
+		MaxInFlightPerConnection: 256,
 	})
 	if err != nil {
+		_ = listener.Close()
 		t.Fatalf("server.New: %v", err)
 	}
-	grpcServer := grpc.NewServer()
-	leaseServer.Register(grpcServer)
 	go func() {
-		_ = grpcServer.Serve(listener)
+		_ = leaseServer.Serve(listener)
 	}()
 
 	server := &integrationServer{
 		t:        t,
 		listener: listener,
-		grpc:     grpcServer,
 		lease:    leaseServer,
 	}
 	t.Cleanup(server.close)
@@ -157,14 +153,8 @@ func newIntegrationServer(t *testing.T) *integrationServer {
 func (s *integrationServer) newClient(t *testing.T, clientID uint32) *redleaseclient.Client {
 	t.Helper()
 	client, err := redleaseclient.New(redleaseclient.Config{
-		ClientID: clientID,
-		Target:   "passthrough:///redlease-test",
-		DialOptions: []grpc.DialOption{
-			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
-				return s.listener.Dial()
-			}),
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-		},
+		ClientID:        clientID,
+		Target:          s.listener.Addr().String(),
 		Logger:          slog.New(slog.DiscardHandler),
 		ResponseTimeout: 500,
 	})
@@ -177,7 +167,6 @@ func (s *integrationServer) newClient(t *testing.T, clientID uint32) *redleasecl
 
 func (s *integrationServer) close() {
 	_ = s.lease.Close()
-	s.grpc.Stop()
 	_ = s.listener.Close()
 }
 

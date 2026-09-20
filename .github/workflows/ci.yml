@@ -31,14 +31,16 @@ jobs:
       - name: Run go vet
         run: go vet ./...
 
-      - name: Install Protocol Buffers compiler
+      - name: Install FlatBuffers compiler
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes protobuf-compiler
+          curl --fail --silent --show-error --location \
+            https://github.com/google/flatbuffers/releases/download/v25.12.19/Linux.flatc.binary.g%2B%2B-13.zip \
+            --output "$RUNNER_TEMP/flatc.zip"
+          unzip -q "$RUNNER_TEMP/flatc.zip" -d "$RUNNER_TEMP/flatc"
+          chmod +x "$RUNNER_TEMP/flatc/flatc"
+          echo "$RUNNER_TEMP/flatc" >> "$GITHUB_PATH"
 
-      - name: Verify generated Protocol Buffers files
+      - name: Verify generated FlatBuffers files
         run: |
-          make generate-proto
-          git diff --exit-code \
-            --ignore-matching-lines='^//[[:space:]-]*protoc[[:space:]][[:space:]]*v[0-9]' \
-            -- proto/redlease/v1
+          make generate-flatbuffers
+          git diff --exit-code -- proto/redlease/v1

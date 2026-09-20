@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
 func TestStreamGenerationCorrelatesOutOfOrderResponses(t *testing.T) {
@@ -20,22 +20,22 @@ func TestStreamGenerationCorrelatesOutOfOrderResponses(t *testing.T) {
 	secondRequest := receiveSentRequest(t, stream)
 
 	stream.receive <- fakeReceive{
-		response: streamResponse(secondRequest.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_BUSY),
+		response: streamResponse(secondRequest.RequestID, protocol.StatusBusy),
 	}
 	stream.receive <- fakeReceive{
-		response: streamResponse(firstRequest.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
+		response: streamResponse(firstRequest.RequestID, protocol.StatusOK),
 	}
 
 	second := receiveCallResult(t, secondResult)
 	first := receiveCallResult(t, firstResult)
-	if second.err != nil || second.response.GetAcquire().GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_BUSY {
+	if second.err != nil || second.response.Status != protocol.StatusBusy {
 		t.Fatalf("unexpected second result: %+v", second)
 	}
-	if first.err != nil || first.response.GetAcquire().GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+	if first.err != nil || first.response.Status != protocol.StatusOK {
 		t.Fatalf("unexpected first result: %+v", first)
 	}
-	if firstRequest.GetRequestId() >= secondRequest.GetRequestId() {
-		t.Fatalf("request IDs are not increasing: %d, %d", firstRequest.GetRequestId(), secondRequest.GetRequestId())
+	if firstRequest.RequestID >= secondRequest.RequestID {
+		t.Fatalf("request IDs are not increasing: %d, %d", firstRequest.RequestID, secondRequest.RequestID)
 	}
 }
 
@@ -45,18 +45,18 @@ func TestStreamGenerationCallRemainsSubmitAndAwaitWrapper(t *testing.T) {
 	result := startStreamCall(generation, acquireStreamRequest(1))
 	request := receiveSentRequest(t, stream)
 	stream.receive <- fakeReceive{
-		response: streamResponse(request.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
+		response: streamResponse(request.RequestID, protocol.StatusOK),
 	}
 
 	received := receiveCallResult(t, result)
 	if received.err != nil {
 		t.Fatalf("call: %v", received.err)
 	}
-	if received.response.GetRequestId() != request.GetRequestId() {
+	if received.response.RequestID != request.RequestID {
 		t.Fatalf(
 			"response request ID = %d, want %d",
-			received.response.GetRequestId(),
-			request.GetRequestId(),
+			received.response.RequestID,
+			request.RequestID,
 		)
 	}
 }
@@ -70,12 +70,12 @@ func TestStreamFutureBuffersResponseBeforeAwait(t *testing.T) {
 	}
 	request := receiveSentRequest(t, stream)
 	stream.receive <- fakeReceive{
-		response: streamResponse(request.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
+		response: streamResponse(request.RequestID, protocol.StatusOK),
 	}
 
 	// Observe that Recv completed the buffered future before await is invoked,
 	// then put the result back for the real await call.
-	var buffered streamCallResult
+	var buffered connectionCallResult
 	select {
 	case buffered = <-future.pending.result:
 	case <-time.After(time.Second):
@@ -87,8 +87,8 @@ func TestStreamFutureBuffersResponseBeforeAwait(t *testing.T) {
 	if err != nil {
 		t.Fatalf("await: %v", err)
 	}
-	if response.GetRequestId() != request.GetRequestId() {
-		t.Fatalf("response request ID = %d, want %d", response.GetRequestId(), request.GetRequestId())
+	if response.RequestID != request.RequestID {
+		t.Fatalf("response request ID = %d, want %d", response.RequestID, request.RequestID)
 	}
 }
 
@@ -111,7 +111,7 @@ func TestStreamSubmitReturnsAfterWriterAcceptanceBeforeSendCompletes(t *testing.
 
 	request := receiveSentRequest(t, stream)
 	stream.receive <- fakeReceive{
-		response: streamResponse(request.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
+		response: streamResponse(request.RequestID, protocol.StatusOK),
 	}
 	if _, err := submitted.future.await(context.Background()); err != nil {
 		t.Fatalf("await: %v", err)
@@ -158,7 +158,7 @@ func TestStreamSubmitCancellationBeforeWriterAcceptanceDoesNotSend(t *testing.T)
 
 	firstRequest := receiveSentRequest(t, stream)
 	stream.receive <- fakeReceive{
-		response: streamResponse(firstRequest.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
+		response: streamResponse(firstRequest.RequestID, protocol.StatusOK),
 	}
 	if _, err := first.await(context.Background()); err != nil {
 		t.Fatalf("first await: %v", err)
@@ -189,7 +189,7 @@ func TestStreamSubmitCancellationAfterWriterAcceptanceReturnsFuture(t *testing.T
 
 	request := receiveSentRequest(t, stream)
 	stream.receive <- fakeReceive{
-		response: streamResponse(request.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
+		response: streamResponse(request.RequestID, protocol.StatusOK),
 	}
 	if _, err := submitted.future.await(context.Background()); err != nil {
 		t.Fatalf("await: %v", err)
@@ -230,11 +230,11 @@ func TestStreamGenerationTimeoutAndLateResponseDoNotBlockAnotherCall(t *testing.
 
 	// The response arrives after its pending entry has been removed and must be
 	// ignored. A later request on the same generation still completes normally.
-	stream.receive <- fakeReceive{response: streamResponse(firstRequest.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK)}
+	stream.receive <- fakeReceive{response: streamResponse(firstRequest.RequestID, protocol.StatusOK)}
 
 	secondResult := startStreamCall(generation, acquireStreamRequest(2))
 	secondRequest := receiveSentRequest(t, stream)
-	stream.receive <- fakeReceive{response: streamResponse(secondRequest.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK)}
+	stream.receive <- fakeReceive{response: streamResponse(secondRequest.RequestID, protocol.StatusOK)}
 
 	second := receiveCallResult(t, secondResult)
 	if second.err != nil {
@@ -279,12 +279,12 @@ func TestStreamGenerationCloseFailureCompletesPendingAndIsIdempotent(t *testing.
 	if err := generation.Close(); !errors.Is(err, closeFailure) {
 		t.Fatalf("Close error = %v, want %v", err, closeFailure)
 	}
-	assertTransportCause(t, receiveCallResult(t, result).err, errStreamClosed)
+	assertTransportCause(t, receiveCallResult(t, result).err, errConnectionClosed)
 	if err := generation.Close(); !errors.Is(err, closeFailure) {
 		t.Fatalf("second Close error = %v, want %v", err, closeFailure)
 	}
-	if calls := stream.closeSendCalls.Load(); calls != 1 {
-		t.Fatalf("CloseSend called %d times, want 1", calls)
+	if calls := stream.closeCalls.Load(); calls != 1 {
+		t.Fatalf("Close called %d times, want 1", calls)
 	}
 }
 
@@ -292,18 +292,18 @@ func TestStreamGenerationConcurrentCalls(t *testing.T) {
 	generation, stream := newTestStreamGeneration(t)
 
 	const calls = 128
-	results := make([]<-chan streamCallResult, calls)
+	results := make([]<-chan connectionCallResult, calls)
 	for i := range calls {
 		results[i] = startStreamCall(generation, acquireStreamRequest(uint64(i+1)))
 	}
 
-	requests := make([]*redleasev1.ClientRequest, calls)
+	requests := make([]protocol.Request, calls)
 	for i := range calls {
 		requests[i] = receiveSentRequest(t, stream)
 	}
 	for i := calls - 1; i >= 0; i-- {
 		stream.receive <- fakeReceive{
-			response: streamResponse(requests[i].GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
+			response: streamResponse(requests[i].RequestID, protocol.StatusOK),
 		}
 	}
 	for _, resultChannel := range results {
@@ -315,12 +315,12 @@ func TestStreamGenerationConcurrentCalls(t *testing.T) {
 }
 
 type fakeReceive struct {
-	response *redleasev1.ServerResponse
+	response protocol.Response
 	err      error
 }
 
 type streamSubmitResult struct {
-	future *streamFuture
+	future *connectionFuture
 	err    error
 }
 
@@ -332,46 +332,49 @@ type fakeStreamOptions struct {
 type fakeLeaseClientStream struct {
 	ctx context.Context //nolint:containedctx // Test stream owns this context.
 
-	sent        chan *redleasev1.ClientRequest
+	sent        chan protocol.Request
 	receive     chan fakeReceive
 	sendAttempt chan struct{}
+	closed      chan struct{}
 
 	sendErr  error
 	closeErr error
 
-	closeSendCalls  atomic.Int32
+	closeCalls      atomic.Int32
+	closeOnce       sync.Once
 	sendAttemptOnce sync.Once
 }
 
-func (s *fakeLeaseClientStream) Send(request *redleasev1.ClientRequest) error {
+func (s *fakeLeaseClientStream) Send(request protocol.Request) error {
 	s.sendAttemptOnce.Do(func() { close(s.sendAttempt) })
 	if s.sendErr != nil {
 		return s.sendErr
 	}
 
-	requestCopy := &redleasev1.ClientRequest{
-		RequestId: request.GetRequestId(),
-		Operation: request.GetOperation(),
-	}
 	select {
-	case s.sent <- requestCopy:
+	case s.sent <- request:
 		return nil
+	case <-s.closed:
+		return errConnectionClosed
 	case <-s.ctx.Done():
 		return s.ctx.Err()
 	}
 }
 
-func (s *fakeLeaseClientStream) Recv() (*redleasev1.ServerResponse, error) {
+func (s *fakeLeaseClientStream) Recv() (protocol.Response, error) {
 	select {
 	case result := <-s.receive:
 		return result.response, result.err
+	case <-s.closed:
+		return protocol.Response{}, errConnectionClosed
 	case <-s.ctx.Done():
-		return nil, s.ctx.Err()
+		return protocol.Response{}, s.ctx.Err()
 	}
 }
 
-func (s *fakeLeaseClientStream) CloseSend() error {
-	s.closeSendCalls.Add(1)
+func (s *fakeLeaseClientStream) Close() error {
+	s.closeCalls.Add(1)
+	s.closeOnce.Do(func() { close(s.closed) })
 	return s.closeErr
 }
 
@@ -384,7 +387,7 @@ func (s *fakeLeaseClientStream) waitForSendAttempt(t *testing.T) {
 	}
 }
 
-func newTestStreamGeneration(t *testing.T) (*streamGeneration, *fakeLeaseClientStream) {
+func newTestStreamGeneration(t *testing.T) (*connectionGeneration, *fakeLeaseClientStream) {
 	t.Helper()
 	return newTestStreamGenerationWithOptions(t, fakeStreamOptions{})
 }
@@ -392,47 +395,48 @@ func newTestStreamGeneration(t *testing.T) (*streamGeneration, *fakeLeaseClientS
 func newTestStreamGenerationWithOptions(
 	t *testing.T,
 	options fakeStreamOptions,
-) (*streamGeneration, *fakeLeaseClientStream) {
+) (*connectionGeneration, *fakeLeaseClientStream) {
 	t.Helper()
 
 	streamContext, cancel := context.WithCancel(context.Background())
 	stream := &fakeLeaseClientStream{
 		ctx:         streamContext,
-		sent:        make(chan *redleasev1.ClientRequest),
+		sent:        make(chan protocol.Request),
 		receive:     make(chan fakeReceive, 256),
 		sendAttempt: make(chan struct{}),
+		closed:      make(chan struct{}),
 		sendErr:     options.sendErr,
 		closeErr:    options.closeErr,
 	}
-	generation := newStreamGeneration(stream, cancel)
+	generation := newConnectionGeneration(stream, cancel)
 	t.Cleanup(func() { _ = generation.Close() })
 	return generation, stream
 }
 
 func startStreamCall(
-	generation *streamGeneration,
-	request *redleasev1.ClientRequest,
-) <-chan streamCallResult {
+	generation *connectionGeneration,
+	request protocol.Request,
+) <-chan connectionCallResult {
 	return startStreamCallWithContext(generation, context.Background(), request)
 }
 
 func startStreamCallWithContext(
-	generation *streamGeneration,
+	generation *connectionGeneration,
 	ctx context.Context,
-	request *redleasev1.ClientRequest,
-) <-chan streamCallResult {
-	result := make(chan streamCallResult, 1)
+	request protocol.Request,
+) <-chan connectionCallResult {
+	result := make(chan connectionCallResult, 1)
 	go func() {
 		response, err := generation.call(ctx, request)
-		result <- streamCallResult{response: response, err: err}
+		result <- connectionCallResult{response: response, err: err}
 	}()
 	return result
 }
 
 func startStreamSubmit(
-	generation *streamGeneration,
+	generation *connectionGeneration,
 	ctx context.Context,
-	request *redleasev1.ClientRequest,
+	request protocol.Request,
 ) <-chan streamSubmitResult {
 	result := make(chan streamSubmitResult, 1)
 	go func() {
@@ -453,31 +457,31 @@ func receiveSubmitResult(t *testing.T, result <-chan streamSubmitResult) streamS
 	}
 }
 
-func receiveSentRequest(t *testing.T, stream *fakeLeaseClientStream) *redleasev1.ClientRequest {
+func receiveSentRequest(t *testing.T, stream *fakeLeaseClientStream) protocol.Request {
 	t.Helper()
 	select {
 	case request := <-stream.sent:
 		return request
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for sent request")
-		return nil
+		return protocol.Request{}
 	}
 }
 
-func receiveCallResult(t *testing.T, result <-chan streamCallResult) streamCallResult {
+func receiveCallResult(t *testing.T, result <-chan connectionCallResult) connectionCallResult {
 	t.Helper()
 	select {
 	case received := <-result:
 		return received
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for call result")
-		return streamCallResult{}
+		return connectionCallResult{}
 	}
 }
 
 func assertTransportCause(t *testing.T, err, cause error) {
 	t.Helper()
-	if _, ok := errors.AsType[*streamTransportError](err); !ok {
+	if _, ok := errors.AsType[*connectionTransportError](err); !ok {
 		t.Fatalf("error %v is not a stream transport error", err)
 	}
 	if !errors.Is(err, cause) {
@@ -485,19 +489,14 @@ func assertTransportCause(t *testing.T, err, cause error) {
 	}
 }
 
-func acquireStreamRequest(key uint64) *redleasev1.ClientRequest {
-	return &redleasev1.ClientRequest{
-		Operation: &redleasev1.ClientRequest_Acquire{
-			Acquire: &redleasev1.AcquireRequest{Key: key},
-		},
-	}
+func acquireStreamRequest(key uint64) protocol.Request {
+	return protocol.Request{Operation: protocol.OperationAcquire, Key: key}
 }
 
-func streamResponse(requestID uint64, status redleasev1.LeaseStatus) *redleasev1.ServerResponse {
-	return &redleasev1.ServerResponse{
-		RequestId: requestID,
-		Result: &redleasev1.ServerResponse_Acquire{
-			Acquire: &redleasev1.AcquireResponse{Status: status},
-		},
+func streamResponse(requestID uint64, status protocol.Status) protocol.Response {
+	return protocol.Response{
+		RequestID: requestID,
+		Operation: protocol.OperationAcquire,
+		Status:    status,
 	}
 }

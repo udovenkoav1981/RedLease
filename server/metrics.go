@@ -7,7 +7,7 @@ type MetricsSnapshot struct {
 	State                    string
 	ResidentKeys             uint64
 	QueuedOperations         uint64
-	ActiveStreams            uint64
+	ActiveConnections        uint64
 	AcquiresTotal            uint64
 	RenewsTotal              uint64
 	ReleasesTotal            uint64
@@ -27,7 +27,7 @@ func (s *Server) MetricsSnapshot() MetricsSnapshot {
 		State:                    metricsState(serverPhase(s.phase.Load())),
 		ResidentKeys:             s.keys.Load(),
 		QueuedOperations:         queuedOperations,
-		ActiveStreams:            uint64(s.activeStreams.Load()),
+		ActiveConnections:        uint64(s.activeConnections.Load()),
 		AcquiresTotal:            s.operationTotals[operationAcquire].Load(),
 		RenewsTotal:              s.operationTotals[operationRenew].Load(),
 		ReleasesTotal:            s.operationTotals[operationRelease].Load(),

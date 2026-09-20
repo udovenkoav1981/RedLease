@@ -24,7 +24,7 @@ type Collector struct {
 	state                    *clientprometheus.Desc
 	residentKeys             *clientprometheus.Desc
 	queuedOperations         *clientprometheus.Desc
-	activeStreams            *clientprometheus.Desc
+	activeConnections        *clientprometheus.Desc
 	restartQuarantineSkipped *clientprometheus.Desc
 	acquiresTotal            *clientprometheus.Desc
 	renewsTotal              *clientprometheus.Desc
@@ -63,9 +63,9 @@ func newCollector(source metricsSource) *Collector {
 			nil,
 			nil,
 		),
-		activeStreams: clientprometheus.NewDesc(
-			"redlease_server_active_streams",
-			"Number of active RedLease gRPC streams.",
+		activeConnections: clientprometheus.NewDesc(
+			"redlease_server_active_connections",
+			"Number of active RedLease TCP connections.",
 			nil,
 			nil,
 		),
@@ -101,7 +101,7 @@ func (c *Collector) Describe(metrics chan<- *clientprometheus.Desc) {
 	metrics <- c.state
 	metrics <- c.residentKeys
 	metrics <- c.queuedOperations
-	metrics <- c.activeStreams
+	metrics <- c.activeConnections
 	metrics <- c.restartQuarantineSkipped
 	metrics <- c.acquiresTotal
 	metrics <- c.renewsTotal
@@ -121,7 +121,7 @@ func (c *Collector) Collect(metrics chan<- clientprometheus.Metric) {
 
 	emit(metrics, c.residentKeys, clientprometheus.GaugeValue, float64(snapshot.ResidentKeys))
 	emit(metrics, c.queuedOperations, clientprometheus.GaugeValue, float64(snapshot.QueuedOperations))
-	emit(metrics, c.activeStreams, clientprometheus.GaugeValue, float64(snapshot.ActiveStreams))
+	emit(metrics, c.activeConnections, clientprometheus.GaugeValue, float64(snapshot.ActiveConnections))
 	quarantineSkipped := 0.0
 	if snapshot.RestartQuarantineSkipped {
 		quarantineSkipped = 1

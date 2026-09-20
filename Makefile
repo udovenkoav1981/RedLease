@@ -1,7 +1,7 @@
-PROTO_ROOT := proto
-PROTO_FILE := redlease/v1/redlease.proto
+FLATBUFFERS_SCHEMA := proto/redlease/v1/redlease.fbs
+FLATBUFFERS_OUTPUT := proto/redlease/v1
 
-.PHONY: all build lint generate generate-proto test
+.PHONY: all build lint generate generate-flatbuffers test
 
 all: build
 
@@ -11,20 +11,12 @@ build:
 lint:
 	golangci-lint run ./...
 
-generate: generate-proto
+generate: generate-flatbuffers
 
-generate-proto:
-	@redlease_protoc_gen_go="$$(go tool -n protoc-gen-go)"; \
-	redlease_protoc_gen_go_grpc="$$(go tool -n protoc-gen-go-grpc)"; \
-	protoc \
-		--proto_path="$(PROTO_ROOT)" \
-		--plugin=protoc-gen-go="$$redlease_protoc_gen_go" \
-		--plugin=protoc-gen-go-grpc="$$redlease_protoc_gen_go_grpc" \
-		--go_out="$(PROTO_ROOT)" \
-		--go_opt=paths=source_relative \
-		--go-grpc_out="$(PROTO_ROOT)" \
-		--go-grpc_opt=paths=source_relative \
-		"$(PROTO_ROOT)/$(PROTO_FILE)"
+generate-flatbuffers:
+	flatc --go --gen-onefile --go-namespace redleasev1 \
+		-o "$(FLATBUFFERS_OUTPUT)" \
+		"$(FLATBUFFERS_SCHEMA)"
 
 test:
 	go test ./...

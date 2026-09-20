@@ -1,5 +1,5 @@
 // Command redlease-load measures concurrent short-lived leases through the
-// public RedLease clients against separately started gRPC lock-servers.
+// public RedLease clients against separately started TCP lock-servers.
 package main
 
 import (
@@ -111,7 +111,7 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	flags.SetOutput(output)
 	clientKind := flags.String(clientName, "both", "client1of1, client, or both (both requires quorum 1/1)")
 	quorum := flags.String("quorum", quorum1of1, "quorum for the generic client: 1/1, 2/3, or 3/5")
-	targets := flags.String("targets", "", "comma-separated addresses of already running gRPC lock-servers")
+	targets := flags.String("targets", "", "comma-separated addresses of already running TCP lock-servers")
 	clients := flags.String("clients", defaultClients, "comma-separated client counts")
 	leases := flags.String("leases-per-client", defaultLeases, "comma-separated concurrent lease counts per client")
 	duration := flags.Duration("duration", 5*time.Second, "measurement time per matrix cell")

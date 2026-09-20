@@ -31,7 +31,9 @@ Lease time source          Linux `CLOCK_BOOTTIME`
 Wire TTL representation    uint64 milliseconds
 Leader                     none
 Server-to-server hot path  none
-Client transport           N persistent ordered gRPC streams
+Wire format                FlatBuffers, size-prefixed frames
+Client transport           N persistent ordered TCP connections
+TCP frame write timeout    1 s (fixed)
 Initial ownership          >= Q/N
 Steady-state target        N/N
 Restart protection         built-in quarantine by default; explicit owner-managed opt-out
@@ -124,9 +126,9 @@ QUARANTINE -> ACTIVE -> FAILED
 
 Если server обнаруживает внутреннее нарушение инварианта, продолжение работы с
 потенциально повреждённым RAM-состоянием запрещено. Server атомарно переходит в
-`FAILED`, отменяет свой внутренний context и тем самым завершает все активные
-streams. Новые streams и все операции, включая `GetTTL`, отклоняются как
-`Unavailable`. Переход из `FAILED` обратно в `ACTIVE` невозможен.
+`FAILED`, отменяет свой внутренний context и тем самым закрывает все активные
+TCP-соединения. Новые соединения и все операции, включая `GetTTL`, отклоняются.
+Переход из `FAILED` обратно в `ACTIVE` невозможен.
 
 Server library не вызывает `panic` или `os.Exit` для обнаруженного нарушения.
 Вместо этого публичный `Server.Fatal()` возвращает receive-only buffered channel,
@@ -191,7 +193,7 @@ registry и не запускает собственный HTTP endpoint.
 - `redlease_server_resident_keys` — физически хранящиеся записи, включая
   истёкшие записи до lazy или background cleanup;
 - `redlease_server_queued_operations` — сумма текущих длин shard queues;
-- `redlease_server_active_streams` — число активных gRPC streams;
+- `redlease_server_active_connections` — число активных TCP-соединений;
 - `redlease_server_restart_quarantine_skipped` — owner-managed quarantine
   включён (1) или выключен (0).
 
@@ -305,7 +307,7 @@ Q/N -> ... -> N/N
 ```
 
 `Attach` — только название логической операции внутри клиента. Она не является
-операцией wire protocol, не отправляется в stream и ничего не добавляет в
+операцией wire protocol, не отправляется в TCP-соединение и ничего не добавляет в
 server API. Lock-server не знает о понятии `Attach`.
 
 В рамках этой логической операции клиент продолжает обрабатывать ответы
@@ -362,10 +364,10 @@ if current.leaseID == requested.leaseID:
 Обычный Release может быть асинхронным best-effort.
 
 `client1of1` однократно пытается синхронно поместить `Release` в FIFO send
-queue, после чего возвращает управление, не ожидая отправки в stream или ответа
+queue, после чего возвращает управление, не ожидая отправки в socket или ответа
 server. При успешном enqueue следующая операция, последовательно вызванная
-после `Lease.Release()`, попадает в тот же stream после него. Ответ на `Release`
-клиенту не нужен и игнорируется. При разрыве stream запрос не повторяется:
+после `Lease.Release()`, попадает в то же соединение после него. Ответ на `Release`
+клиенту не нужен и игнорируется. При разрыве соединения запрос не повторяется:
 неосвобождённый lease остаётся на server до TTL. Запоздалый `Release` содержит
 прежний `leaseID` и не может удалить новый lease того же key.
 
@@ -488,19 +490,19 @@ validUntil = max(previousValidUntil, quorumValidUntil)
 fencing token. Клиент проверяет `validUntil` перед запуском новых защищённых
 операций.
 
-## 7. Persistent ordered gRPC streams
+## 7. FlatBuffers поверх persistent TCP connections
 
-Каждая клиентская нода поддерживает по одному независимому persistent ordered
-gRPC stream к каждому lock-server:
+Каждая клиентская нода поддерживает по одному независимому persistent TCP-
+соединению к каждому lock-server:
 
 ```text
 client
-  |---- stream ---> S1
-  |---- stream ---> ...
-  `---- stream ---> SN
+  |---- TCP connection ---> S1
+  |---- TCP connection ---> ...
+  `---- TCP connection ---> SN
 ```
 
-Один stream multiplexes операции для множества ключей:
+Одно соединение multiplexes операции для множества ключей:
 
 ```text
 Acquire
@@ -510,38 +512,61 @@ Acquire
 ...
 ```
 
-Streams независимы: slow или disconnected server не создаёт head-of-line
+Соединения независимы: slow или disconnected server не создаёт head-of-line
 blocking для остальных путей.
 
-Persistent streams:
+Persistent connections:
 
 - убирают connection setup из hot path;
 - сохраняют порядок доставки запросов для пары client/server;
-- уменьшают RPC overhead;
+- не создают отдельный RPC/context на каждую операцию;
 - позволяют обслуживать тысячи активных leases через `N` соединений.
 
-Каждый запрос содержит `requestID`, уникальный в пределах одного stream. Server
+Wire schema находится в `proto/redlease/v1/redlease.fbs`. Каждый request и
+response кодируется отдельным стандартным size-prefixed FlatBuffer: первые
+четыре байта содержат little-endian размер следующего FlatBuffer payload.
+Дополнительного собственного envelope или RPC service нет. Transport закрывает
+соединение при неполном, слишком большом или некорректном frame.
+
+На каждом соединении один writer последовательно кодирует и записывает requests,
+а один reader последовательно читает responses. На server действует зеркальная
+схема: один reader принимает requests и один writer отправляет responses. Это
+исключает перемешивание байтов нескольких frames без mutex вокруг socket I/O.
+Перед записью каждого полного frame writer устанавливает отдельный TCP write
+deadline на фиксированную константу 1 секунду. Timeout делает соединение
+непригодным: оно закрывается, вся ещё не отправленная очередь этого поколения
+отбрасывается, а client запускает reconnect. Запросы старого поколения на новое
+соединение автоматически не переносятся.
+
+Client помещает запрос в send queue без ожидания свободного места. Если очередь
+заполнена, только новый запрос отклоняется как не выполненный: существующее
+соединение и уже поставленные в очередь запросы продолжают работу. Для `Acquire`
+это возвращается приложению как `ErrNotAcquired`. Если причиной переполнения был
+зависший socket writer, соединение будет закрыто самим writer по TCP write
+timeout; переполнение очереди отдельно не запускает reconnect.
+
+Каждый запрос содержит `requestID`, уникальный в пределах одного соединения. Server
 возвращает тот же `requestID` в ответе. Это correlation identifier, а не номер
 операции: он не задаёт порядок применения, не сохраняется server после reconnect
 и не обеспечивает дедупликацию.
 
-Server принимает запросы одного stream по порядку и направляет их в ordered
+Server принимает запросы одного соединения по порядку и направляет их в ordered
 очереди по `key`. Операции одного ключа применяются в порядке получения, а
 разные ключи могут обрабатываться параллельно. На практике это может быть
 реализовано фиксированным количеством worker queues с выбором очереди по
 `hash(key)`. Количество workers является параметром реализации.
 
 Завершённые операции поступают в общий response channel и отправляются одним
-writer в gRPC stream. Поэтому ответы для разных ключей могут возвращаться не в
+TCP writer. Поэтому ответы для разных ключей могут возвращаться не в
 порядке запросов. Client сопоставляет их через `requestID` и не ждёт предыдущий
 ответ перед отправкой следующего запроса.
 
 Для каждого ожидаемого ответа client хранит отдельный deadline. После timeout
 запрос перестаёт участвовать в quorum, а возможный поздний ответ игнорируется.
-Разрыв stream завершает все его незавершённые запросы transport error и
+Разрыв соединения завершает все его незавершённые запросы transport error и
 запускает reconnect; client никогда не ждёт отдельный пропущенный ответ
 бесконечно. `requestID` не устраняет неопределённость результата при разрыве
-stream: повторная отправка опирается на идемпотентность операций по `leaseID`.
+соединения: повторная отправка опирается на идемпотентность операций по `leaseID`.
 
 После transport error отдельный Acquire на реплике повторяется background
 healing с тем же `leaseID` и исходным `requestedTTL`. Перед каждой новой
@@ -549,7 +574,7 @@ healing с тем же `leaseID` и исходным `requestedTTL`. Перед 
 только пока lease остаётся активным и локально действительным. Lease мог уже
 собрать quorum, вернуться приложению, использоваться бизнес-логикой и перейти в
 Release до восстановления соединения. В таком случае новый Acquire после
-reconnect не отправляется, а уже принятые stream'ом попытки Acquire завершают
+reconnect не отправляется, а уже принятые send queue попытки Acquire завершают
 submission barrier до отправки Release.
 
 ### 7.1. Логирование client library
@@ -564,9 +589,9 @@ Client не логирует успешные `Acquire` и `Renew`, а такж�
 возвращаемые вызвавшему их приложению. В лог попадают только фоновые события,
 которые иначе не имеют публичного наблюдателя:
 
-- `WARN`, когда replica впервые не может открыть stream или установленный
-  stream разрывается;
-- `INFO`, когда stream устанавливается; после периода недоступности запись
+- `WARN`, когда replica впервые не может открыть соединение или установленное
+  соединение разрывается;
+- `INFO`, когда соединение устанавливается; после периода недоступности запись
   содержит `reconnected=true`;
 - один `WARN` на lease универсального `client`, если bounded retry асинхронного
   `Release` завершился без приемлемого ответа; запись агрегирует все не
@@ -576,7 +601,7 @@ Client не логирует успешные `Acquire` и `Renew`, а такж�
 этой best-effort операции.
 
 Повторные неудачные попытки reconnect во время одного периода недоступности не
-логируются. Новая `WARN`-запись возможна только после восстановления stream и
+логируются. Новая `WARN`-запись возможна только после восстановления соединения и
 следующего перехода в недоступное состояние. Ошибки отдельных background
 healing attempts также не логируются, чтобы штатные retry не создавали поток
 повторяющихся записей.

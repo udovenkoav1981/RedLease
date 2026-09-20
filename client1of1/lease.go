@@ -5,7 +5,10 @@ import (
 	"errors"
 	"sync"
 
+	flatbuffers "github.com/google/flatbuffers/go"
+
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -87,17 +90,15 @@ func (c *Client) Acquire(
 		lifecycle: leaseActive,
 	}
 
-	operationContext, cancelOperation := c.operationContext(ctx)
 	accepted := false
-	future, err := c.submit(operationContext, c.newAcquireRequest(lease.key, sequence, ttlMS))
+	future, err := c.submit(c.newAcquireRequest(lease.key, sequence, ttlMS))
 	if err == nil {
-		var response *redleasev1.ServerResponse
-		response, err = future.await(operationContext)
+		var response protocol.Response
+		response, err = c.awaitResponse(ctx, future)
 		if err == nil {
 			accepted, err = lease.acceptAcquireResponse(ctx, response)
 		}
 	}
-	cancelOperation()
 	if err == nil && accepted {
 		return &lease, nil
 	}
@@ -108,25 +109,23 @@ func (c *Client) Acquire(
 
 func (l *Lease) acceptAcquireResponse(
 	caller context.Context,
-	response *redleasev1.ServerResponse,
+	response protocol.Response,
 ) (bool, error) {
 	if err := l.client.cancellationError(caller); err != nil {
 		return false, err
 	}
-	acquire := response.GetAcquire()
-	if acquire == nil {
+	if response.Operation != protocol.OperationAcquire {
 		return false, errors.New("Acquire received a non-Acquire response")
 	}
-	switch acquire.GetStatus() {
-	case redleasev1.LeaseStatus_LEASE_STATUS_OK,
-		redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED:
-		validUntil := candidateValidUntil(l.now, acquire.GetTtlMs())
+	switch response.Status {
+	case protocol.StatusOK, protocol.StatusAlreadyOwned:
+		validUntil := candidateValidUntil(l.now, response.TTLMS)
 		if boottime.Now() >= validUntil {
 			return false, nil
 		}
 		l.validUntil = validUntil
 		return true, nil
-	case redleasev1.LeaseStatus_LEASE_STATUS_KEY_LIMIT_REACHED:
+	case protocol.StatusKeyLimitReached:
 		return false, ErrKeyLimitReached
 	default:
 		return false, nil
@@ -159,18 +158,16 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 	l.now = boottime.Now()
 	l.stateMu.Unlock()
 
-	operationContext, cancelOperation := l.client.operationContext(ctx)
 	renewed := false
-	future, err := l.client.submit(operationContext, l.client.newRenewRequest(l.key, l.sequence, ttlMS))
+	future, err := l.client.submit(l.client.newRenewRequest(l.key, l.sequence, ttlMS))
 
 	if err == nil {
-		var response *redleasev1.ServerResponse
-		response, err = future.await(operationContext)
+		var response protocol.Response
+		response, err = l.client.awaitResponse(ctx, future)
 		if err == nil {
 			renewed, err = l.acceptRenewResponse(ctx, response)
 		}
 	}
-	cancelOperation()
 	if err != nil || !renewed {
 		return &operationError{kind: ErrNotRenewed, cause: err}
 	}
@@ -179,19 +176,18 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 
 func (l *Lease) acceptRenewResponse(
 	caller context.Context,
-	response *redleasev1.ServerResponse,
+	response protocol.Response,
 ) (bool, error) {
 	if err := l.client.cancellationError(caller); err != nil {
 		return false, err
 	}
-	renew := response.GetRenew()
-	if renew == nil {
+	if response.Operation != protocol.OperationRenew {
 		return false, errors.New("Renew received a non-Renew response")
 	}
-	if renew.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+	if response.Status != protocol.StatusOK {
 		return false, nil
 	}
-	validUntil := candidateValidUntil(l.now, renew.GetTtlMs())
+	validUntil := candidateValidUntil(l.now, response.TTLMS)
 	if boottime.Now() >= validUntil {
 		return false, nil
 	}
@@ -222,9 +218,7 @@ func (l *Lease) Release() {
 }
 
 func (c *Client) release(key, sequence uint64) {
-	ctx, cancel := context.WithTimeout(c.ctx, c.responseTimeout)
-	defer cancel()
-	_ = c.submitNoResponse(ctx, c.newReleaseRequest(key, sequence))
+	_ = c.submitNoResponse(c.newReleaseRequest(key, sequence))
 }
 
 func candidateValidUntil(operationStart, ttlMS uint64) uint64 {
@@ -234,31 +228,77 @@ func candidateValidUntil(operationStart, ttlMS uint64) uint64 {
 	return operationStart + (ttlMS - safetyMarginMS)
 }
 
-func (c *Client) newAcquireRequest(key, sequence, ttlMS uint64) *redleasev1.ClientRequest {
-	return &redleasev1.ClientRequest{
-		Operation: &redleasev1.ClientRequest_Acquire{Acquire: &redleasev1.AcquireRequest{
-			Key:            key,
-			LeaseId:        &redleasev1.LeaseID{ClientId: c.clientID, BootId: c.bootID, LeaseSeq: sequence},
-			RequestedTtlMs: ttlMS,
-		}},
+func (c *Client) newAcquireRequest(key, sequence, ttlMS uint64) *outboundConnectionRequest {
+	outbound := c.newOutboundRequest()
+	builder := outbound.builder
+	redleasev1.ClientRequestStart(builder)
+	redleasev1.ClientRequestAddRequestId(builder, c.nextRequestID.Add(1))
+	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationACQUIRE)
+	redleasev1.ClientRequestAddAcquire(builder, redleasev1.CreateAcquireRequest(
+		builder,
+		key,
+		c.clientID,
+		c.bootID,
+		sequence,
+		ttlMS,
+	))
+	c.finishOutboundRequest(outbound)
+	return outbound
+}
+
+func (c *Client) newRenewRequest(key, sequence, ttlMS uint64) *outboundConnectionRequest {
+	outbound := c.newOutboundRequest()
+	builder := outbound.builder
+	redleasev1.ClientRequestStart(builder)
+	redleasev1.ClientRequestAddRequestId(builder, c.nextRequestID.Add(1))
+	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationRENEW)
+	redleasev1.ClientRequestAddRenew(builder, redleasev1.CreateRenewRequest(
+		builder,
+		key,
+		c.clientID,
+		c.bootID,
+		sequence,
+		ttlMS,
+	))
+	c.finishOutboundRequest(outbound)
+	return outbound
+}
+
+func (c *Client) newReleaseRequest(key, sequence uint64) *outboundConnectionRequest {
+	outbound := c.newOutboundRequest()
+	builder := outbound.builder
+	redleasev1.ClientRequestStart(builder)
+	redleasev1.ClientRequestAddRequestId(builder, c.nextRequestID.Add(1))
+	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationRELEASE)
+	redleasev1.ClientRequestAddRelease(builder, redleasev1.CreateReleaseRequest(
+		builder,
+		key,
+		c.clientID,
+		c.bootID,
+		sequence,
+	))
+	c.finishOutboundRequest(outbound)
+	return outbound
+}
+
+func (c *Client) newOutboundRequest() *outboundConnectionRequest {
+	if pooled := c.requestPool.Get(); pooled != nil {
+		if outbound, ok := pooled.(*outboundConnectionRequest); ok {
+			outbound.builder.Reset()
+			return outbound
+		}
+	}
+	return &outboundConnectionRequest{
+		builder: flatbuffers.NewBuilder(protocol.NewBuilderSize),
+		pool:    &c.requestPool,
 	}
 }
 
-func (c *Client) newRenewRequest(key, sequence, ttlMS uint64) *redleasev1.ClientRequest {
-	return &redleasev1.ClientRequest{
-		Operation: &redleasev1.ClientRequest_Renew{Renew: &redleasev1.RenewRequest{
-			Key:            key,
-			LeaseId:        &redleasev1.LeaseID{ClientId: c.clientID, BootId: c.bootID, LeaseSeq: sequence},
-			RequestedTtlMs: ttlMS,
-		}},
-	}
-}
-
-func (c *Client) newReleaseRequest(key, sequence uint64) *redleasev1.ClientRequest {
-	return &redleasev1.ClientRequest{
-		Operation: &redleasev1.ClientRequest_Release{Release: &redleasev1.ReleaseRequest{
-			Key:     key,
-			LeaseId: &redleasev1.LeaseID{ClientId: c.clientID, BootId: c.bootID, LeaseSeq: sequence},
-		}},
-	}
+func (*Client) finishOutboundRequest(outbound *outboundConnectionRequest) {
+	root := redleasev1.ClientRequestEnd(outbound.builder)
+	redleasev1.FinishSizePrefixedClientRequestBuffer(outbound.builder, root)
+	frame := outbound.builder.FinishedBytes()
+	rootOffset := flatbuffers.GetUOffsetT(frame[flatbuffers.SizeUint32:]) +
+		flatbuffers.UOffsetT(flatbuffers.SizeUint32)
+	outbound.request.Init(frame, rootOffset)
 }

@@ -1,7 +1,7 @@
 # Benchmark `client1of1`
 
 `BenchmarkClient1Of1AcquireRelease` измеряет публичный API `client1of1` через
-настоящее TCP/gRPC-соединение с отдельно запущенным RedLease server. Benchmark
+настоящее TCP-соединение с отдельно запущенным RedLease server. Benchmark
 не запускает встроенный server.
 
 Сначала запустите server в отдельном терминале:
@@ -23,8 +23,8 @@ go test ./client1of1 \
 ```
 
 Если `REDLEASE_BENCH_TARGET` не задан, используется `127.0.0.1:50051`.
-Benchmark сам ждёт готовности stream и выхода server из restart quarantine.
-Один `client1of1.Client` и один bidi-stream совместно используются 1, 2, 4,
+Benchmark сам ждёт готовности connection и выхода server из restart quarantine.
+Один `client1of1.Client` и одно TCP-соединение совместно используются 1, 2, 4,
 8, 16, 32, 64, 128 и 256 параллельными workers.
 
 В результате выводятся:
@@ -33,13 +33,13 @@ Benchmark сам ждёт готовности stream и выхода server и�
 - `avg-latency-ms` — средняя видимая вызывающему коду задержка пары;
 - `p50-latency-ms`, `p95-latency-ms`, `p99-latency-ms` — приблизительные
   перцентили задержки;
-- `B/op`, `allocs/op` — клиентские и gRPC-аллокации на пару.
+- `B/op`, `allocs/op` — клиентские и FlatBuffers/TCP-аллокации на пару.
 
 Одна измеряемая пара — синхронный `Acquire` и вызов асинхронного `Release`.
 Поэтому latency включает ожидание ответа `Acquire` и постановку `Release` в
 send queue, но не ожидание ответа `Release`: публичный API его не ожидает.
 Следующий `Acquire` того же worker использует тот же key и следует за предыдущим
-`Release` в одном stream и одном server shard.
+`Release` в одном соединении и одном server shard.
 
 Стандартный `ns/op` при нескольких workers равен измеренному времени,
 делённому на общее число пар. Это обратная суммарная пропускная способность, а

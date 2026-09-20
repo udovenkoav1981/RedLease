@@ -4,8 +4,6 @@ import (
 	"errors"
 	"log/slog"
 	"time"
-
-	"google.golang.org/grpc"
 )
 
 const defaultResponseTimeout = time.Second
@@ -16,11 +14,6 @@ type Config struct {
 	ClientID uint32
 	// Target is the address of the only lock-server.
 	Target string
-
-	// DialOptions must include transport credentials appropriate for the
-	// deployment. Trusted local deployments may explicitly use insecure
-	// credentials.
-	DialOptions []grpc.DialOption
 
 	// Logger receives structured background lifecycle events from the Client.
 	// It is required. The caller retains ownership of the logger and its handler.

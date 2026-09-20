@@ -7,55 +7,48 @@ import (
 	"sync"
 	"time"
 
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
-var (
-	errNilStreamRequest  = errors.New("nil stream request")
-	errNilStreamResponse = errors.New("nil stream response")
-	errStreamClosed      = errors.New("stream generation closed")
-)
+var errConnectionClosed = errors.New("connection generation closed")
 
-// leaseClientStream is implemented by the generated gRPC bidirectional client
-// stream. The cancel function passed to newStreamGeneration owns the context
-// used to create the stream and must unblock Send and Recv.
-type leaseClientStream interface {
-	Send(request *redleasev1.ClientRequest) error
-	Recv() (*redleasev1.ServerResponse, error)
-	CloseSend() error
+// leaseConnection permits one Send goroutine and one Recv goroutine. Closing
+// it must unblock both operations.
+type leaseConnection interface {
+	Send(request protocol.Request) error
+	Recv() (protocol.Response, error)
+	Close() error
 }
 
-var _ leaseClientStream = redleasev1.RedLease_LeaseStreamClient(nil)
-
-type streamTransportError struct {
+type connectionTransportError struct {
 	cause error
 }
 
-func (e *streamTransportError) Error() string {
-	return "stream transport: " + e.cause.Error()
+func (e *connectionTransportError) Error() string {
+	return "connection transport: " + e.cause.Error()
 }
 
-func (e *streamTransportError) Unwrap() error {
+func (e *connectionTransportError) Unwrap() error {
 	return e.cause
 }
 
-type streamCallResult struct {
-	response *redleasev1.ServerResponse
+type connectionCallResult struct {
+	response protocol.Response
 	err      error
 }
 
-type pendingStreamCall struct {
-	result chan streamCallResult
+type pendingConnectionCall struct {
+	result chan connectionCallResult
 }
 
-type streamFuture struct {
-	generation *streamGeneration
+type connectionFuture struct {
+	generation *connectionGeneration
 	requestID  uint64
-	pending    *pendingStreamCall
-	outbound   *outboundStreamRequest
+	pending    *pendingConnectionCall
+	outbound   *outboundConnectionRequest
 }
 
-func (f *streamFuture) await(ctx context.Context) (*redleasev1.ServerResponse, error) {
+func (f *connectionFuture) await(ctx context.Context) (protocol.Response, error) {
 	select {
 	case result := <-f.pending.result:
 		return result.response, result.err
@@ -66,7 +59,7 @@ func (f *streamFuture) await(ctx context.Context) (*redleasev1.ServerResponse, e
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) && !f.outbound.sendComplete() {
 			f.generation.terminate(fmt.Errorf("send deadline: %w", ctx.Err()))
 		}
-		f.generation.complete(f.requestID, streamCallResult{err: ctx.Err()})
+		f.generation.complete(f.requestID, connectionCallResult{err: ctx.Err()})
 		result := <-f.pending.result
 		return result.response, result.err
 	}
@@ -80,8 +73,8 @@ const (
 	outboundRequestCanceled
 )
 
-type outboundStreamRequest struct {
-	request *redleasev1.ClientRequest
+type outboundConnectionRequest struct {
+	request protocol.Request
 
 	mu       sync.Mutex
 	state    outboundRequestState
@@ -90,11 +83,11 @@ type outboundStreamRequest struct {
 	deadline time.Time
 }
 
-func newOutboundStreamRequest(
-	request *redleasev1.ClientRequest,
+func newOutboundConnectionRequest(
+	request protocol.Request,
 	deadline time.Time,
-) *outboundStreamRequest {
-	return &outboundStreamRequest{
+) *outboundConnectionRequest {
+	return &outboundConnectionRequest{
 		request:  request,
 		state:    outboundRequestQueued,
 		accepted: make(chan struct{}),
@@ -103,11 +96,11 @@ func newOutboundStreamRequest(
 	}
 }
 
-func (r *outboundStreamRequest) finishSend() {
+func (r *outboundConnectionRequest) finishSend() {
 	close(r.sent)
 }
 
-func (r *outboundStreamRequest) sendComplete() bool {
+func (r *outboundConnectionRequest) sendComplete() bool {
 	select {
 	case <-r.sent:
 		return true
@@ -116,7 +109,7 @@ func (r *outboundStreamRequest) sendComplete() bool {
 	}
 }
 
-func (r *outboundStreamRequest) beginSend() bool {
+func (r *outboundConnectionRequest) beginSend() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.state == outboundRequestCanceled {
@@ -124,12 +117,12 @@ func (r *outboundStreamRequest) beginSend() bool {
 	}
 	r.state = outboundRequestAccepted
 	// Closing accepted is the submission barrier: the single writer has accepted
-	// this request into stream order before it invokes Send.
+	// this request into connection order before it invokes Send.
 	close(r.accepted)
 	return true
 }
 
-func (r *outboundStreamRequest) cancelBeforeSend() outboundRequestState {
+func (r *outboundConnectionRequest) cancelBeforeSend() outboundRequestState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.state == outboundRequestQueued {
@@ -138,38 +131,39 @@ func (r *outboundStreamRequest) cancelBeforeSend() outboundRequestState {
 	return r.state
 }
 
-func (r *outboundStreamRequest) currentState() outboundRequestState {
+func (r *outboundConnectionRequest) currentState() outboundRequestState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.state
 }
 
-type streamGeneration struct {
-	stream leaseClientStream
-	cancel context.CancelFunc
+type connectionGeneration struct {
+	connection leaseConnection
+	cancel     context.CancelFunc
 
-	sendQueue chan *outboundStreamRequest
+	sendQueue chan *outboundConnectionRequest
 	done      chan struct{}
 
 	requestIDMu   sync.Mutex
 	nextRequestID uint64
 
 	pendingMu   sync.Mutex
-	pending     map[uint64]*pendingStreamCall
+	pending     map[uint64]*pendingConnectionCall
 	terminalErr error
 
-	terminateOnce sync.Once
-	workers       sync.WaitGroup
-	closeSendErr  error
+	terminateOnce      sync.Once
+	closeOnce          sync.Once
+	workers            sync.WaitGroup
+	closeConnectionErr error
 }
 
-func newStreamGeneration(stream leaseClientStream, cancel context.CancelFunc) *streamGeneration {
-	generation := &streamGeneration{
-		stream:    stream,
-		cancel:    cancel,
-		sendQueue: make(chan *outboundStreamRequest),
-		done:      make(chan struct{}),
-		pending:   make(map[uint64]*pendingStreamCall),
+func newConnectionGeneration(connection leaseConnection, cancel context.CancelFunc) *connectionGeneration {
+	generation := &connectionGeneration{
+		connection: connection,
+		cancel:     cancel,
+		sendQueue:  make(chan *outboundConnectionRequest),
+		done:       make(chan struct{}),
+		pending:    make(map[uint64]*pendingConnectionCall),
 	}
 
 	generation.workers.Add(2)
@@ -179,38 +173,32 @@ func newStreamGeneration(stream leaseClientStream, cancel context.CancelFunc) *s
 	return generation
 }
 
-func (g *streamGeneration) call(
+func (g *connectionGeneration) call(
 	ctx context.Context,
-	request *redleasev1.ClientRequest,
-) (*redleasev1.ServerResponse, error) {
+	request protocol.Request,
+) (protocol.Response, error) {
 	future, err := g.submit(ctx, request)
 	if err != nil {
-		return nil, err
+		return protocol.Response{}, err
 	}
 	return future.await(ctx)
 }
 
-func (g *streamGeneration) submit(
+func (g *connectionGeneration) submit(
 	ctx context.Context,
-	request *redleasev1.ClientRequest,
-) (*streamFuture, error) {
-	if request == nil {
-		return nil, errNilStreamRequest
-	}
-
+	request protocol.Request,
+) (*connectionFuture, error) {
 	requestID := g.allocateRequestID()
 
-	call := &pendingStreamCall{result: make(chan streamCallResult, 1)}
+	call := &pendingConnectionCall{result: make(chan connectionCallResult, 1)}
 	if err := g.register(requestID, call); err != nil {
 		return nil, err
 	}
-	requestCopy := &redleasev1.ClientRequest{
-		RequestId: requestID,
-		Operation: request.GetOperation(),
-	}
+	requestCopy := request
+	requestCopy.RequestID = requestID
 	deadline, _ := ctx.Deadline()
-	outbound := newOutboundStreamRequest(requestCopy, deadline)
-	future := &streamFuture{
+	outbound := newOutboundConnectionRequest(requestCopy, deadline)
+	future := &connectionFuture{
 		generation: g,
 		requestID:  requestID,
 		pending:    call,
@@ -218,14 +206,14 @@ func (g *streamGeneration) submit(
 	}
 
 	if err := ctx.Err(); err != nil {
-		g.complete(requestID, streamCallResult{err: err})
+		g.complete(requestID, connectionCallResult{err: err})
 		return nil, err
 	}
 
 	select {
 	case g.sendQueue <- outbound:
 	case <-ctx.Done():
-		g.complete(requestID, streamCallResult{err: ctx.Err()})
+		g.complete(requestID, connectionCallResult{err: ctx.Err()})
 		return nil, ctx.Err()
 	case <-g.done:
 		return nil, g.err()
@@ -241,28 +229,28 @@ func (g *streamGeneration) submit(
 	}
 }
 
-func (g *streamGeneration) submissionOutcome(
-	future *streamFuture,
-	outbound *outboundStreamRequest,
-) (*streamFuture, error) {
+func (g *connectionGeneration) submissionOutcome(
+	future *connectionFuture,
+	outbound *outboundConnectionRequest,
+) (*connectionFuture, error) {
 	if outbound.currentState() == outboundRequestAccepted {
 		return future, nil
 	}
 	if terminalErr := g.err(); terminalErr != nil {
 		return nil, terminalErr
 	}
-	return nil, &streamTransportError{cause: errStreamClosed}
+	return nil, &connectionTransportError{cause: errConnectionClosed}
 }
 
-func (g *streamGeneration) cancelSubmission(
+func (g *connectionGeneration) cancelSubmission(
 	cause error,
-	future *streamFuture,
-	outbound *outboundStreamRequest,
-) (*streamFuture, error) {
+	future *connectionFuture,
+	outbound *outboundConnectionRequest,
+) (*connectionFuture, error) {
 	state := outbound.cancelBeforeSend()
 	switch state {
 	case outboundRequestCanceled:
-		g.complete(future.requestID, streamCallResult{err: cause})
+		g.complete(future.requestID, connectionCallResult{err: cause})
 		return nil, cause
 	case outboundRequestAccepted:
 		return future, nil
@@ -271,13 +259,13 @@ func (g *streamGeneration) cancelSubmission(
 	}
 }
 
-func (g *streamGeneration) Close() error {
-	g.terminate(errStreamClosed)
+func (g *connectionGeneration) Close() error {
+	g.terminate(errConnectionClosed)
 	g.workers.Wait()
-	return g.closeSendErr
+	return g.closeConnectionErr
 }
 
-func (g *streamGeneration) allocateRequestID() uint64 {
+func (g *connectionGeneration) allocateRequestID() uint64 {
 	g.requestIDMu.Lock()
 	defer g.requestIDMu.Unlock()
 
@@ -286,7 +274,7 @@ func (g *streamGeneration) allocateRequestID() uint64 {
 	return requestID
 }
 
-func (g *streamGeneration) register(requestID uint64, call *pendingStreamCall) error {
+func (g *connectionGeneration) register(requestID uint64, call *pendingConnectionCall) error {
 	g.pendingMu.Lock()
 	defer g.pendingMu.Unlock()
 
@@ -297,7 +285,7 @@ func (g *streamGeneration) register(requestID uint64, call *pendingStreamCall) e
 	return nil
 }
 
-func (g *streamGeneration) complete(requestID uint64, result streamCallResult) {
+func (g *connectionGeneration) complete(requestID uint64, result connectionCallResult) {
 	g.pendingMu.Lock()
 	call := g.pending[requestID]
 	if call != nil {
@@ -311,11 +299,8 @@ func (g *streamGeneration) complete(requestID uint64, result streamCallResult) {
 	call.result <- result
 }
 
-func (g *streamGeneration) sendLoop() {
+func (g *connectionGeneration) sendLoop() {
 	defer g.workers.Done()
-	defer func() {
-		g.closeSendErr = g.stream.CloseSend()
-	}()
 
 	for {
 		select {
@@ -328,7 +313,7 @@ func (g *streamGeneration) sendLoop() {
 			if !outbound.deadline.IsZero() {
 				go g.watchSendDeadline(outbound)
 			}
-			err := g.stream.Send(outbound.request)
+			err := g.connection.Send(outbound.request)
 			outbound.finishSend()
 			if err != nil {
 				g.terminate(fmt.Errorf("send: %w", err))
@@ -338,7 +323,7 @@ func (g *streamGeneration) sendLoop() {
 	}
 }
 
-func (g *streamGeneration) watchSendDeadline(outbound *outboundStreamRequest) {
+func (g *connectionGeneration) watchSendDeadline(outbound *outboundConnectionRequest) {
 	delay := max(time.Until(outbound.deadline), 0)
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
@@ -353,44 +338,47 @@ func (g *streamGeneration) watchSendDeadline(outbound *outboundStreamRequest) {
 	}
 }
 
-func (g *streamGeneration) recvLoop() {
+func (g *connectionGeneration) recvLoop() {
 	defer g.workers.Done()
 
 	for {
-		response, err := g.stream.Recv()
+		response, err := g.connection.Recv()
 		if err != nil {
 			g.terminate(fmt.Errorf("receive: %w", err))
 			return
 		}
-		if response == nil {
-			g.terminate(errNilStreamResponse)
-			return
-		}
-		g.complete(response.GetRequestId(), streamCallResult{response: response})
+		g.complete(response.RequestID, connectionCallResult{response: response})
 	}
 }
 
-func (g *streamGeneration) terminate(cause error) {
+func (g *connectionGeneration) terminate(cause error) {
 	g.terminateOnce.Do(func() {
-		transportErr := &streamTransportError{cause: cause}
+		transportErr := &connectionTransportError{cause: cause}
 
 		g.pendingMu.Lock()
 		g.terminalErr = transportErr
 		pending := g.pending
-		g.pending = make(map[uint64]*pendingStreamCall)
+		g.pending = make(map[uint64]*pendingConnectionCall)
 		g.pendingMu.Unlock()
 
 		close(g.done)
 		g.cancel()
+		g.closeConnection()
 
-		result := streamCallResult{err: transportErr}
+		result := connectionCallResult{err: transportErr}
 		for _, call := range pending {
 			call.result <- result
 		}
 	})
 }
 
-func (g *streamGeneration) err() error {
+func (g *connectionGeneration) closeConnection() {
+	g.closeOnce.Do(func() {
+		g.closeConnectionErr = g.connection.Close()
+	})
+}
+
+func (g *connectionGeneration) err() error {
 	g.pendingMu.Lock()
 	defer g.pendingMu.Unlock()
 	return g.terminalErr

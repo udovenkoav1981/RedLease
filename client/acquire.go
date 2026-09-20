@@ -6,7 +6,7 @@ import (
 	"slices"
 
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
 // ErrNotAcquired identifies every Acquire result which did not establish a
@@ -38,13 +38,13 @@ func (e *notAcquiredError) Is(target error) bool {
 
 type acquireSubmission struct {
 	replica int
-	future  *streamFuture
+	future  *connectionFuture
 	err     error
 }
 
 type acquireReplicaResult struct {
 	replica  int
-	response *redleasev1.AcquireResponse
+	response protocol.Response
 	err      error
 }
 
@@ -90,7 +90,7 @@ func (c *Client) Acquire(
 	}
 
 	// A Release cleanup may only be submitted after every Acquire submission
-	// attempt has crossed (or definitively failed before) its stream barrier.
+	// attempt has crossed (or definitively failed before) its send-queue barrier.
 	for range serverCount {
 		<-submissions
 	}
@@ -118,12 +118,12 @@ func (c *Client) Acquire(
 				if firstFailure == nil {
 					firstFailure = result.err
 				}
-			} else if result.response != nil && isSuccessfulAcquire(result.response.GetStatus()) {
+			} else if isSuccessfulAcquire(result.response.Status) {
 				now := boottime.Now()
 				successful[result.replica] = true
 				candidates[result.replica] = candidateValidUntil(
 					operationStart,
-					result.response.GetTtlMs(),
+					result.response.TTLMS,
 				)
 				if now < candidates[result.replica] {
 					lease.markConfirmed(result.replica, candidates[result.replica])
@@ -152,9 +152,9 @@ func (c *Client) Acquire(
 					)
 					return lease, nil
 				}
-			} else if result.response != nil {
-				switch result.response.GetStatus() {
-				case redleasev1.LeaseStatus_LEASE_STATUS_KEY_LIMIT_REACHED:
+			} else {
+				switch result.response.Status {
+				case protocol.StatusKeyLimitReached:
 					keyLimitSeen = true
 				default:
 					// Other statuses are represented by notAcquiredError below.
@@ -203,7 +203,7 @@ func (c *Client) submitAcquire(
 	submitContext context.Context,
 	collectionContext context.Context,
 	replica int,
-	request *redleasev1.ClientRequest,
+	request protocol.Request,
 	submissions chan<- acquireSubmission,
 	results chan<- acquireReplicaResult,
 ) {
@@ -221,15 +221,14 @@ func (c *Client) submitAcquire(
 		results <- acquireReplicaResult{replica: replica, err: err}
 		return
 	}
-	acquireResponse := response.GetAcquire()
-	if acquireResponse == nil {
+	if response.Operation != protocol.OperationAcquire {
 		results <- acquireReplicaResult{
 			replica: replica,
 			err:     errors.New("Acquire received a non-Acquire response"),
 		}
 		return
 	}
-	results <- acquireReplicaResult{replica: replica, response: acquireResponse}
+	results <- acquireReplicaResult{replica: replica, response: response}
 }
 
 func (c *Client) collectRemainingAcquireResults(
@@ -242,11 +241,10 @@ func (c *Client) collectRemainingAcquireResults(
 	for range remaining {
 		result := <-results
 		if result.err == nil &&
-			result.response != nil &&
-			isSuccessfulAcquire(result.response.GetStatus()) {
+			isSuccessfulAcquire(result.response.Status) {
 			candidate := candidateValidUntil(
 				operationStart,
-				result.response.GetTtlMs(),
+				result.response.TTLMS,
 			)
 			if boottime.Now() < candidate {
 				lease.markConfirmed(result.replica, candidate)
@@ -296,25 +294,23 @@ func bestAcquireQuorum(
 	return validities[len(validities)-quorumSize], true
 }
 
-func (c *Client) newAcquireRequest(key, sequence, ttlMS uint64) *redleasev1.ClientRequest {
-	return &redleasev1.ClientRequest{
-		Operation: &redleasev1.ClientRequest_Acquire{
-			Acquire: &redleasev1.AcquireRequest{
-				Key:            key,
-				LeaseId:        &redleasev1.LeaseID{ClientId: c.clientID, BootId: c.bootID, LeaseSeq: sequence},
-				RequestedTtlMs: ttlMS,
-			},
-		},
+func (c *Client) newAcquireRequest(key, sequence, ttlMS uint64) protocol.Request {
+	return protocol.Request{
+		Operation:      protocol.OperationAcquire,
+		Key:            key,
+		ClientID:       c.clientID,
+		BootID:         c.bootID,
+		LeaseSequence:  sequence,
+		RequestedTTLMS: ttlMS,
 	}
 }
 
-func (c *Client) newReleaseRequest(key, sequence uint64) *redleasev1.ClientRequest {
-	return &redleasev1.ClientRequest{
-		Operation: &redleasev1.ClientRequest_Release{
-			Release: &redleasev1.ReleaseRequest{
-				Key:     key,
-				LeaseId: &redleasev1.LeaseID{ClientId: c.clientID, BootId: c.bootID, LeaseSeq: sequence},
-			},
-		},
+func (c *Client) newReleaseRequest(key, sequence uint64) protocol.Request {
+	return protocol.Request{
+		Operation:     protocol.OperationRelease,
+		Key:           key,
+		ClientID:      c.clientID,
+		BootID:        c.bootID,
+		LeaseSequence: sequence,
 	}
 }

@@ -34,9 +34,9 @@ func TestParseFlagsDefaults(t *testing.T) {
 	if config.maxKeys != server.DefaultMaxKeys {
 		t.Errorf("max keys = %d, want %d", config.maxKeys, server.DefaultMaxKeys)
 	}
-	if config.shardCount != 0 || config.shardQueueDepth != 0 || config.maxInFlightPerStream != 0 {
+	if config.shardCount != 0 || config.shardQueueDepth != 0 || config.maxInFlightPerConnection != 0 {
 		t.Errorf("implementation tuning defaults = (%d, %d, %d), want (0, 0, 0)",
-			config.shardCount, config.shardQueueDepth, config.maxInFlightPerStream)
+			config.shardCount, config.shardQueueDepth, config.maxInFlightPerConnection)
 	}
 }
 
@@ -48,7 +48,7 @@ func TestParseFlagsCustomValues(t *testing.T) {
 		"-max-keys", "123",
 		"-shard-count", "8",
 		"-shard-queue-depth", "16",
-		"-max-in-flight-per-stream", "32",
+		"-max-in-flight-per-connection", "32",
 	}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("parseFlags: %v", err)
@@ -59,7 +59,7 @@ func TestParseFlagsCustomValues(t *testing.T) {
 		config.maxKeys != 123 ||
 		config.shardCount != 8 ||
 		config.shardQueueDepth != 16 ||
-		config.maxInFlightPerStream != 32 {
+		config.maxInFlightPerConnection != 32 {
 		t.Fatalf("unexpected config: %+v", config)
 	}
 }
@@ -72,7 +72,7 @@ func TestParseFlagsHelpDescribesLocalPlaintextLauncher(t *testing.T) {
 	}
 	for _, fragment := range []string{
 		"Local test launcher",
-		"plaintext gRPC",
+		"plaintext TCP",
 		"no TLS or authentication",
 		"metrics-listen",
 	} {
@@ -84,13 +84,13 @@ func TestParseFlagsHelpDescribesLocalPlaintextLauncher(t *testing.T) {
 
 func TestMetricsHandlerServesPrivateRegistry(t *testing.T) {
 	leaseServer, err := server.New(server.Config{
-		MaxTTL:                1000,
-		MaxKeys:               10,
-		Logger:                testLogger,
-		SkipRestartQuarantine: true,
-		ShardCount:            1,
-		ShardQueueDepth:       1,
-		MaxInFlightPerStream:  1,
+		MaxTTL:                   1000,
+		MaxKeys:                  10,
+		Logger:                   testLogger,
+		SkipRestartQuarantine:    true,
+		ShardCount:               1,
+		ShardQueueDepth:          1,
+		MaxInFlightPerConnection: 1,
 	})
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
@@ -154,16 +154,16 @@ func TestServerConfigValidatesMaxTTL(t *testing.T) {
 
 func TestServerConfigPassesImplementationTuning(t *testing.T) {
 	config, err := (launcherConfig{
-		configuredMaxTTLMS:   1000,
-		maxKeys:              123,
-		shardCount:           8,
-		shardQueueDepth:      16,
-		maxInFlightPerStream: 32,
+		configuredMaxTTLMS:       1000,
+		maxKeys:                  123,
+		shardCount:               8,
+		shardQueueDepth:          16,
+		maxInFlightPerConnection: 32,
 	}).serverConfig(testLogger)
 	if err != nil {
 		t.Fatalf("serverConfig: %v", err)
 	}
-	if config.MaxKeys != 123 || config.ShardCount != 8 || config.ShardQueueDepth != 16 || config.MaxInFlightPerStream != 32 {
+	if config.MaxKeys != 123 || config.ShardCount != 8 || config.ShardQueueDepth != 16 || config.MaxInFlightPerConnection != 32 {
 		t.Fatalf("unexpected server config: %+v", config)
 	}
 }

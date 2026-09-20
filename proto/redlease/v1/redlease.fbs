@@ -1,0 +1,90 @@
+namespace redlease.v1;
+
+struct AcquireRequest {
+  key:ulong;
+  client_id:uint;
+  boot_id:uint;
+  lease_seq:ulong;
+  requested_ttl_ms:ulong;
+}
+
+struct RenewRequest {
+  key:ulong;
+  client_id:uint;
+  boot_id:uint;
+  lease_seq:ulong;
+  requested_ttl_ms:ulong;
+}
+
+struct ReleaseRequest {
+  key:ulong;
+  client_id:uint;
+  boot_id:uint;
+  lease_seq:ulong;
+}
+
+enum ClientOperation:ubyte {
+  NONE = 0,
+  ACQUIRE = 1,
+  RENEW = 2,
+  RELEASE = 3,
+  GET_TTL = 4
+}
+
+/// One operation sent through a TCP connection.
+table ClientRequest {
+  /// Unique within one TCP connection generation. It is echoed by the server
+  /// and is not a cross-reconnect deduplication key.
+  request_id:ulong;
+  operation:ClientOperation;
+  acquire:AcquireRequest;
+  renew:RenewRequest;
+  release:ReleaseRequest;
+}
+
+enum LeaseStatus:ubyte {
+  OK = 0,
+  ALREADY_OWNED = 1,
+  BUSY = 2,
+  STALE = 3,
+  NOT_READY = 4,
+  KEY_LIMIT_REACHED = 5
+  // Value 6 is reserved by the current protocol revision.
+}
+
+struct AcquireResponse {
+  status:LeaseStatus = OK;
+  ttl_ms:ulong;
+}
+
+struct RenewResponse {
+  status:LeaseStatus = OK;
+  ttl_ms:ulong;
+}
+
+struct ReleaseResponse {
+  status:LeaseStatus = OK;
+}
+
+struct GetTTLResponse {
+  configured_max_ttl_ms:ulong;
+}
+
+enum ServerResult:ubyte {
+  NONE = 0,
+  ACQUIRE = 1,
+  RENEW = 2,
+  RELEASE = 3,
+  GET_TTL = 4
+}
+
+/// One response returned through a TCP connection.
+table ServerResponse {
+  /// Correlates this response with a ClientRequest on the same connection.
+  request_id:ulong;
+  result:ServerResult;
+  acquire:AcquireResponse;
+  renew:RenewResponse;
+  release:ReleaseResponse;
+  get_ttl:GetTTLResponse;
+}

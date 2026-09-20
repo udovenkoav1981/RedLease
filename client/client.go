@@ -10,8 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"google.golang.org/grpc"
-
 	"github.com/udovenkoav1981/RedLease/internal/leaseid"
 )
 
@@ -20,7 +18,7 @@ const defaultResponseTimeout = time.Second
 // ErrClientClosed is returned when an operation is attempted after Close.
 var ErrClientClosed = errors.New("RedLease client closed")
 
-// Client owns one persistent reconnecting stream to each configured
+// Client owns one persistent reconnecting TCP connection to each configured
 // lock-server.
 type Client struct {
 	clientID        uint32
@@ -70,8 +68,7 @@ func New(config Config) (*Client, error) {
 	}
 	for index, server := range config.Servers {
 		client.servers[index] = ServerConfig{
-			Target:      server.Target,
-			DialOptions: append([]grpc.DialOption(nil), server.DialOptions...),
+			Target: server.Target,
 		}
 	}
 
@@ -80,16 +77,8 @@ func New(config Config) (*Client, error) {
 	client.cancel = cancel
 
 	for index, server := range client.servers {
-		connection, openErr := grpc.NewClient(server.Target, server.DialOptions...)
-		if openErr != nil {
-			cancel()
-			for previous := range index {
-				_ = client.replicas[previous].Close()
-			}
-			return nil, fmt.Errorf("create connection for server %d: %w", index, openErr)
-		}
 		client.replicas[index] = newReplicaConn(
-			newGRPCStreamFactory(connection),
+			newTCPConnectionFactory(server.Target),
 			client.logger.With(
 				slog.Uint64("replica_index", uint64(index)),
 				slog.String("server_target", server.Target),
@@ -99,7 +88,7 @@ func New(config Config) (*Client, error) {
 	return client, nil
 }
 
-// WaitReady waits until enough server streams for the configured quorum are
+// WaitReady waits until enough server connections for the configured quorum are
 // connected. It does not perform GetTTL and does not mutate server state.
 func (c *Client) WaitReady(ctx context.Context) error {
 	for {
@@ -141,7 +130,7 @@ func (c *Client) WaitReady(ctx context.Context) error {
 	}
 }
 
-// Close stops reconnecting streams and releases all client-side resources.
+// Close stops reconnecting connections and releases all client-side resources.
 // Server-side leases are not implicitly released and remain TTL bounded.
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {

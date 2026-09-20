@@ -8,14 +8,14 @@ import (
 	"time"
 
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
 const protocolMaxTTL = 5 * time.Second
 
 type releaseSubmission struct {
 	replica int
-	future  *streamFuture
+	future  *connectionFuture
 }
 
 type releaseRetries struct {
@@ -105,7 +105,7 @@ func (c *Client) retryReleaseReplica(
 	replica int,
 	key uint64,
 	sequence uint64,
-	future *streamFuture,
+	future *connectionFuture,
 ) bool {
 	retryBackoff := backoff.Default()
 	var attempt uint
@@ -125,20 +125,19 @@ func (c *Client) retryReleaseReplica(
 	}
 }
 
-func (c *Client) releaseResponseOK(ctx context.Context, future *streamFuture) bool {
+func (c *Client) releaseResponseOK(ctx context.Context, future *connectionFuture) bool {
 	responseContext, cancelResponse := context.WithTimeout(ctx, c.responseTimeout)
 	defer cancelResponse()
 
 	response, err := future.await(responseContext)
-	if err != nil || response.GetRelease() == nil {
+	if err != nil || response.Operation != protocol.OperationRelease {
 		return false
 	}
-	status := response.GetRelease().GetStatus()
+	status := response.Status
 	// A quarantined process has empty RAM state and rejected this Release
 	// without applying any lease mutation. There is nothing from the previous
 	// process incarnation left to clean on that replica.
-	return status == redleasev1.LeaseStatus_LEASE_STATUS_OK ||
-		status == redleasev1.LeaseStatus_LEASE_STATUS_NOT_READY
+	return status == protocol.StatusOK || status == protocol.StatusNotReady
 }
 
 func releaseRetryWindow(responseTimeout time.Duration) time.Duration {

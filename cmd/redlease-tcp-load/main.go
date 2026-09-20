@@ -1,4 +1,4 @@
-// Command redlease-grpc-load measures one raw RedLease gRPC stream without
+// Command redlease-tcp-load measures one raw RedLease TCP connection without
 // using either public client library.
 package main
 
@@ -15,10 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
+	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
 const (
@@ -50,7 +48,7 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			return
 		}
-		_, _ = fmt.Fprintln(os.Stderr, "redlease-grpc-load:", err)
+		_, _ = fmt.Fprintln(os.Stderr, "redlease-tcp-load:", err)
 		os.Exit(1)
 	}
 }
@@ -64,48 +62,35 @@ func run(args []string, output, flagOutput io.Writer) error {
 	if err != nil {
 		return err
 	}
-
-	connection, err := grpc.NewClient(
-		config.target,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
-	if err != nil {
-		return fmt.Errorf("create gRPC connection: %w", err)
-	}
-	defer func() { _ = connection.Close() }()
-
-	rpc := redleasev1.NewRedLeaseClient(connection)
-	if err := waitForActive(context.Background(), rpc, &config, bootID); err != nil {
+	if err := waitForActive(context.Background(), &config, bootID); err != nil {
 		return err
 	}
 
-	streamContext, cancelStream := context.WithCancel(context.Background())
-	stream, err := rpc.LeaseStream(streamContext, grpc.WaitForReady(true))
+	ctx, cancel := context.WithCancel(context.Background())
+	connection, err := transport.Dial(ctx, config.target)
 	if err != nil {
-		cancelStream()
-		return fmt.Errorf("open measurement stream: %w", err)
+		cancel()
+		return fmt.Errorf("connect to measurement server: %w", err)
 	}
 
 	var counters responseCounters
 	workerErrors := make(chan error, 2)
 	var workers sync.WaitGroup
-	workers.Go(func() {
-		workerErrors <- sendRequests(streamContext, stream, &config, bootID)
-	})
-	workers.Go(func() {
-		workerErrors <- receiveResponses(stream, &counters)
-	})
+	workers.Go(func() { workerErrors <- sendRequests(ctx, connection, &config, bootID) })
+	workers.Go(func() { workerErrors <- receiveResponses(connection, &counters) })
 
-	if err := waitInterval(streamContext, workerErrors, config.warmup); err != nil {
-		cancelStream()
+	if err := waitInterval(ctx, workerErrors, config.warmup); err != nil {
+		cancel()
+		_ = connection.Close()
 		workers.Wait()
 		return fmt.Errorf("warmup: %w", err)
 	}
 	initialAcquires := counters.acquires.Load()
 	initialReleases := counters.releases.Load()
 	started := time.Now()
-	if err := waitInterval(streamContext, workerErrors, config.duration); err != nil {
-		cancelStream()
+	if err := waitInterval(ctx, workerErrors, config.duration); err != nil {
+		cancel()
+		_ = connection.Close()
 		workers.Wait()
 		return fmt.Errorf("measurement: %w", err)
 	}
@@ -113,7 +98,8 @@ func run(args []string, output, flagOutput io.Writer) error {
 	acquires := counters.acquires.Load() - initialAcquires
 	releases := counters.releases.Load() - initialReleases
 
-	cancelStream()
+	cancel()
+	_ = connection.Close()
 	workers.Wait()
 
 	_, err = fmt.Fprintf(
@@ -139,9 +125,9 @@ func run(args []string, output, flagOutput io.Writer) error {
 
 func parseOptions(args []string, output io.Writer) (options, error) {
 	config := options{}
-	flags := flag.NewFlagSet("redlease-grpc-load", flag.ContinueOnError)
+	flags := flag.NewFlagSet("redlease-tcp-load", flag.ContinueOnError)
 	flags.SetOutput(output)
-	flags.StringVar(&config.target, "target", defaultTarget, "address of an already running gRPC lock-server")
+	flags.StringVar(&config.target, "target", defaultTarget, "address of an already running TCP lock-server")
 	flags.Uint64Var(&config.keyCount, "keys", defaultKeyCount, "number of resource keys used in round-robin order")
 	flags.Uint64Var(&config.ttlMS, "ttl-ms", defaultTTLMS, "requested lease TTL in milliseconds")
 	flags.DurationVar(&config.duration, "duration", defaultDuration, "measurement duration")
@@ -183,67 +169,51 @@ func newBootID() (uint32, error) {
 	return bootID, nil
 }
 
-func waitForActive(
-	parent context.Context,
-	rpc redleasev1.RedLeaseClient,
-	config *options,
-	bootID uint32,
-) error {
+func waitForActive(parent context.Context, config *options, bootID uint32) error {
 	ctx, cancel := context.WithTimeout(parent, config.readyTimeout)
 	defer cancel()
-	stream, err := rpc.LeaseStream(ctx, grpc.WaitForReady(true))
+	connection, err := transport.Dial(ctx, config.target)
 	if err != nil {
-		return fmt.Errorf("open readiness stream: %w", err)
+		return fmt.Errorf("connect for readiness check: %w", err)
 	}
-	defer func() { _ = stream.CloseSend() }()
+	defer func() { _ = connection.Close() }()
+	go func() {
+		<-ctx.Done()
+		_ = connection.Close()
+	}()
 
 	for sequence := uint64(1); ; sequence++ {
-		leaseID := &redleasev1.LeaseID{ClientId: 1, BootId: bootID, LeaseSeq: sequence}
 		requestID := sequence*2 - 1
-		if err := stream.Send(&redleasev1.ClientRequest{
-			RequestId: requestID,
-			Operation: &redleasev1.ClientRequest_Acquire{Acquire: &redleasev1.AcquireRequest{
-				Key:            0,
-				LeaseId:        leaseID,
-				RequestedTtlMs: config.ttlMS,
-			}},
+		if err := connection.Send(protocol.Request{
+			RequestID: requestID, Operation: protocol.OperationAcquire, Key: 0,
+			ClientID: 1, BootID: bootID, LeaseSequence: sequence, RequestedTTLMS: config.ttlMS,
 		}); err != nil {
 			return fmt.Errorf("send readiness Acquire: %w", err)
 		}
-		response, err := stream.Recv()
+		response, err := connection.Recv()
 		if err != nil {
 			return fmt.Errorf("receive readiness Acquire: %w", err)
 		}
-		acquire := response.GetAcquire()
-		if acquire == nil {
-			return fmt.Errorf("readiness request %d: unexpected response type", response.GetRequestId())
+		if response.Operation != protocol.OperationAcquire {
+			return fmt.Errorf("readiness request %d: unexpected response operation %d", response.RequestID, response.Operation)
 		}
-		switch acquire.GetStatus() {
-		case redleasev1.LeaseStatus_LEASE_STATUS_OK:
-			if err := stream.Send(&redleasev1.ClientRequest{
-				RequestId: requestID + 1,
-				Operation: &redleasev1.ClientRequest_Release{Release: &redleasev1.ReleaseRequest{
-					Key:     0,
-					LeaseId: leaseID,
-				}},
+		switch response.Status {
+		case protocol.StatusOK:
+			if err := connection.Send(protocol.Request{
+				RequestID: requestID + 1, Operation: protocol.OperationRelease, Key: 0,
+				ClientID: 1, BootID: bootID, LeaseSequence: sequence,
 			}); err != nil {
 				return fmt.Errorf("send readiness Release: %w", err)
 			}
-			releaseResponse, err := stream.Recv()
+			release, err := connection.Recv()
 			if err != nil {
 				return fmt.Errorf("receive readiness Release: %w", err)
 			}
-			release := releaseResponse.GetRelease()
-			if release == nil {
-				return fmt.Errorf("readiness request %d: unexpected response type", releaseResponse.GetRequestId())
-			}
-			if status := release.GetStatus(); status != redleasev1.LeaseStatus_LEASE_STATUS_OK {
-				return fmt.Errorf("readiness Release status: %s", status)
+			if release.Operation != protocol.OperationRelease || release.Status != protocol.StatusOK {
+				return fmt.Errorf("readiness Release response: operation=%d status=%d", release.Operation, release.Status)
 			}
 			return nil
-
-		case redleasev1.LeaseStatus_LEASE_STATUS_NOT_READY,
-			redleasev1.LeaseStatus_LEASE_STATUS_BUSY:
+		case protocol.StatusNotReady, protocol.StatusBusy:
 			timer := time.NewTimer(25 * time.Millisecond)
 			select {
 			case <-timer.C:
@@ -251,20 +221,13 @@ func waitForActive(
 				timer.Stop()
 				return fmt.Errorf("wait for ACTIVE server: %w", ctx.Err())
 			}
-
 		default:
-			return fmt.Errorf("readiness Acquire status: %s", acquire.GetStatus())
+			return fmt.Errorf("readiness Acquire status: %d", response.Status)
 		}
 	}
 }
 
-func sendRequests(
-	ctx context.Context,
-	stream grpc.BidiStreamingClient[redleasev1.ClientRequest, redleasev1.ServerResponse],
-	config *options,
-	bootID uint32,
-) error {
-	defer func() { _ = stream.CloseSend() }()
+func sendRequests(ctx context.Context, connection *transport.Connection, config *options, bootID uint32) error {
 	for sequence := uint64(1); ; sequence++ {
 		select {
 		case <-ctx.Done():
@@ -273,54 +236,38 @@ func sendRequests(
 		}
 
 		key := (sequence-1)%config.keyCount + 1
-		leaseID := &redleasev1.LeaseID{ClientId: 1, BootId: bootID, LeaseSeq: sequence}
 		requestID := sequence*2 - 1
-		if err := stream.Send(&redleasev1.ClientRequest{
-			RequestId: requestID,
-			Operation: &redleasev1.ClientRequest_Acquire{Acquire: &redleasev1.AcquireRequest{
-				Key:            key,
-				LeaseId:        leaseID,
-				RequestedTtlMs: config.ttlMS,
-			}},
+		if err := connection.Send(protocol.Request{
+			RequestID: requestID, Operation: protocol.OperationAcquire, Key: key,
+			ClientID: 1, BootID: bootID, LeaseSequence: sequence, RequestedTTLMS: config.ttlMS,
 		}); err != nil {
 			return fmt.Errorf("send Acquire: %w", err)
 		}
-		if err := stream.Send(&redleasev1.ClientRequest{
-			RequestId: requestID + 1,
-			Operation: &redleasev1.ClientRequest_Release{Release: &redleasev1.ReleaseRequest{
-				Key:     key,
-				LeaseId: leaseID,
-			}},
+		if err := connection.Send(protocol.Request{
+			RequestID: requestID + 1, Operation: protocol.OperationRelease, Key: key,
+			ClientID: 1, BootID: bootID, LeaseSequence: sequence,
 		}); err != nil {
 			return fmt.Errorf("send Release: %w", err)
 		}
 	}
 }
 
-func receiveResponses(
-	stream grpc.BidiStreamingClient[redleasev1.ClientRequest, redleasev1.ServerResponse],
-	counters *responseCounters,
-) error {
+func receiveResponses(connection *transport.Connection, counters *responseCounters) error {
 	for {
-		response, err := stream.Recv()
+		response, err := connection.Recv()
 		if err != nil {
 			return fmt.Errorf("receive response: %w", err)
 		}
-		switch result := response.GetResult().(type) {
-		case *redleasev1.ServerResponse_Acquire:
-			if status := result.Acquire.GetStatus(); status != redleasev1.LeaseStatus_LEASE_STATUS_OK {
-				return fmt.Errorf("Acquire request %d: %s", response.GetRequestId(), status)
-			}
+		if response.Status != protocol.StatusOK {
+			return fmt.Errorf("request %d: status %d", response.RequestID, response.Status)
+		}
+		switch response.Operation {
+		case protocol.OperationAcquire:
 			counters.acquires.Add(1)
-
-		case *redleasev1.ServerResponse_Release:
-			if status := result.Release.GetStatus(); status != redleasev1.LeaseStatus_LEASE_STATUS_OK {
-				return fmt.Errorf("Release request %d: %s", response.GetRequestId(), status)
-			}
+		case protocol.OperationRelease:
 			counters.releases.Add(1)
-
 		default:
-			return fmt.Errorf("request %d: unexpected response type", response.GetRequestId())
+			return fmt.Errorf("request %d: unexpected response operation %d", response.RequestID, response.Operation)
 		}
 	}
 }

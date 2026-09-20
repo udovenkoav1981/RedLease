@@ -9,11 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"google.golang.org/grpc"
-
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
 	"github.com/udovenkoav1981/RedLease/internal/leaseid"
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
 // ErrClientClosed is returned when an operation is attempted after Close.
@@ -34,22 +32,21 @@ func (e *serverUnavailableError) Unwrap() error {
 	return e.cause
 }
 
-// Client owns one persistent reconnecting stream to one lock-server.
+// Client owns one persistent reconnecting TCP connection to one lock-server.
 type Client struct {
 	clientID        uint32
 	bootID          uint32
 	nextSequence    atomic.Uint64
+	nextRequestID   atomic.Uint64
 	responseTimeout time.Duration
 	logger          *slog.Logger
-
-	connection *grpc.ClientConn
-	rpc        redleasev1.RedLeaseClient
+	target          string
 
 	ctx    context.Context //nolint:containedctx // Client owns this lifecycle context.
 	cancel context.CancelFunc
 
 	stateMu    sync.Mutex
-	generation *streamGeneration
+	generation *connectionGeneration
 	lastErr    error
 	closed     bool
 	changed    chan struct{}
@@ -58,10 +55,14 @@ type Client struct {
 
 	closeOnce sync.Once
 	closeErr  error
+
+	requestPool       sync.Pool
+	responseTimerPool sync.Pool
 }
 
 // New creates a client and starts connecting to its lock-server. It does not
-// wait for the stream; callers that need a startup barrier can call WaitReady.
+// wait for the connection; callers that need a startup barrier can call
+// WaitReady.
 func New(config Config) (*Client, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
@@ -70,37 +71,31 @@ func New(config Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	connection, err := grpc.NewClient(config.Target, config.DialOptions...)
-	if err != nil {
-		return nil, fmt.Errorf("create server connection: %w", err)
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	client := &Client{
 		clientID:        config.ClientID,
 		bootID:          bootID,
 		responseTimeout: defaultResponseTimeout,
+		target:          config.Target,
 		logger: config.Logger.With(
 			slog.String("component", "redlease-client"),
 			slog.Uint64("client_id", uint64(config.ClientID)),
 			slog.String("server_target", config.Target),
 		),
-		connection: connection,
-		rpc:        redleasev1.NewRedLeaseClient(connection),
-		ctx:        ctx,
-		cancel:     cancel,
-		changed:    make(chan struct{}),
+		ctx:     ctx,
+		cancel:  cancel,
+		changed: make(chan struct{}),
 	}
 	if config.ResponseTimeout != 0 {
 		client.responseTimeout = time.Duration(config.ResponseTimeout) * time.Millisecond
 	}
 
 	client.manager.Add(1)
-	go client.manageStream()
+	go client.manageConnection()
 	return client, nil
 }
 
-// WaitReady waits until the stream to the lock-server is connected. It does
+// WaitReady waits until the TCP connection to the lock-server is established. It does
 // not wait for the server to leave restart quarantine.
 func (c *Client) WaitReady(ctx context.Context) error {
 	for {
@@ -151,34 +146,33 @@ func (c *Client) Close() error {
 			generation.Close()
 		}
 		c.manager.Wait()
-		c.closeErr = c.connection.Close()
 	})
 	return c.closeErr
 }
 
 func (c *Client) submit(
-	ctx context.Context,
-	request *redleasev1.ClientRequest,
-) (*streamFuture, error) {
+	request *outboundConnectionRequest,
+) (*connectionFuture, error) {
 	generation, err := c.currentGeneration()
 	if err != nil {
+		request.recycle()
 		return nil, err
 	}
-	return generation.submit(ctx, request)
+	return generation.submit(request)
 }
 
 func (c *Client) submitNoResponse(
-	ctx context.Context,
-	request *redleasev1.ClientRequest,
+	request *outboundConnectionRequest,
 ) error {
 	generation, err := c.currentGeneration()
 	if err != nil {
+		request.recycle()
 		return err
 	}
-	return generation.submitNoResponse(ctx, request)
+	return generation.submitNoResponse(request)
 }
 
-func (c *Client) currentGeneration() (*streamGeneration, error) {
+func (c *Client) currentGeneration() (*connectionGeneration, error) {
 	c.stateMu.Lock()
 	generation := c.generation
 	cause := c.lastErr
@@ -193,15 +187,6 @@ func (c *Client) currentGeneration() (*streamGeneration, error) {
 	return generation, nil
 }
 
-func (c *Client) operationContext(caller context.Context) (context.Context, func()) {
-	ctx, cancel := context.WithTimeout(c.ctx, c.responseTimeout)
-	stopCallerCancellation := context.AfterFunc(caller, cancel)
-	return ctx, func() {
-		stopCallerCancellation()
-		cancel()
-	}
-}
-
 func (c *Client) cancellationError(caller context.Context) error {
 	if err := caller.Err(); err != nil {
 		return err
@@ -212,21 +197,19 @@ func (c *Client) cancellationError(caller context.Context) error {
 	return nil
 }
 
-func (c *Client) manageStream() {
+func (c *Client) manageConnection() {
 	defer c.manager.Done()
 
 	var attempt uint
 	unavailable := false
 	retryBackoff := backoff.Default()
 	for {
-		streamContext, cancelStream := context.WithCancel(c.ctx)
-		stream, err := c.rpc.LeaseStream(streamContext)
+		connection, err := transport.Dial(c.ctx, c.target)
 		if err != nil {
-			cancelStream()
-			c.recordFailure(fmt.Errorf("open stream: %w", err))
+			c.recordFailure(fmt.Errorf("open connection: %w", err))
 			if !unavailable && c.ctx.Err() == nil {
 				c.logger.Warn(
-					"server stream unavailable",
+					"server connection unavailable",
 					slog.String("reason", "connect_failed"),
 					slog.Any("error", err),
 				)
@@ -239,13 +222,13 @@ func (c *Client) manageStream() {
 			continue
 		}
 
-		generation := newStreamGeneration(stream, cancelStream)
+		generation := newConnectionGeneration(connection, func() {})
 		if !c.publish(generation) {
 			generation.Close()
 			return
 		}
 		c.logger.Info(
-			"server stream connected",
+			"server connection established",
 			slog.Bool("reconnected", unavailable),
 			slog.Uint64("attempt", uint64(attempt+1)),
 		)
@@ -263,8 +246,8 @@ func (c *Client) manageStream() {
 			return
 		}
 		c.logger.Warn(
-			"server stream unavailable",
-			slog.String("reason", "stream_terminated"),
+			"server connection unavailable",
+			slog.String("reason", "connection_terminated"),
 			slog.Any("error", cause),
 		)
 		unavailable = true
@@ -275,7 +258,7 @@ func (c *Client) manageStream() {
 	}
 }
 
-func (c *Client) publish(generation *streamGeneration) bool {
+func (c *Client) publish(generation *connectionGeneration) bool {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	if c.closed {
@@ -287,7 +270,7 @@ func (c *Client) publish(generation *streamGeneration) bool {
 	return true
 }
 
-func (c *Client) clear(generation *streamGeneration, cause error) {
+func (c *Client) clear(generation *connectionGeneration, cause error) {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	if c.generation != generation {

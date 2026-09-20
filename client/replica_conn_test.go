@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
 func TestReplicaConnLogsStateTransitionsWithoutRetrySpam(t *testing.T) {
@@ -39,10 +39,10 @@ func TestReplicaConnLogsStateTransitionsWithoutRetrySpam(t *testing.T) {
 	}
 
 	logs := output.String()
-	if got := strings.Count(logs, `"msg":"replica stream unavailable"`); got != 2 {
+	if got := strings.Count(logs, `"msg":"replica connection unavailable"`); got != 2 {
 		t.Fatalf("unavailable log count = %d, want 2; logs:\n%s", got, logs)
 	}
-	if got := strings.Count(logs, `"msg":"replica stream connected"`); got != 2 {
+	if got := strings.Count(logs, `"msg":"replica connection established"`); got != 2 {
 		t.Fatalf("connected log count = %d, want 2; logs:\n%s", got, logs)
 	}
 	for _, fragment := range []string{
@@ -51,7 +51,7 @@ func TestReplicaConnLogsStateTransitionsWithoutRetrySpam(t *testing.T) {
 		`"replica_index":2`,
 		`"server_target":"server-2"`,
 		`"reason":"connect_failed"`,
-		`"reason":"stream_terminated"`,
+		`"reason":"connection_terminated"`,
 		`"reconnected":true`,
 	} {
 		if !strings.Contains(logs, fragment) {
@@ -96,7 +96,7 @@ func TestReplicaConnReconnectsAfterGenerationFailure(t *testing.T) {
 	result := startReplicaCall(connection, acquireStreamRequest(1))
 	request := receiveSentRequest(t, secondStream)
 	secondStream.receive <- fakeReceive{
-		response: streamResponse(request.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
+		response: streamResponse(request.RequestID, protocol.StatusOK),
 	}
 	if received := receiveCallResult(t, result); received.err != nil {
 		t.Fatalf("call after reconnect failed: %v", received.err)
@@ -114,10 +114,10 @@ func TestReplicaConnReconnectsWhenRequestDeadlineBreaksBlockedSend(t *testing.T)
 	factory.results <- streamFactoryResult{stream: secondStream}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	result := make(chan streamCallResult, 1)
+	result := make(chan connectionCallResult, 1)
 	go func() {
 		response, err := connection.call(ctx, acquireStreamRequest(1))
-		result <- streamCallResult{response: response, err: err}
+		result <- connectionCallResult{response: response, err: err}
 	}()
 	firstStream.waitForSendAttempt(t)
 	if err := receiveCallResult(t, result).err; !errors.Is(err, context.DeadlineExceeded) {
@@ -129,7 +129,7 @@ func TestReplicaConnReconnectsWhenRequestDeadlineBreaksBlockedSend(t *testing.T)
 	secondResult := startReplicaCall(connection, acquireStreamRequest(2))
 	request := receiveSentRequest(t, secondStream)
 	secondStream.receive <- fakeReceive{
-		response: streamResponse(request.GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
+		response: streamResponse(request.RequestID, protocol.StatusOK),
 	}
 	if received := receiveCallResult(t, secondResult); received.err != nil {
 		t.Fatalf("call after reconnect failed: %v", received.err)
@@ -161,7 +161,7 @@ func TestReplicaConnCloseStopsPendingCallAndFactory(t *testing.T) {
 	if err := connection.Close(); !errors.Is(err, closeFailure) {
 		t.Fatalf("Close error = %v, want %v", err, closeFailure)
 	}
-	assertTransportCause(t, receiveCallResult(t, result).err, errStreamClosed)
+	assertTransportCause(t, receiveCallResult(t, result).err, errConnectionClosed)
 	waitForReplicaState(t, connection, false, true)
 
 	if err := connection.Close(); !errors.Is(err, closeFailure) {
@@ -170,8 +170,8 @@ func TestReplicaConnCloseStopsPendingCallAndFactory(t *testing.T) {
 	if calls := factory.closeCalls.Load(); calls != 1 {
 		t.Fatalf("factory close calls = %d, want 1", calls)
 	}
-	if calls := stream.closeSendCalls.Load(); calls != 1 {
-		t.Fatalf("stream CloseSend calls = %d, want 1", calls)
+	if calls := stream.closeCalls.Load(); calls != 1 {
+		t.Fatalf("connection Close calls = %d, want 1", calls)
 	}
 
 	_, err := connection.call(context.Background(), acquireStreamRequest(1))
@@ -186,18 +186,18 @@ func TestReplicaConnConcurrentCalls(t *testing.T) {
 	waitForReplicaState(t, connection, true, false)
 
 	const calls = 64
-	results := make([]<-chan streamCallResult, calls)
+	results := make([]<-chan connectionCallResult, calls)
 	for i := range calls {
 		results[i] = startReplicaCall(connection, acquireStreamRequest(uint64(i+1)))
 	}
 
-	requests := make([]*redleasev1.ClientRequest, calls)
+	requests := make([]protocol.Request, calls)
 	for i := range calls {
 		requests[i] = receiveSentRequest(t, stream)
 	}
 	for i := calls - 1; i >= 0; i-- {
 		stream.receive <- fakeReceive{
-			response: streamResponse(requests[i].GetRequestId(), redleasev1.LeaseStatus_LEASE_STATUS_OK),
+			response: streamResponse(requests[i].RequestID, protocol.StatusOK),
 		}
 	}
 	for _, result := range results {
@@ -224,7 +224,7 @@ func newScriptedStreamFactory() *scriptedStreamFactory {
 	return &scriptedStreamFactory{results: make(chan streamFactoryResult, 16)}
 }
 
-func (f *scriptedStreamFactory) open(ctx context.Context) (leaseClientStream, error) {
+func (f *scriptedStreamFactory) open(ctx context.Context) (leaseConnection, error) {
 	f.openCalls.Add(1)
 	select {
 	case result := <-f.results:
@@ -244,7 +244,7 @@ func (f *scriptedStreamFactory) close() error {
 
 func newTestReplicaConn(
 	t *testing.T,
-	factory streamFactory,
+	factory connectionFactory,
 ) *replicaConn {
 	t.Helper()
 	connection := newTestReplicaConnWithoutCleanup(factory)
@@ -252,26 +252,27 @@ func newTestReplicaConn(
 	return connection
 }
 
-func newTestReplicaConnWithoutCleanup(factory streamFactory) *replicaConn {
+func newTestReplicaConnWithoutCleanup(factory connectionFactory) *replicaConn {
 	return newReplicaConn(factory, testLogger)
 }
 
 func newReplicaFakeStream() *fakeLeaseClientStream {
 	return &fakeLeaseClientStream{
-		sent:        make(chan *redleasev1.ClientRequest),
+		sent:        make(chan protocol.Request),
 		receive:     make(chan fakeReceive, 256),
 		sendAttempt: make(chan struct{}),
+		closed:      make(chan struct{}),
 	}
 }
 
 func startReplicaCall(
 	connection *replicaConn,
-	request *redleasev1.ClientRequest,
-) <-chan streamCallResult {
-	result := make(chan streamCallResult, 1)
+	request protocol.Request,
+) <-chan connectionCallResult {
+	result := make(chan connectionCallResult, 1)
 	go func() {
 		response, err := connection.call(context.Background(), request)
-		result <- streamCallResult{response: response, err: err}
+		result <- connectionCallResult{response: response, err: err}
 	}()
 	return result
 }
@@ -328,6 +329,6 @@ func assertReplicaUnavailableCause(t *testing.T, err, cause error) {
 // Assert that the test-only stream still satisfies the production factory
 // result type after concurrent lifecycle tests evolve.
 var (
-	_ leaseClientStream = (*fakeLeaseClientStream)(nil)
-	_ streamFactory     = (*scriptedStreamFactory)(nil)
+	_ leaseConnection   = (*fakeLeaseClientStream)(nil)
+	_ connectionFactory = (*scriptedStreamFactory)(nil)
 )

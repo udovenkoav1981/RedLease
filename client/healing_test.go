@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
 func TestBackgroundHealingRetriesMissingReplicasToFiveOfFive(t *testing.T) {
@@ -19,7 +19,7 @@ func TestBackgroundHealingRetriesMissingReplicasToFiveOfFive(t *testing.T) {
 		harness.respondAcquire(
 			replica,
 			initial[replica],
-			redleasev1.LeaseStatus_LEASE_STATUS_OK,
+			protocol.StatusOK,
 			2_000,
 		)
 	}
@@ -33,7 +33,7 @@ func TestBackgroundHealingRetriesMissingReplicasToFiveOfFive(t *testing.T) {
 		harness.respondAcquire(
 			replica,
 			initial[replica],
-			redleasev1.LeaseStatus_LEASE_STATUS_BUSY,
+			protocol.StatusBusy,
 			0,
 		)
 	}
@@ -42,8 +42,8 @@ func TestBackgroundHealingRetriesMissingReplicasToFiveOfFive(t *testing.T) {
 	firstFifth := receiveAcquireRequest(t, harness.streams[4])
 	assertHealingAcquire(t, firstFourth, initial[3])
 	assertHealingAcquire(t, firstFifth, initial[4])
-	harness.respondAcquire(3, firstFourth, redleasev1.LeaseStatus_LEASE_STATUS_OK, 2_000)
-	harness.respondAcquire(4, firstFifth, redleasev1.LeaseStatus_LEASE_STATUS_BUSY, 0)
+	harness.respondAcquire(3, firstFourth, protocol.StatusOK, 2_000)
+	harness.respondAcquire(4, firstFifth, protocol.StatusBusy, 0)
 
 	waitForConfirmedReplicas(
 		t,
@@ -53,7 +53,7 @@ func TestBackgroundHealingRetriesMissingReplicasToFiveOfFive(t *testing.T) {
 
 	secondFifth := receiveAcquireRequest(t, harness.streams[4])
 	assertHealingAcquire(t, secondFifth, initial[4])
-	harness.respondAcquire(4, secondFifth, redleasev1.LeaseStatus_LEASE_STATUS_OK, 2_000)
+	harness.respondAcquire(4, secondFifth, protocol.StatusOK, 2_000)
 	waitForConfirmedReplicas(
 		t,
 		acquired.lease,
@@ -72,9 +72,9 @@ func TestBackgroundHealingReattachesReplicaAfterStaleRenew(t *testing.T) {
 	renewResult := startLeaseRenew(lease, context.Background(), 3_000)
 	renewRequests := harness.receiveRenewRequests(t)
 	for replica := range testServerCount {
-		status := redleasev1.LeaseStatus_LEASE_STATUS_OK
+		status := protocol.StatusOK
 		if replica == 4 {
-			status = redleasev1.LeaseStatus_LEASE_STATUS_STALE
+			status = protocol.StatusStale
 		}
 		harness.respondRenew(replica, renewRequests[replica], status, 3_000)
 	}
@@ -89,16 +89,13 @@ func TestBackgroundHealingReattachesReplicaAfterStaleRenew(t *testing.T) {
 	)
 
 	healing := receiveAcquireRequest(t, harness.streams[4])
-	if got := healing.GetAcquire().GetRequestedTtlMs(); got != 2_000 {
+	if got := healing.RequestedTTLMS; got != 2_000 {
 		t.Fatalf("healing requested TTL = %d, want original Acquire TTL 2000", got)
 	}
-	if !sameProtobufLeaseID(
-		healing.GetAcquire().GetLeaseId(),
-		renewRequests[4].GetRenew().GetLeaseId(),
-	) {
+	if !sameLeaseID(healing, renewRequests[4]) {
 		t.Fatal("healing after stale Renew used a different lease ID")
 	}
-	harness.respondAcquire(4, healing, redleasev1.LeaseStatus_LEASE_STATUS_OK, 2_000)
+	harness.respondAcquire(4, healing, protocol.StatusOK, 2_000)
 	waitForConfirmedReplicas(t, lease, [testServerCount]bool{true, true, true, true, true})
 
 	if got := leaseValidUntil(lease); got != renewedValidUntil {
@@ -115,7 +112,7 @@ func TestBackgroundHealingContinuesAfterReplicaReconnect(t *testing.T) {
 		harness.respondAcquire(
 			replica,
 			initial[replica],
-			redleasev1.LeaseStatus_LEASE_STATUS_OK,
+			protocol.StatusOK,
 			5_000,
 		)
 	}
@@ -123,7 +120,7 @@ func TestBackgroundHealingContinuesAfterReplicaReconnect(t *testing.T) {
 	if acquired.err != nil {
 		t.Fatalf("Acquire: %v", acquired.err)
 	}
-	harness.respondAcquire(3, initial[3], redleasev1.LeaseStatus_LEASE_STATUS_BUSY, 0)
+	harness.respondAcquire(3, initial[3], protocol.StatusBusy, 0)
 	harness.streams[4].receive <- fakeReceive{err: errors.New("replica restart")}
 
 	reconnected := newReplicaFakeStream()
@@ -133,11 +130,11 @@ func TestBackgroundHealingContinuesAfterReplicaReconnect(t *testing.T) {
 
 	fourth := receiveAcquireRequest(t, harness.streams[3])
 	assertHealingAcquire(t, fourth, initial[3])
-	harness.respondAcquire(3, fourth, redleasev1.LeaseStatus_LEASE_STATUS_OK, 5_000)
+	harness.respondAcquire(3, fourth, protocol.StatusOK, 5_000)
 
 	fifth := receiveAcquireRequest(t, reconnected)
 	assertHealingAcquire(t, fifth, initial[4])
-	harness.respondAcquire(4, fifth, redleasev1.LeaseStatus_LEASE_STATUS_OK, 5_000)
+	harness.respondAcquire(4, fifth, protocol.StatusOK, 5_000)
 
 	waitForConfirmedReplicas(
 		t,
@@ -155,7 +152,7 @@ func TestBackgroundHealingStopsAfterLocalValidityExpires(t *testing.T) {
 		harness.respondAcquire(
 			replica,
 			initial[replica],
-			redleasev1.LeaseStatus_LEASE_STATUS_OK,
+			protocol.StatusOK,
 			1_000,
 		)
 	}
@@ -171,7 +168,7 @@ func TestBackgroundHealingStopsAfterLocalValidityExpires(t *testing.T) {
 		harness.respondAcquire(
 			replica,
 			initial[replica],
-			redleasev1.LeaseStatus_LEASE_STATUS_BUSY,
+			protocol.StatusBusy,
 			0,
 		)
 	}
@@ -194,7 +191,7 @@ func TestBackgroundHealingStopsBeforeReleaseSubmission(t *testing.T) {
 		harness.respondAcquire(
 			replica,
 			initial[replica],
-			redleasev1.LeaseStatus_LEASE_STATUS_OK,
+			protocol.StatusOK,
 			2_000,
 		)
 	}
@@ -206,7 +203,7 @@ func TestBackgroundHealingStopsBeforeReleaseSubmission(t *testing.T) {
 		harness.respondAcquire(
 			replica,
 			initial[replica],
-			redleasev1.LeaseStatus_LEASE_STATUS_BUSY,
+			protocol.StatusBusy,
 			0,
 		)
 	}
@@ -241,7 +238,7 @@ func TestBackgroundHealingDoesNotAcquireAfterReleaseAndReconnect(t *testing.T) {
 		harness.respondAcquire(
 			replica,
 			initial[replica],
-			redleasev1.LeaseStatus_LEASE_STATUS_OK,
+			protocol.StatusOK,
 			2_000,
 		)
 	}
@@ -266,10 +263,10 @@ func TestBackgroundHealingDoesNotAcquireAfterReleaseAndReconnect(t *testing.T) {
 	harness.streams[4] = reconnected
 
 	request := receiveSentRequest(t, reconnected)
-	if request.GetRelease() == nil {
+	if request.Operation != protocol.OperationRelease {
 		t.Fatalf("first request after Release and reconnect is not Release: %+v", request)
 	}
-	if !sameProtobufLeaseID(request.GetRelease().GetLeaseId(), initial[4].GetAcquire().GetLeaseId()) {
+	if !sameLeaseID(request, initial[4]) {
 		t.Fatal("Release after reconnect used a different lease ID")
 	}
 	harness.respondRelease(4, request)
@@ -284,20 +281,17 @@ func TestBackgroundHealingDoesNotAcquireAfterReleaseAndReconnect(t *testing.T) {
 
 func assertHealingAcquire(
 	t *testing.T,
-	healing *redleasev1.ClientRequest,
-	initial *redleasev1.ClientRequest,
+	healing protocol.Request,
+	initial protocol.Request,
 ) {
 	t.Helper()
-	if healing.GetAcquire().GetKey() != initial.GetAcquire().GetKey() {
+	if healing.Key != initial.Key {
 		t.Fatal("healing used a different key")
 	}
-	if !sameProtobufLeaseID(
-		healing.GetAcquire().GetLeaseId(),
-		initial.GetAcquire().GetLeaseId(),
-	) {
+	if !sameLeaseID(healing, initial) {
 		t.Fatal("healing used a different lease ID")
 	}
-	if healing.GetAcquire().GetRequestedTtlMs() != initial.GetAcquire().GetRequestedTtlMs() {
+	if healing.RequestedTTLMS != initial.RequestedTTLMS {
 		t.Fatal("healing used a different requested TTL")
 	}
 }

@@ -3,7 +3,7 @@ package client
 import (
 	"testing"
 
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
 func TestAcquireQuorumZeroTTLIsExpired(t *testing.T) {
@@ -56,7 +56,7 @@ func TestAcquireQuorumRejectsExpiredValidity(t *testing.T) {
 }
 
 func TestAcquireQuorumAcceptsAlreadyOwned(t *testing.T) {
-	if !isSuccessfulAcquire(redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED) {
+	if !isSuccessfulAcquire(protocol.StatusAlreadyOwned) {
 		t.Fatal("ALREADY_OWNED did not count as an Acquire success")
 	}
 }

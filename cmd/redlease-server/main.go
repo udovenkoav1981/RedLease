@@ -19,7 +19,6 @@ import (
 
 	clientprometheus "github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"google.golang.org/grpc"
 
 	"github.com/udovenkoav1981/RedLease/server"
 	redleaseprometheus "github.com/udovenkoav1981/RedLease/server/prometheus"
@@ -31,13 +30,13 @@ const (
 )
 
 type launcherConfig struct {
-	listenAddress        string
-	metricsListenAddress string
-	configuredMaxTTLMS   uint64
-	maxKeys              uint64
-	shardCount           uint32
-	shardQueueDepth      uint32
-	maxInFlightPerStream uint32
+	listenAddress            string
+	metricsListenAddress     string
+	configuredMaxTTLMS       uint64
+	maxKeys                  uint64
+	shardCount               uint32
+	shardQueueDepth          uint32
+	maxInFlightPerConnection uint32
 }
 
 func main() {
@@ -68,7 +67,7 @@ func run(args []string, flagOutput io.Writer, logger *slog.Logger) (runErr error
 	defer func() {
 		closeErr := listener.Close()
 		if closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
-			runErr = errors.Join(runErr, fmt.Errorf("close gRPC listener: %w", closeErr))
+			runErr = errors.Join(runErr, fmt.Errorf("close TCP listener: %w", closeErr))
 		}
 	}()
 
@@ -81,10 +80,6 @@ func run(args []string, flagOutput io.Writer, logger *slog.Logger) (runErr error
 			runErr = errors.Join(runErr, fmt.Errorf("close RedLease server: %w", closeErr))
 		}
 	}()
-
-	grpcServer := grpc.NewServer()
-	leaseServer.Register(grpcServer)
-	defer grpcServer.Stop()
 
 	var metrics *metricsEndpoint
 	if config.metricsListenAddress != "" {
@@ -100,13 +95,13 @@ func run(args []string, flagOutput io.Writer, logger *slog.Logger) (runErr error
 	}
 
 	logger.Info(
-		"listening with plaintext gRPC (local testing only)",
+		"listening with plaintext TCP (local testing only)",
 		slog.String("address", listener.Addr().String()),
 	)
 
 	serveErr := make(chan error, 1)
 	go func() {
-		serveErr <- grpcServer.Serve(listener)
+		serveErr <- leaseServer.Serve(listener)
 	}()
 	var metricsServeErr <-chan error
 	if metrics != nil {
@@ -119,8 +114,8 @@ func run(args []string, flagOutput io.Writer, logger *slog.Logger) (runErr error
 
 	select {
 	case err := <-serveErr:
-		if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
-			return fmt.Errorf("serve gRPC: %w", err)
+		if err != nil {
+			return fmt.Errorf("serve TCP: %w", err)
 		}
 		return nil
 
@@ -133,23 +128,20 @@ func run(args []string, flagOutput io.Writer, logger *slog.Logger) (runErr error
 	case received := <-signals:
 		logger.Info("shutdown requested", slog.String("signal", received.String()))
 		if err := leaseServer.Close(); err != nil {
-			grpcServer.Stop()
 			return fmt.Errorf("close RedLease server: %w", err)
 		}
-		grpcServer.GracefulStop()
-		if err := <-serveErr; err != nil && !errors.Is(err, grpc.ErrServerStopped) {
-			return fmt.Errorf("serve gRPC during shutdown: %w", err)
+		if err := <-serveErr; err != nil {
+			return fmt.Errorf("serve TCP during shutdown: %w", err)
 		}
 		logger.Info("standalone server stopped")
 		return nil
 
 	case fatalErr := <-leaseServer.Fatal():
 		logger.Error("server failure received; shutting down", slog.Any("error", fatalErr))
-		grpcServer.Stop()
 		closeErr := leaseServer.Close()
 		serveResult := <-serveErr
-		if serveResult != nil && !errors.Is(serveResult, grpc.ErrServerStopped) {
-			serveResult = fmt.Errorf("serve gRPC during failed shutdown: %w", serveResult)
+		if serveResult != nil {
+			serveResult = fmt.Errorf("serve TCP during failed shutdown: %w", serveResult)
 		} else {
 			serveResult = nil
 		}
@@ -199,13 +191,13 @@ func parseFlags(args []string, output io.Writer) (launcherConfig, error) {
 	)
 	uint32Flag(
 		flags,
-		&config.maxInFlightPerStream,
-		"max-in-flight-per-stream",
-		"maximum requests in flight per stream (0 uses the library default)",
+		&config.maxInFlightPerConnection,
+		"max-in-flight-per-connection",
+		"maximum requests in flight per TCP connection (0 uses the library default)",
 	)
 	flags.Usage = func() {
 		_, _ = fmt.Fprintf(output, "Usage: %s [flags]\n\n", flags.Name())
-		_, _ = fmt.Fprintln(output, "Local test launcher using plaintext gRPC; no TLS or authentication.")
+		_, _ = fmt.Fprintln(output, "Local test launcher using plaintext TCP; no TLS or authentication.")
 		flags.PrintDefaults()
 	}
 
@@ -297,12 +289,12 @@ func (c launcherConfig) serverConfig(logger *slog.Logger) (server.Config, error)
 		maxKeys = server.DefaultMaxKeys
 	}
 	result := server.Config{
-		MaxTTL:               c.configuredMaxTTLMS,
-		MaxKeys:              maxKeys,
-		Logger:               logger,
-		ShardCount:           c.shardCount,
-		ShardQueueDepth:      c.shardQueueDepth,
-		MaxInFlightPerStream: c.maxInFlightPerStream,
+		MaxTTL:                   c.configuredMaxTTLMS,
+		MaxKeys:                  maxKeys,
+		Logger:                   logger,
+		ShardCount:               c.shardCount,
+		ShardQueueDepth:          c.shardQueueDepth,
+		MaxInFlightPerConnection: c.maxInFlightPerConnection,
 	}
 	if err := result.Validate(); err != nil {
 		return server.Config{}, err

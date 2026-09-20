@@ -6,14 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"google.golang.org/grpc"
-
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
 const (
@@ -29,10 +27,10 @@ const (
 
 	safetyMargin = 100 * time.Millisecond
 
-	defaultShardCount           = 256
-	defaultShardQueueDepth      = 256
-	defaultMaxInFlightPerStream = 256
-	expiredLeaseCleanupInterval = time.Minute
+	defaultShardCount               = 256
+	defaultShardQueueDepth          = 256
+	defaultMaxInFlightPerConnection = 256
+	expiredLeaseCleanupInterval     = time.Minute
 )
 
 // ErrServerFailed identifies a fatal internal server error. The affected
@@ -56,9 +54,9 @@ type Config struct {
 	// in-memory lease state may have been lost.
 	SkipRestartQuarantine bool
 
-	ShardCount           uint32
-	ShardQueueDepth      uint32
-	MaxInFlightPerStream uint32
+	ShardCount               uint32
+	ShardQueueDepth          uint32
+	MaxInFlightPerConnection uint32
 }
 
 // Validate checks values explicitly supplied by the caller.
@@ -89,8 +87,8 @@ func resolveConfig(c Config) (Config, error) {
 	if c.ShardQueueDepth == 0 {
 		c.ShardQueueDepth = defaultShardQueueDepth
 	}
-	if c.MaxInFlightPerStream == 0 {
-		c.MaxInFlightPerStream = defaultMaxInFlightPerStream
+	if c.MaxInFlightPerConnection == 0 {
+		c.MaxInFlightPerConnection = defaultMaxInFlightPerConnection
 	}
 	return c, nil
 }
@@ -104,21 +102,19 @@ const (
 	phaseClosed
 )
 
-// Server is an in-memory RedLease gRPC service. New servers initially reject
-// all lease mutations while the restart quarantine timer is running.
+// Server is an in-memory RedLease TCP server. New servers initially reject all
+// lease mutations while the restart quarantine timer is running.
 type Server struct {
-	redleasev1.UnimplementedRedLeaseServer
-
 	config Config
 	logger *slog.Logger
 
 	phase atomic.Uint32
 	keys  atomic.Uint64
 
-	activeStreams   atomic.Int64
-	operationTotals [operationKindCount]atomic.Uint64
+	activeConnections atomic.Int64
+	operationTotals   [operationKindCount]atomic.Uint64
 
-	ctx    context.Context //nolint:containedctx // Server owns streams and workers lifecycle.
+	ctx    context.Context //nolint:containedctx // Server owns connections and workers lifecycle.
 	cancel context.CancelFunc
 	timer  *time.Timer
 	fatal  chan error
@@ -127,13 +123,16 @@ type Server struct {
 
 	dispatchMu sync.RWMutex
 	// cleanupMu prevents concurrent capacity-triggered scans of all shards.
-	cleanupMu sync.Mutex
-	failOnce  sync.Once
-	closeOnce sync.Once
-	wg        sync.WaitGroup
+	cleanupMu    sync.Mutex
+	transportMu  sync.Mutex
+	listener     net.Listener
+	connections  map[net.Conn]struct{}
+	connectionWG sync.WaitGroup
+	serveStarted bool
+	failOnce     sync.Once
+	closeOnce    sync.Once
+	wg           sync.WaitGroup
 }
-
-var _ redleasev1.RedLeaseServer = (*Server)(nil)
 
 // New constructs a lock-server. By default it starts in restart quarantine;
 // SkipRestartQuarantine makes it immediately active under owner-managed
@@ -145,12 +144,13 @@ func New(c Config) (*Server, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
-		config: config,
-		logger: config.Logger.With(slog.String("component", "redlease-server")),
-		ctx:    ctx,
-		cancel: cancel,
-		fatal:  make(chan error, 1),
-		shards: make([]*leaseShard, config.ShardCount),
+		config:      config,
+		logger:      config.Logger.With(slog.String("component", "redlease-server")),
+		ctx:         ctx,
+		cancel:      cancel,
+		fatal:       make(chan error, 1),
+		shards:      make([]*leaseShard, config.ShardCount),
+		connections: make(map[net.Conn]struct{}),
 	}
 	if config.SkipRestartQuarantine {
 		s.phase.Store(uint32(phaseActive))
@@ -181,7 +181,7 @@ func New(c Config) (*Server, error) {
 		slog.Uint64("max_keys", config.MaxKeys),
 		slog.Uint64("shard_count", uint64(config.ShardCount)),
 		slog.Uint64("shard_queue_depth", uint64(config.ShardQueueDepth)),
-		slog.Uint64("max_in_flight_per_stream", uint64(config.MaxInFlightPerStream)),
+		slog.Uint64("max_in_flight_per_connection", uint64(config.MaxInFlightPerConnection)),
 	}
 	if config.SkipRestartQuarantine {
 		startAttrs = append(startAttrs, slog.String("state", "ACTIVE"))
@@ -203,14 +203,9 @@ func New(c Config) (*Server, error) {
 	return s, nil
 }
 
-// Register registers s with a gRPC service registrar.
-func (s *Server) Register(registrar grpc.ServiceRegistrar) {
-	redleasev1.RegisterRedLeaseServer(registrar, s)
-}
-
 // Fatal returns a channel which receives exactly one non-nil error if the
 // server detects an unrecoverable internal failure. Detection moves the server
-// to FAILED and cancels its active streams. The channel is buffered so failure
+// to FAILED and cancels its active connections. The channel is buffered so failure
 // detection never waits for the owner, and normal Close does not send to it.
 // A failed Server cannot be returned to service and must be closed.
 func (s *Server) Fatal() <-chan error {
@@ -227,6 +222,7 @@ func (s *Server) fail(cause error) {
 			}
 		}
 		s.cancel()
+		s.closeTransport()
 		s.fatal <- failure
 		s.logger.Error(
 			"server entered failed state",
@@ -236,15 +232,18 @@ func (s *Server) fail(cause error) {
 	})
 }
 
-// Close stops accepting work, cancels active streams and drains work already
-// submitted to the shard queues. It is safe to call Close more than once.
+// Close stops accepting work, closes active connections and drains work
+// already submitted to the shard queues. It is safe to call Close more than
+// once.
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
 		s.phase.Store(uint32(phaseClosed))
 		s.cancel()
+		s.closeTransport()
+		s.connectionWG.Wait()
 
 		// A dispatcher holds a read lock until its send to a shard succeeds or
-		// its stream is cancelled. Cancelling above guarantees that Close can
+		// its connection is cancelled. Cancelling above guarantees that Close can
 		// eventually acquire this write lock without closing a channel under a
 		// sender.
 		s.dispatchMu.Lock()

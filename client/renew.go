@@ -5,7 +5,7 @@ import (
 	"errors"
 
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
 var (
@@ -38,7 +38,7 @@ func (e *notRenewedError) Is(target error) bool {
 
 type renewReplicaResult struct {
 	replica  int
-	response *redleasev1.RenewResponse
+	response protocol.Response
 	err      error
 }
 
@@ -118,15 +118,14 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 				if firstFailure == nil {
 					firstFailure = result.err
 				}
-			} else if result.response == nil ||
-				result.response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+			} else if result.response.Status != protocol.StatusOK {
 				l.clearConfirmed(result.replica)
 			} else {
 				now := boottime.Now()
 				successful[result.replica] = true
 				candidates[result.replica] = candidateValidUntil(
 					operationStart,
-					result.response.GetTtlMs(),
+					result.response.TTLMS,
 				)
 				if now < candidates[result.replica] {
 					l.markConfirmed(result.replica, candidates[result.replica])
@@ -196,7 +195,7 @@ func (l *Lease) submitRenew(
 	submitContext context.Context,
 	collectionContext context.Context,
 	replica int,
-	request *redleasev1.ClientRequest,
+	request protocol.Request,
 	submissions chan<- acquireSubmission,
 	results chan<- renewReplicaResult,
 ) {
@@ -214,15 +213,14 @@ func (l *Lease) submitRenew(
 		results <- renewReplicaResult{replica: replica, err: err}
 		return
 	}
-	renewResponse := response.GetRenew()
-	if renewResponse == nil {
+	if response.Operation != protocol.OperationRenew {
 		results <- renewReplicaResult{
 			replica: replica,
 			err:     errors.New("Renew received a non-Renew response"),
 		}
 		return
 	}
-	results <- renewReplicaResult{replica: replica, response: renewResponse}
+	results <- renewReplicaResult{replica: replica, response: response}
 }
 
 func (l *Lease) collectRemainingRenewResults(
@@ -235,15 +233,14 @@ func (l *Lease) collectRemainingRenewResults(
 	for range remaining {
 		result := <-results
 		if result.err != nil ||
-			result.response == nil ||
-			result.response.GetStatus() != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+			result.response.Status != protocol.StatusOK {
 			l.clearConfirmed(result.replica)
 			continue
 		}
 
 		candidate := candidateValidUntil(
 			operationStart,
-			result.response.GetTtlMs(),
+			result.response.TTLMS,
 		)
 		if boottime.Now() < candidate {
 			l.markConfirmed(result.replica, candidate)
@@ -269,14 +266,13 @@ func (l *Lease) renewCancellationError(callerContext context.Context) error {
 	return nil
 }
 
-func (c *Client) newRenewRequest(key, sequence, ttlMS uint64) *redleasev1.ClientRequest {
-	return &redleasev1.ClientRequest{
-		Operation: &redleasev1.ClientRequest_Renew{
-			Renew: &redleasev1.RenewRequest{
-				Key:            key,
-				LeaseId:        &redleasev1.LeaseID{ClientId: c.clientID, BootId: c.bootID, LeaseSeq: sequence},
-				RequestedTtlMs: ttlMS,
-			},
-		},
+func (c *Client) newRenewRequest(key, sequence, ttlMS uint64) protocol.Request {
+	return protocol.Request{
+		Operation:      protocol.OperationRenew,
+		Key:            key,
+		ClientID:       c.clientID,
+		BootID:         c.bootID,
+		LeaseSequence:  sequence,
+		RequestedTTLMS: ttlMS,
 	}
 }

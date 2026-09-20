@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
 // BenchmarkServerLeaseStorage isolates the sharded map, deadline heap and
@@ -22,9 +22,9 @@ func BenchmarkServerLeaseStorage(b *testing.B) {
 			}
 
 			runFixedWorkerBenchmark(b, workers, "lease-cycles/s", func(worker, first, operationCount int) {
-				id := leaseID{clientID: uint32(worker + 1), bootID: 1}
+				id := leaseID{clientID: uint32(worker + 1), bootID: 1} //nolint:gosec // Benchmark sizes are bounded.
 				for operationIndex := first; operationIndex < first+operationCount; operationIndex++ {
-					key := uint64(operationIndex + 1)
+					key := uint64(operationIndex + 1) //nolint:gosec // Benchmark sizes are bounded.
 					id.leaseSeq = key
 					shard := server.shards[server.shardIndex(key)]
 
@@ -44,7 +44,7 @@ func BenchmarkServerLeaseStorage(b *testing.B) {
 }
 
 // BenchmarkServerApplyAcquireRelease measures the complete in-memory state
-// machine while excluding the shard queue, stream and gRPC transport.
+// machine while excluding the shard queue and TCP transport.
 func BenchmarkServerApplyAcquireRelease(b *testing.B) {
 	for _, workers := range []int{1, 2, 4, 8, 16, 32, 64} {
 		b.Run(fmt.Sprintf("workers=%d", workers), func(b *testing.B) {
@@ -61,9 +61,9 @@ func BenchmarkServerApplyAcquireRelease(b *testing.B) {
 			server.phase.Store(uint32(phaseActive))
 
 			runFixedWorkerBenchmark(b, workers, "acquire-release-pairs/s", func(worker, first, operationCount int) {
-				id := leaseID{clientID: uint32(worker + 1), bootID: 1}
+				id := leaseID{clientID: uint32(worker + 1), bootID: 1} //nolint:gosec // Benchmark sizes are bounded.
 				for operationIndex := first; operationIndex < first+operationCount; operationIndex++ {
-					key := uint64(operationIndex + 1)
+					key := uint64(operationIndex + 1) //nolint:gosec // Benchmark sizes are bounded.
 					id.leaseSeq = key
 
 					acquire := server.apply(server.shards[server.shardIndex(key)], operation{
@@ -73,7 +73,7 @@ func BenchmarkServerApplyAcquireRelease(b *testing.B) {
 						leaseID:        id,
 						requestedTTLMS: server.config.MaxTTL,
 					})
-					if status := acquire.GetAcquire().GetStatus(); status != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+					if status := acquire.Status; status != protocol.StatusOK {
 						b.Errorf("Acquire status = %s", status)
 						return
 					}
@@ -84,7 +84,7 @@ func BenchmarkServerApplyAcquireRelease(b *testing.B) {
 						key:       key,
 						leaseID:   id,
 					})
-					if status := release.GetRelease().GetStatus(); status != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+					if status := release.Status; status != protocol.StatusOK {
 						b.Errorf("Release status = %s", status)
 						return
 					}
@@ -149,8 +149,8 @@ func BenchmarkServerAcquireReleaseQueue(b *testing.B) {
 	b.Cleanup(func() { _ = s.Close() })
 
 	ctx := context.Background()
-	responses := make(chan *redleasev1.ServerResponse, 1)
-	complete := func(response *redleasev1.ServerResponse) { responses <- response }
+	responses := make(chan protocol.Response, 1)
+	complete := func(response protocol.Response) { responses <- response }
 	b.ReportAllocs()
 	b.ResetTimer()
 
@@ -168,7 +168,7 @@ func BenchmarkServerAcquireReleaseQueue(b *testing.B) {
 		}) {
 			b.Fatal("dispatch Acquire")
 		}
-		if status := (<-responses).GetAcquire().GetStatus(); status != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+		if status := (<-responses).Status; status != protocol.StatusOK {
 			b.Fatalf("Acquire status = %s", status)
 		}
 
@@ -178,7 +178,7 @@ func BenchmarkServerAcquireReleaseQueue(b *testing.B) {
 		}) {
 			b.Fatal("dispatch Release")
 		}
-		if status := (<-responses).GetRelease().GetStatus(); status != redleasev1.LeaseStatus_LEASE_STATUS_OK {
+		if status := (<-responses).Status; status != protocol.StatusOK {
 			b.Fatalf("Release status = %s", status)
 		}
 	}

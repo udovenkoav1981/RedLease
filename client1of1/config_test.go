@@ -5,9 +5,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 var testLogger = slog.New(slog.DiscardHandler)
@@ -67,8 +64,7 @@ func TestNewAppliesResponseTimeout(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			client, err := New(Config{
 				ClientID:        7,
-				Target:          "passthrough:///unavailable",
-				DialOptions:     []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())},
+				Target:          "127.0.0.1:1",
 				Logger:          testLogger,
 				ResponseTimeout: test.value,
 			})

@@ -6,6 +6,8 @@ RedLease предоставляет распределённые краткож�
 Сервис является распределённым и отказоустойчивым к выходу из строя узлов в
 пределах выбранной конфигурации quorum: `1/1`, `2/3` или `3/5`. Quorum собирается
 на клиенте без Raft/Paxos, а все серверные данные хранятся только в RAM.
+Wire protocol использует size-prefixed FlatBuffers messages поверх постоянных
+TCP-соединений.
 
 Client и server поддерживаются только на Linux; для отсчёта lease используется
 монотонный suspend-aware clock `CLOCK_BOOTTIME`.
@@ -53,7 +55,6 @@ redlease-server \
 Prometheus exporter после этого доступен на
 `http://127.0.0.1:9090/metrics`:
 
-
 Если `-metrics-listen` не задан, HTTP endpoint не запускается.
 
 Все параметры доступны через `redlease-server -h`. Для quorum `2/3` или `3/5`
@@ -68,14 +69,14 @@ Prometheus exporter после этого доступен на
 
 Launcher создаёт отдельный Prometheus registry для каждого процесса. Для
 production-применения server можно встроить в приложение, которое отвечает за
-TLS, аутентификацию, lifecycle и способ публикации метрик.
+сетевую изоляцию, аутентификацию, lifecycle и способ публикации метрик.
 
 ## Встроенный server и Prometheus exporter
 
 Пакет `server/prometheus` предоставляет collector, но не регистрирует его в
 глобальном registry и не запускает HTTP-сервер. Ключевые фрагменты встраивания выглядят так.
 
-Создание server и регистрация gRPC service:
+Создание server и запуск TCP accept loop:
 
 ```go
 leaseServer, err := redleaseserver.New(redleaseserver.Config{
@@ -84,8 +85,8 @@ leaseServer, err := redleaseserver.New(redleaseserver.Config{
 	Logger:  logger,
 })
 
-grpcServer := grpc.NewServer() // add transport credentials in production
-leaseServer.Register(grpcServer)
+listener, err := net.Listen("tcp", "127.0.0.1:50051")
+go leaseServer.Serve(listener) // ошибку Serve нужно обработать в приложении
 ```
 
 Регистрация collector в отдельном registry и публикация `/metrics`:
@@ -107,7 +108,8 @@ go metricsServer.ListenAndServe() // обработку ошибки нужно 
 ```
 
 Владелец embedded server также должен обслуживать `leaseServer.Fatal()` и при
-остановке закрывать `leaseServer`, gRPC server и HTTP server.
+остановке закрывать `leaseServer` и HTTP server. `leaseServer.Close()` также
+закрывает переданный ему listener и активные TCP-соединения.
 
 ## Запуск клиента
 
@@ -117,17 +119,13 @@ Package `client` поддерживает все конфигурации `1/1`,
 `client1of1` — отдельная упрощённая реализация только для одного lock-server;
 в её `Config` вместо `Quorum` и списка `Servers` задаётся один `Target`.
 
-Client должен быть долгоживущим объектом приложения. `Logger` и transport
-credentials задаются явно. Для локального plaintext server специализированный
-client `1/1` настраивается так:
+Client должен быть долгоживущим объектом приложения. `Logger` задаётся явно.
+Специализированный client `1/1` настраивается так:
 
 ```go
 client, err := client1of1.New(client1of1.Config{
-	ClientID: 1,
-	Target:   "127.0.0.1:50051",
-	DialOptions: []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	},
+	ClientID:        1,
+	Target:          "127.0.0.1:50051",
 	Logger:          logger,
 	ResponseTimeout: 1000,
 })
@@ -147,10 +145,9 @@ if lease.RemainingTTLms() > 0 {
 числовыми ключами выполняет вызывающее приложение.
 
 Для `Quorum2Of3` и `Quorum3Of5` используется универсальный package `client` со
-списком из трёх или пяти `Servers`. В production вместо
-`insecure.NewCredentials()` нужно передать подходящие TLS credentials.
+списком из трёх или пяти `Servers`.
 
-`WaitReady` проверяет наличие достаточного числа подключённых streams, но не
+`WaitReady` проверяет наличие достаточного числа подключённых TCP-соединений, но не
 завершение server quarantine. `Acquire` выполняет одну попытку и при неудаче
 сам запускает cleanup частично приобретённых locks; retry и randomized backoff
 остаются ответственностью вызывающего приложения. Для долгой защищённой
@@ -159,9 +156,9 @@ if lease.RemainingTTLms() > 0 {
 
 `Lease.Release()` немедленно делает локальный lease невалидным и выполняет
 сетевое освобождение асинхронно. `client1of1` однократно пытается поставить
-`Release` в send queue и не повторяет его после обрыва stream; не дошедший до
+`Release` в send queue и не повторяет его после обрыва соединения; не дошедший до
 server lease ограничен TTL. Не создавайте и не закрывайте `Client` для каждой
-операции: закрытие клиента останавливает его фоновые streams, а у универсального
+операции: закрытие клиента останавливает его фоновые соединения, а у универсального
 клиента также healing и retry. Закрывайте `Client` один раз при остановке
 приложения.
 
@@ -170,5 +167,5 @@ server lease ограничен TTL. Не создавайте и не закр�
 - [Requirements](Requirements.md) — требования к системе.
 - [Architecture](Architecture.md) — протокол и архитектурные решения.
 - [Нагрузочный тест](cmd/redlease-load/README.md) — матрица коротких lease для `client1of1` и общего `client` на отдельно запущенных серверах.
-- [Benchmark client1of1](client1of1/README.md) — throughput и latency одного клиента/stream через внешний TCP/gRPC server.
+- [Benchmark client1of1](client1of1/README.md) — throughput и latency одного клиента через внешний TCP server.
 - [MIT License](LICENSE).

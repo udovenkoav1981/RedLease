@@ -17,7 +17,7 @@ func TestClientWaitReadyRequiresConfiguredQuorum(t *testing.T) {
 	}
 	select {
 	case err := <-result:
-		t.Fatalf("WaitReady returned with two streams: %v", err)
+		t.Fatalf("WaitReady returned with two connections: %v", err)
 	case <-time.After(20 * time.Millisecond):
 	}
 

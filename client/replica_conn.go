@@ -7,10 +7,9 @@ import (
 	"log/slog"
 	"sync"
 
-	"google.golang.org/grpc"
-
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
+	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
 var errReplicaClosed = errors.New("replica connection closed")
@@ -30,33 +29,29 @@ func (e *replicaUnavailableError) Unwrap() error {
 	return e.cause
 }
 
-type streamFactory interface {
-	open(ctx context.Context) (leaseClientStream, error)
+type connectionFactory interface {
+	open(ctx context.Context) (leaseConnection, error)
 	close() error
 }
 
-type grpcStreamFactory struct {
-	connection *grpc.ClientConn
-	client     redleasev1.RedLeaseClient
+type tcpConnectionFactory struct {
+	target string
 }
 
-func newGRPCStreamFactory(connection *grpc.ClientConn) *grpcStreamFactory {
-	return &grpcStreamFactory{
-		connection: connection,
-		client:     redleasev1.NewRedLeaseClient(connection),
-	}
+func newTCPConnectionFactory(target string) *tcpConnectionFactory {
+	return &tcpConnectionFactory{target: target}
 }
 
-func (f *grpcStreamFactory) open(ctx context.Context) (leaseClientStream, error) {
-	return f.client.LeaseStream(ctx)
+func (f *tcpConnectionFactory) open(ctx context.Context) (leaseConnection, error) {
+	return transport.Dial(ctx, f.target)
 }
 
-func (f *grpcStreamFactory) close() error {
-	return f.connection.Close()
+func (f *tcpConnectionFactory) close() error {
+	return nil
 }
 
 type replicaConn struct {
-	factory streamFactory
+	factory connectionFactory
 	backoff backoff.Exponential
 	logger  *slog.Logger
 
@@ -64,7 +59,7 @@ type replicaConn struct {
 	cancel context.CancelFunc
 
 	stateMu    sync.Mutex
-	generation *streamGeneration
+	generation *connectionGeneration
 	lastErr    error
 	closed     bool
 	changed    chan struct{}
@@ -75,7 +70,7 @@ type replicaConn struct {
 	closeErr  error
 }
 
-func newReplicaConn(factory streamFactory, logger *slog.Logger) *replicaConn {
+func newReplicaConn(factory connectionFactory, logger *slog.Logger) *replicaConn {
 	ctx, cancel := context.WithCancel(context.Background())
 	connection := &replicaConn{
 		factory: factory,
@@ -93,19 +88,19 @@ func newReplicaConn(factory streamFactory, logger *slog.Logger) *replicaConn {
 
 func (c *replicaConn) call(
 	ctx context.Context,
-	request *redleasev1.ClientRequest,
-) (*redleasev1.ServerResponse, error) {
+	request protocol.Request,
+) (protocol.Response, error) {
 	future, err := c.submit(ctx, request)
 	if err != nil {
-		return nil, err
+		return protocol.Response{}, err
 	}
 	return future.await(ctx)
 }
 
 func (c *replicaConn) submit(
 	ctx context.Context,
-	request *redleasev1.ClientRequest,
-) (*streamFuture, error) {
+	request protocol.Request,
+) (*connectionFuture, error) {
 	c.stateMu.Lock()
 	generation := c.generation
 	cause := c.lastErr
@@ -151,14 +146,12 @@ func (c *replicaConn) manage() {
 	var attempt uint
 	unavailable := false
 	for {
-		streamContext, cancelStream := context.WithCancel(c.ctx)
-		stream, err := c.factory.open(streamContext)
+		connection, err := c.factory.open(c.ctx)
 		if err != nil {
-			cancelStream()
-			c.recordFailure(fmt.Errorf("open stream: %w", err))
+			c.recordFailure(fmt.Errorf("open connection: %w", err))
 			if !unavailable && c.ctx.Err() == nil {
 				c.logger.Warn(
-					"replica stream unavailable",
+					"replica connection unavailable",
 					slog.String("reason", "connect_failed"),
 					slog.Any("error", err),
 				)
@@ -171,13 +164,13 @@ func (c *replicaConn) manage() {
 			continue
 		}
 
-		generation := newStreamGeneration(stream, cancelStream)
+		generation := newConnectionGeneration(connection, func() {})
 		if !c.publish(generation) {
 			_ = generation.Close()
 			return
 		}
 		c.logger.Info(
-			"replica stream connected",
+			"replica connection established",
 			slog.Bool("reconnected", unavailable),
 			slog.Uint64("attempt", uint64(attempt+1)),
 		)
@@ -195,8 +188,8 @@ func (c *replicaConn) manage() {
 			return
 		}
 		c.logger.Warn(
-			"replica stream unavailable",
-			slog.String("reason", "stream_terminated"),
+			"replica connection unavailable",
+			slog.String("reason", "connection_terminated"),
 			slog.Any("error", cause),
 		)
 		unavailable = true
@@ -212,7 +205,7 @@ func (c *replicaConn) waitBeforeRetry(attempt uint) bool {
 	return backoff.Wait(c.ctx, c.backoff.Duration(attempt))
 }
 
-func (c *replicaConn) publish(generation *streamGeneration) bool {
+func (c *replicaConn) publish(generation *connectionGeneration) bool {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	if c.closed {
@@ -224,7 +217,7 @@ func (c *replicaConn) publish(generation *streamGeneration) bool {
 	return true
 }
 
-func (c *replicaConn) clear(generation *streamGeneration, cause error) {
+func (c *replicaConn) clear(generation *connectionGeneration, cause error) {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	if c.generation != generation {
@@ -243,7 +236,7 @@ func (c *replicaConn) recordFailure(cause error) {
 	}
 }
 
-func (c *replicaConn) markClosed() *streamGeneration {
+func (c *replicaConn) markClosed() *connectionGeneration {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	c.closed = true

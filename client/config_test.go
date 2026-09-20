@@ -5,9 +5,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 var testLogger = slog.New(slog.DiscardHandler)
@@ -81,9 +78,9 @@ func TestConfigRejectsServerCountMismatch(t *testing.T) {
 	}
 }
 
-func TestNewAppliesDefaultsAndCopiesOptions(t *testing.T) {
+func TestNewAppliesDefaultsAndCopiesServers(t *testing.T) {
 	config := connectableClientConfig()
-	config.Servers[0].DialOptions = append(config.Servers[0].DialOptions, grpc.WithNoProxy())
+	wantTarget := config.Servers[0].Target
 
 	client, err := New(config)
 	if err != nil {
@@ -97,13 +94,13 @@ func TestNewAppliesDefaultsAndCopiesOptions(t *testing.T) {
 	if client.responseTimeout != defaultResponseTimeout {
 		t.Fatalf("response timeout = %v, want %v", client.responseTimeout, defaultResponseTimeout)
 	}
-	if len(client.servers[0].DialOptions) != 2 {
-		t.Fatalf("client dial options = %d, want 2", len(client.servers[0].DialOptions))
+	if client.servers[0].Target != wantTarget {
+		t.Fatalf("client target = %q, want %q", client.servers[0].Target, wantTarget)
 	}
 
-	config.Servers[0].DialOptions = nil
-	if len(client.servers[0].DialOptions) != 2 {
-		t.Fatal("client dial options alias input slice")
+	config.Servers[0].Target = "changed-target"
+	if client.servers[0].Target != wantTarget {
+		t.Fatal("client servers alias input slice")
 	}
 }
 
@@ -135,11 +132,5 @@ func validClientConfig() Config {
 }
 
 func connectableClientConfig() Config {
-	config := validClientConfig()
-	for index := range config.Servers {
-		config.Servers[index].DialOptions = []grpc.DialOption{
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-		}
-	}
-	return config
+	return validClientConfig()
 }

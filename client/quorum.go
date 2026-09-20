@@ -1,6 +1,6 @@
 package client
 
-import redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+import "github.com/udovenkoav1981/RedLease/internal/protocol"
 
 // Quorum selects one supported majority configuration.
 type Quorum uint8
@@ -41,7 +41,6 @@ func candidateValidUntil(operationStart, ttlMS uint64) uint64 {
 	return operationStart + (ttlMS - safetyMarginMS)
 }
 
-func isSuccessfulAcquire(status redleasev1.LeaseStatus) bool {
-	return status == redleasev1.LeaseStatus_LEASE_STATUS_OK ||
-		status == redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED
+func isSuccessfulAcquire(status protocol.Status) bool {
+	return status == protocol.StatusOK || status == protocol.StatusAlreadyOwned
 }

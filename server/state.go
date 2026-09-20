@@ -10,7 +10,7 @@ import (
 	"sync"
 
 	"github.com/udovenkoav1981/RedLease/internal/boottime"
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
 type operationKind uint8
@@ -26,14 +26,6 @@ type leaseID struct {
 	clientID uint32
 	bootID   uint32
 	leaseSeq uint64
-}
-
-func makeLeaseID(id *redleasev1.LeaseID) leaseID {
-	return leaseID{
-		clientID: id.GetClientId(),
-		bootID:   id.GetBootId(),
-		leaseSeq: id.GetLeaseSeq(),
-	}
 }
 
 type lease struct {
@@ -83,7 +75,7 @@ type operation struct {
 
 type shardJob struct {
 	operation operation
-	complete  func(*redleasev1.ServerResponse)
+	complete  func(protocol.Response)
 }
 
 type leaseShard struct {
@@ -106,7 +98,7 @@ func (s *Server) runShard(shard *leaseShard) {
 				s.completeFailedJob(current)
 			}
 			// The owner closes a failed Server after receiving Fatal. Drain the
-			// already accepted jobs so their stream waiters can also finish.
+			// already accepted jobs so their connection waiters can also finish.
 			for queued := range shard.jobs {
 				s.completeFailedJob(queued)
 			}
@@ -185,10 +177,10 @@ func removeExpiredKeysFromShard(shard *leaseShard, now uint64) uint64 {
 	return shard.removeExpiredLeases(now)
 }
 
-func (s *Server) apply(shard *leaseShard, op operation) *redleasev1.ServerResponse {
+func (s *Server) apply(shard *leaseShard, op operation) protocol.Response {
 	if op.kind >= operationKindCount {
 		s.fail(fmt.Errorf("unknown operation kind %d", op.kind))
-		return &redleasev1.ServerResponse{RequestId: op.requestID}
+		return protocol.Response{RequestID: op.requestID}
 	}
 	if !s.active() {
 		return notReadyResponse(op)
@@ -203,11 +195,11 @@ func (s *Server) apply(shard *leaseShard, op operation) *redleasev1.ServerRespon
 	case operationRelease:
 		return s.release(shard, op, now)
 	default:
-		return &redleasev1.ServerResponse{RequestId: op.requestID}
+		return protocol.Response{RequestID: op.requestID}
 	}
 }
 
-func (s *Server) acquire(shard *leaseShard, op operation, now uint64) *redleasev1.ServerResponse {
+func (s *Server) acquire(shard *leaseShard, op operation, now uint64) protocol.Response {
 	effectiveTTLMS := min(op.requestedTTLMS, s.config.MaxTTL)
 	cleanupAttempted := false
 	for {
@@ -217,7 +209,7 @@ func (s *Server) acquire(shard *leaseShard, op operation, now uint64) *redleasev
 		}
 
 		if cleanupAttempted {
-			return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_KEY_LIMIT_REACHED, 0)
+			return acquireResponse(op.requestID, protocol.StatusKeyLimitReached, 0)
 		}
 		if !s.removeExpiredKeys(now) {
 			return notReadyResponse(op)
@@ -231,7 +223,7 @@ func (s *Server) acquireLocked(
 	op operation,
 	now uint64,
 	effectiveTTLMS uint64,
-) (*redleasev1.ServerResponse, bool) {
+) (protocol.Response, bool) {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
@@ -239,12 +231,12 @@ func (s *Server) acquireLocked(
 	if exists && current.deadline > now && current.id == op.leaseID {
 		return acquireResponse(
 			op.requestID,
-			redleasev1.LeaseStatus_LEASE_STATUS_ALREADY_OWNED,
+			protocol.StatusAlreadyOwned,
 			remainingTTLMS(current.deadline, now, s.config.MaxTTL),
 		), false
 	}
 	if exists && current.deadline > now {
-		return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_BUSY, 0), false
+		return acquireResponse(op.requestID, protocol.StatusBusy, 0), false
 	}
 	if exists {
 		shard.removeLease(current)
@@ -254,20 +246,20 @@ func (s *Server) acquireLocked(
 	}
 
 	if effectiveTTLMS == 0 {
-		return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK, 0), false
+		return acquireResponse(op.requestID, protocol.StatusOK, 0), false
 	}
 	if !s.reserveKey() {
-		return nil, true
+		return protocol.Response{}, true
 	}
 	shard.addLease(
 		op.key,
 		op.leaseID,
 		now+effectiveTTLMS,
 	)
-	return acquireResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK, effectiveTTLMS), false
+	return acquireResponse(op.requestID, protocol.StatusOK, effectiveTTLMS), false
 }
 
-func (s *Server) renew(shard *leaseShard, op operation, now uint64) *redleasev1.ServerResponse {
+func (s *Server) renew(shard *leaseShard, op operation, now uint64) protocol.Response {
 	shard.mu.Lock()
 
 	current, exists := shard.leases[op.key]
@@ -282,7 +274,7 @@ func (s *Server) renew(shard *leaseShard, op operation, now uint64) *redleasev1.
 			false,
 			0,
 		)
-		return renewResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_STALE, 0)
+		return renewResponse(op.requestID, protocol.StatusStale, 0)
 	}
 	if current.deadline <= now {
 		expiredByMS := now - current.deadline
@@ -301,11 +293,11 @@ func (s *Server) renew(shard *leaseShard, op operation, now uint64) *redleasev1.
 		if !released {
 			return notReadyResponse(op)
 		}
-		return renewResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_STALE, 0)
+		return renewResponse(op.requestID, protocol.StatusStale, 0)
 	}
 	if current.id != op.leaseID {
 		shard.mu.Unlock()
-		return renewResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_STALE, 0)
+		return renewResponse(op.requestID, protocol.StatusStale, 0)
 	}
 
 	effectiveTTLMS := min(op.requestedTTLMS, s.config.MaxTTL)
@@ -316,16 +308,16 @@ func (s *Server) renew(shard *leaseShard, op operation, now uint64) *redleasev1.
 	}
 	remaining := remainingTTLMS(current.deadline, now, s.config.MaxTTL)
 	shard.mu.Unlock()
-	return renewResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK, remaining)
+	return renewResponse(op.requestID, protocol.StatusOK, remaining)
 }
 
-func (s *Server) release(shard *leaseShard, op operation, now uint64) *redleasev1.ServerResponse {
+func (s *Server) release(shard *leaseShard, op operation, now uint64) protocol.Response {
 	shard.mu.Lock()
 
 	current, exists := shard.leases[op.key]
 	if !exists {
 		shard.mu.Unlock()
-		return releaseResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK)
+		return releaseResponse(op.requestID, protocol.StatusOK)
 	}
 	if current.deadline <= now {
 		expiredByMS := now - current.deadline
@@ -344,7 +336,7 @@ func (s *Server) release(shard *leaseShard, op operation, now uint64) *redleasev
 		if !released {
 			return notReadyResponse(op)
 		}
-		return releaseResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK)
+		return releaseResponse(op.requestID, protocol.StatusOK)
 	}
 	if current.id == op.leaseID {
 		shard.removeLease(current)
@@ -353,10 +345,10 @@ func (s *Server) release(shard *leaseShard, op operation, now uint64) *redleasev
 		if !released {
 			return notReadyResponse(op)
 		}
-		return releaseResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK)
+		return releaseResponse(op.requestID, protocol.StatusOK)
 	}
 	shard.mu.Unlock()
-	return releaseResponse(op.requestID, redleasev1.LeaseStatus_LEASE_STATUS_OK)
+	return releaseResponse(op.requestID, protocol.StatusOK)
 }
 
 func (s *Server) logLeaseOperation(
@@ -395,40 +387,37 @@ func remainingTTLMS(deadline, now, maximum uint64) uint64 {
 	return min(boottime.Remaining(deadline, now), maximum)
 }
 
-func acquireResponse(requestID uint64, status redleasev1.LeaseStatus, ttlMS uint64) *redleasev1.ServerResponse {
-	return &redleasev1.ServerResponse{
-		RequestId: requestID,
-		Result: &redleasev1.ServerResponse_Acquire{Acquire: &redleasev1.AcquireResponse{
-			Status: status,
-			TtlMs:  ttlMS,
-		}},
+func acquireResponse(requestID uint64, status protocol.Status, ttlMS uint64) protocol.Response {
+	return protocol.Response{
+		RequestID: requestID,
+		Operation: protocol.OperationAcquire,
+		Status:    status,
+		TTLMS:     ttlMS,
 	}
 }
 
-func renewResponse(requestID uint64, status redleasev1.LeaseStatus, ttlMS uint64) *redleasev1.ServerResponse {
-	return &redleasev1.ServerResponse{
-		RequestId: requestID,
-		Result: &redleasev1.ServerResponse_Renew{Renew: &redleasev1.RenewResponse{
-			Status: status,
-			TtlMs:  ttlMS,
-		}},
+func renewResponse(requestID uint64, status protocol.Status, ttlMS uint64) protocol.Response {
+	return protocol.Response{
+		RequestID: requestID,
+		Operation: protocol.OperationRenew,
+		Status:    status,
+		TTLMS:     ttlMS,
 	}
 }
 
-func releaseResponse(requestID uint64, status redleasev1.LeaseStatus) *redleasev1.ServerResponse {
-	return &redleasev1.ServerResponse{
-		RequestId: requestID,
-		Result: &redleasev1.ServerResponse_Release{Release: &redleasev1.ReleaseResponse{
-			Status: status,
-		}},
+func releaseResponse(requestID uint64, status protocol.Status) protocol.Response {
+	return protocol.Response{
+		RequestID: requestID,
+		Operation: protocol.OperationRelease,
+		Status:    status,
 	}
 }
 
-func notReadyResponse(op operation) *redleasev1.ServerResponse {
-	return statusResponse(op, redleasev1.LeaseStatus_LEASE_STATUS_NOT_READY)
+func notReadyResponse(op operation) protocol.Response {
+	return statusResponse(op, protocol.StatusNotReady)
 }
 
-func statusResponse(op operation, status redleasev1.LeaseStatus) *redleasev1.ServerResponse {
+func statusResponse(op operation, status protocol.Status) protocol.Response {
 	switch op.kind {
 	case operationAcquire:
 		return acquireResponse(op.requestID, status, 0)
@@ -437,7 +426,7 @@ func statusResponse(op operation, status redleasev1.LeaseStatus) *redleasev1.Ser
 	case operationRelease:
 		return releaseResponse(op.requestID, status)
 	default:
-		return &redleasev1.ServerResponse{RequestId: op.requestID}
+		return protocol.Response{RequestID: op.requestID}
 	}
 }
 

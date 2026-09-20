@@ -10,9 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-
 	"github.com/udovenkoav1981/RedLease/client"
 	"github.com/udovenkoav1981/RedLease/client1of1"
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
@@ -68,7 +65,6 @@ func newLoadClients(
 			created, err := client1of1.New(client1of1.Config{
 				ClientID:        clientID,
 				Target:          addresses[0],
-				DialOptions:     []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())},
 				Logger:          logger,
 				ResponseTimeout: config.responseTimeout,
 			})
@@ -79,10 +75,7 @@ func newLoadClients(
 		} else {
 			servers := make([]client.ServerConfig, len(addresses))
 			for replica, address := range addresses {
-				servers[replica] = client.ServerConfig{
-					Target:      address,
-					DialOptions: []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())},
-				}
+				servers[replica] = client.ServerConfig{Target: address}
 			}
 			created, err := client.New(client.Config{
 				ClientID:        clientID,
@@ -118,7 +111,7 @@ func runCase(
 	config *options,
 	logger *slog.Logger,
 ) (result caseResult, runErr error) {
-	//nolint:contextcheck // Client stream managers belong to the benchmark cell, not the caller context.
+	//nolint:contextcheck // Client connection managers belong to the benchmark cell, not the caller context.
 	clients, err := newLoadClients(selected, clientCount, config.targets, config, logger)
 	defer func() { runErr = errors.Join(runErr, closeLoadClients(clients)) }()
 	if err != nil {

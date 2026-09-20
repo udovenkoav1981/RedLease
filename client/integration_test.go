@@ -3,17 +3,12 @@ package client_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"sync"
 	"testing"
 	"time"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/test/bufconn"
 
 	redleaseclient "github.com/udovenkoav1981/RedLease/client"
 	redleaseserver "github.com/udovenkoav1981/RedLease/server"
@@ -261,8 +256,8 @@ func TestServerKeyLimitEndToEnd(t *testing.T) {
 
 type integrationCluster struct {
 	mu          sync.RWMutex
-	listeners   [integrationServerCount]*bufconn.Listener
-	grpcServers [integrationServerCount]*grpc.Server
+	addresses   [integrationServerCount]string
+	listeners   [integrationServerCount]net.Listener
 	lockServers [integrationServerCount]*redleaseserver.Server
 	ttls        [integrationServerCount]time.Duration
 	maxKeys     uint64
@@ -317,17 +312,11 @@ func (c *integrationCluster) newClient(t *testing.T, clientID uint32) *redleasec
 		ResponseTimeout: 500,
 		Logger:          slog.New(slog.DiscardHandler),
 	}
-	for index := range c.listeners {
-		config.Servers[index] = redleaseclient.ServerConfig{
-			Target: fmt.Sprintf("passthrough:///redlease-%d", index),
-			DialOptions: []grpc.DialOption{
-				grpc.WithTransportCredentials(insecure.NewCredentials()),
-				grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-					return c.dialReplica(ctx, index)
-				}),
-			},
-		}
+	c.mu.RLock()
+	for index, address := range c.addresses {
+		config.Servers[index] = redleaseclient.ServerConfig{Target: address}
 	}
+	c.mu.RUnlock()
 
 	result, err := redleaseclient.New(config)
 	if err != nil {
@@ -344,45 +333,49 @@ func (c *integrationCluster) close() {
 
 func (c *integrationCluster) startReplica(t *testing.T, index int) {
 	t.Helper()
+	c.mu.RLock()
+	address := c.addresses[index]
+	c.mu.RUnlock()
+	if address == "" {
+		address = "127.0.0.1:0"
+	}
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", address)
+	if err != nil {
+		c.close()
+		t.Fatalf("listen for lock-server %d: %v", index, err)
+	}
+
 	lockServer, err := redleaseserver.New(redleaseserver.Config{
-		MaxTTL:               uint64(c.ttls[index] / time.Millisecond), //nolint:gosec // Test fixtures use positive TTLs.
-		MaxKeys:              c.maxKeys,
-		Logger:               slog.New(slog.DiscardHandler),
-		ShardCount:           4,
-		ShardQueueDepth:      64,
-		MaxInFlightPerStream: 64,
+		MaxTTL:                   uint64(c.ttls[index] / time.Millisecond), //nolint:gosec // Test fixtures use positive TTLs.
+		MaxKeys:                  c.maxKeys,
+		Logger:                   slog.New(slog.DiscardHandler),
+		ShardCount:               4,
+		ShardQueueDepth:          64,
+		MaxInFlightPerConnection: 64,
 	})
 	if err != nil {
+		_ = listener.Close()
 		c.close()
 		t.Fatalf("create lock-server %d: %v", index, err)
 	}
 
-	listener := bufconn.Listen(1024 * 1024)
-	grpcServer := grpc.NewServer()
-	lockServer.Register(grpcServer)
-
 	c.mu.Lock()
+	c.addresses[index] = listener.Addr().String()
 	c.listeners[index] = listener
-	c.grpcServers[index] = grpcServer
 	c.lockServers[index] = lockServer
 	c.mu.Unlock()
 
-	go func() { _ = grpcServer.Serve(listener) }()
+	go func() { _ = lockServer.Serve(listener) }()
 }
 
 func (c *integrationCluster) stopReplica(index int) {
 	c.mu.Lock()
 	listener := c.listeners[index]
-	grpcServer := c.grpcServers[index]
 	lockServer := c.lockServers[index]
 	c.listeners[index] = nil
-	c.grpcServers[index] = nil
 	c.lockServers[index] = nil
 	c.mu.Unlock()
 
-	if grpcServer != nil {
-		grpcServer.Stop()
-	}
 	if lockServer != nil {
 		_ = lockServer.Close()
 	}
@@ -395,19 +388,6 @@ func (c *integrationCluster) restartReplica(t *testing.T, index int) {
 	t.Helper()
 	c.stopReplica(index)
 	c.startReplica(t, index)
-}
-
-func (c *integrationCluster) dialReplica(
-	ctx context.Context,
-	index int,
-) (net.Conn, error) {
-	c.mu.RLock()
-	listener := c.listeners[index]
-	c.mu.RUnlock()
-	if listener == nil {
-		return nil, fmt.Errorf("replica %d is unavailable", index)
-	}
-	return listener.DialContext(ctx)
 }
 
 func waitReady(t *testing.T, client *redleaseclient.Client) {
@@ -427,7 +407,7 @@ func closeResource(t *testing.T, name string, closer io.Closer) {
 }
 
 func waitForServerActivation() {
-	// The server deliberately exposes no way to bypass this safety invariant.
+	// Integration tests deliberately exercise the built-in quarantine.
 	time.Sleep(redleaseserver.ProtocolMaxTTL + 250*time.Millisecond)
 }
 

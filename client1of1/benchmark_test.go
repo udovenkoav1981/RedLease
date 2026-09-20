@@ -14,9 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-
 	redleaseclient "github.com/udovenkoav1981/RedLease/client1of1"
 )
 
@@ -38,8 +35,8 @@ type benchmarkWorkerStats struct {
 	latencies benchmarkLatencyHistogram
 }
 
-// BenchmarkClient1Of1AcquireRelease uses one real TCP gRPC connection and one
-// client1of1 stream to an externally started RedLease server.
+// BenchmarkClient1Of1AcquireRelease uses one real TCP connection to an
+// externally started RedLease server.
 func BenchmarkClient1Of1AcquireRelease(b *testing.B) {
 	target := os.Getenv(benchmarkTargetEnvironment)
 	if target == "" {
@@ -67,7 +64,6 @@ func newExternalBenchmarkClient(b *testing.B, target string) *redleaseclient.Cli
 	client, err := redleaseclient.New(redleaseclient.Config{
 		ClientID:        1,
 		Target:          target,
-		DialOptions:     []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())},
 		Logger:          slog.New(slog.DiscardHandler),
 		ResponseTimeout: benchmarkResponseTimeoutMS,
 	})
@@ -83,7 +79,7 @@ func newExternalBenchmarkClient(b *testing.B, target string) *redleaseclient.Cli
 	ctx, cancel := context.WithTimeout(context.Background(), benchmarkReadyTimeout)
 	defer cancel()
 	if err := client.WaitReady(ctx); err != nil {
-		b.Fatalf("wait for client1of1 stream to %s: %v", target, err)
+		b.Fatalf("wait for client1of1 connection to %s: %v", target, err)
 	}
 	return client
 }

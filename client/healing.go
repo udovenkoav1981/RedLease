@@ -92,14 +92,13 @@ func (l *Lease) healReplicas(replicas []int) int {
 	for range replicas {
 		result := <-results
 		if result.err != nil ||
-			result.response == nil ||
-			!isSuccessfulAcquire(result.response.GetStatus()) {
+			!isSuccessfulAcquire(result.response.Status) {
 			continue
 		}
 
 		candidate := candidateValidUntil(
 			operationStart,
-			result.response.GetTtlMs(),
+			result.response.TTLMS,
 		)
 		if boottime.Now() < candidate {
 			l.markConfirmed(result.replica, candidate)

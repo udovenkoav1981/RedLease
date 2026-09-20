@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
 func TestServerHandlesTenThousandActiveLeases(t *testing.T) {
@@ -13,14 +13,14 @@ func TestServerHandlesTenThousandActiveLeases(t *testing.T) {
 
 	s := newTestServer(t, uint64(ProtocolMaxTTL/time.Millisecond), defaultShardCount)
 	activateServer(t, s)
-	responses := make(chan *redleasev1.ServerResponse, leaseCount)
+	responses := make(chan protocol.Response, leaseCount)
 
 	submitAcquireBatch(t, s, leaseCount, 1, responses)
 	assertAcquireBatchStatus(
 		t,
 		responses,
 		leaseCount,
-		redleasev1.LeaseStatus_LEASE_STATUS_OK,
+		protocol.StatusOK,
 	)
 	if got := s.keys.Load(); got != leaseCount {
 		t.Fatalf("resident keys = %d, want %d", got, leaseCount)
@@ -33,13 +33,13 @@ func TestServerHandlesTenThousandActiveLeases(t *testing.T) {
 			leaseID:        leaseID{clientID: 3, bootID: 3, leaseSeq: 1},
 			requestedTTLMS: uint64(ProtocolMaxTTL / time.Millisecond),
 		},
-		complete: func(response *redleasev1.ServerResponse) {
+		complete: func(response protocol.Response) {
 			responses <- response
 		},
 	}) {
 		t.Fatal("dispatch over-limit Acquire")
 	}
-	if status := (<-responses).GetAcquire().GetStatus(); status != redleasev1.LeaseStatus_LEASE_STATUS_KEY_LIMIT_REACHED {
+	if status := (<-responses).Status; status != protocol.StatusKeyLimitReached {
 		t.Fatalf("10,001st Acquire = %s, want KEY_LIMIT_REACHED", status)
 	}
 
@@ -50,7 +50,7 @@ func TestServerHandlesTenThousandActiveLeases(t *testing.T) {
 		t,
 		responses,
 		leaseCount,
-		redleasev1.LeaseStatus_LEASE_STATUS_BUSY,
+		protocol.StatusBusy,
 	)
 }
 
@@ -59,7 +59,7 @@ func submitAcquireBatch(
 	s *Server,
 	count int,
 	clientID uint32,
-	responses chan<- *redleasev1.ServerResponse,
+	responses chan<- protocol.Response,
 ) {
 	t.Helper()
 	ctx := context.Background()
@@ -73,7 +73,7 @@ func submitAcquireBatch(
 		}
 		if !s.dispatch(ctx.Done(), shardJob{
 			operation: op,
-			complete: func(response *redleasev1.ServerResponse) {
+			complete: func(response protocol.Response) {
 				responses <- response
 			},
 		}) {
@@ -84,9 +84,9 @@ func submitAcquireBatch(
 
 func assertAcquireBatchStatus(
 	t *testing.T,
-	responses <-chan *redleasev1.ServerResponse,
+	responses <-chan protocol.Response,
 	count int,
-	want redleasev1.LeaseStatus,
+	want protocol.Status,
 ) {
 	t.Helper()
 	deadline := time.NewTimer(5 * time.Second)
@@ -94,7 +94,7 @@ func assertAcquireBatchStatus(
 	for received := range count {
 		select {
 		case response := <-responses:
-			if got := response.GetAcquire().GetStatus(); got != want {
+			if got := response.Status; got != want {
 				t.Fatalf("response %d status = %s, want %s", received, got, want)
 			}
 		case <-deadline.C:

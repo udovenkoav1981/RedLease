@@ -4,18 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-
-	"google.golang.org/grpc"
 )
 
-// ServerConfig identifies one independent lock-server.
-//
-// DialOptions must include the transport credentials appropriate for the
-// deployment. Tests and trusted local deployments may explicitly use
-// insecure credentials.
+// ServerConfig identifies one independent lock-server TCP endpoint.
 type ServerConfig struct {
-	Target      string
-	DialOptions []grpc.DialOption
+	Target string
 }
 
 // Config controls a RedLease client process. Servers must contain exactly the

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
 func BenchmarkClientAcquireRelease(b *testing.B) {
@@ -94,27 +94,16 @@ func serveBenchmarkReplica(done <-chan struct{}, stream *fakeLeaseClientStream) 
 	}
 }
 
-func benchmarkResponse(request *redleasev1.ClientRequest) *redleasev1.ServerResponse {
-	response := &redleasev1.ServerResponse{RequestId: request.GetRequestId()}
-	switch operation := request.GetOperation().(type) {
-	case *redleasev1.ClientRequest_Acquire:
-		response.Result = &redleasev1.ServerResponse_Acquire{
-			Acquire: &redleasev1.AcquireResponse{
-				Status: redleasev1.LeaseStatus_LEASE_STATUS_OK,
-				TtlMs:  min(operation.Acquire.GetRequestedTtlMs(), uint64(5_000)),
-			},
-		}
-	case *redleasev1.ClientRequest_Renew:
-		response.Result = &redleasev1.ServerResponse_Renew{
-			Renew: &redleasev1.RenewResponse{
-				Status: redleasev1.LeaseStatus_LEASE_STATUS_OK,
-				TtlMs:  min(operation.Renew.GetRequestedTtlMs(), uint64(5_000)),
-			},
-		}
-	case *redleasev1.ClientRequest_Release:
-		response.Result = &redleasev1.ServerResponse_Release{
-			Release: &redleasev1.ReleaseResponse{Status: redleasev1.LeaseStatus_LEASE_STATUS_OK},
-		}
+func benchmarkResponse(request protocol.Request) protocol.Response {
+	response := protocol.Response{
+		RequestID: request.RequestID,
+		Operation: request.Operation,
+		Status:    protocol.StatusOK,
+	}
+	switch request.Operation {
+	case protocol.OperationAcquire, protocol.OperationRenew:
+		response.TTLMS = min(request.RequestedTTLMS, uint64(5_000))
+	case protocol.OperationRelease:
 	default:
 		panic("unexpected benchmark request")
 	}
