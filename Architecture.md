@@ -27,7 +27,7 @@ Protocol maximum TTL       5 s
 Per-server configuredMaxTTL <= Protocol maximum TTL
 Typical Renew interval     1 s
 Safety margin              100 ms (fixed)
-Lease time source          Linux `CLOCK_BOOTTIME`
+Lease time source          monotonic component of Go `time.Now()` (`CLOCK_MONOTONIC` on Linux)
 Wire TTL representation    uint64 milliseconds
 Leader                     none
 Server-to-server hot path  none
@@ -112,12 +112,12 @@ on-demand cleanup: каждый shard удаляет из heap истёкшие 
 не появилось, server возвращает `KEY_LIMIT_REACHED`.
 
 Кроме того, один background goroutine server раз в минуту запускает ту же
-очистку. Срок действия lease при этом проверяется по `CLOCK_BOOTTIME`; обычный
-ticker лишь задаёт период запуска. Cleanup последовательно берёт lock одного
-shard и удаляет элементы с начала deadline heap, пока ближайший deadline не
-окажется действующим. Полного обхода map нет. Background cleanup завершает
-работу при `FAILED` или `CLOSED`, а обнаруженный panic переводит server в
-controlled fail-stop.
+очистку. Срок действия lease при этом проверяется по monotonic-компоненту
+`time.Now()`; обычный ticker лишь задаёт период запуска. Cleanup последовательно
+берёт lock одного shard и удаляет элементы с начала deadline heap, пока
+ближайший deadline не окажется действующим. Полного обхода map нет. Background
+cleanup завершает работу при `FAILED` или `CLOSED`, а обнаруженный panic
+переводит server в controlled fail-stop.
 
 ### 3.1. Controlled fail-stop
 
@@ -419,26 +419,34 @@ Quarantine рассчитывается по неизменному `protocolMax
 
 Absolute timestamp и deadline между машинами не сериализуются.
 Client и server поддерживаются только на Linux. Все связанные с validity
-локальные моменты времени представлены как `uint64` миллисекунд
-`CLOCK_BOOTTIME`.
+локальные моменты времени представлены значениями `time.Time`, полученными
+непосредственно из `time.Now()`. Такое значение содержит wall-clock и скрытую
+monotonic-компоненту; lease-логика сохраняет её и использует только `Add`,
+`Before`, `After`, `Sub` и `Until`.
+
+Validity-время запрещено преобразовывать через `UnixMilli`, `UnixNano`,
+`Round`, `Truncate`, `UTC`, `Local` или сериализацию: эти операции уничтожают
+monotonic-компоненту. Миллисекунды вычисляются только на границе wire protocol
+и публичного `RemainingTTLms()`, но полученное число не используется как
+локальный deadline.
 
 Каждый server устанавливает локальный deadline:
 
 ```go
 effectiveTTL := min(requestedTTL, configuredMaxTTL)
-now := boottime.Now()
-deadline := now + effectiveTTL
+now := time.Now()
+deadline := now.Add(time.Duration(effectiveTTL) * time.Millisecond)
 ```
 
 Успешные ответы Acquire и Renew содержат `ttl` — оставшуюся локальную validity
 соответствующей серверной реплики на момент формирования ответа. Это позволяет
 одному клиентскому quorum включать серверы с разными `configuredMaxTTL`.
 
-Клиент измеряет продолжительность Acquire и Renew локально:
+Клиент фиксирует начало Acquire и Renew локально:
 
 ```go
-operationStart := boottime.Now()
-elapsed := boottime.Now() - operationStart
+operationStart := time.Now()
+candidateValidUntil := operationStart.Add(responseTTL - safetyMargin)
 ```
 
 В состоянии client-side `Lease` этот `operationStart` хранится в единственном
@@ -448,10 +456,21 @@ elapsed := boottime.Now() - operationStart
 захватывает snapshot своего значения: поздний ответ предыдущего Acquire или
 Renew не должен быть пересчитан относительно более нового `now`.
 
-`CLOCK_BOOTTIME` является монотонным, не зависит от перевода wall clock и
-учитывает время Linux system suspend. После resume server считает lease, чей
-deadline прошёл за время паузы, истёкшим, а клиент не начинает новую защищённую
-операцию по уже истёкшему `validUntil`.
+На Linux monotonic-компонента `time.Now()` использует `CLOCK_MONOTONIC`.
+Сравнения и вычитания двух сохранивших её значений игнорируют wall clock,
+поэтому ступенчатая коррекция NTP или ручной перевод системного времени не
+изменяют validity. Постепенная коррекция частоты monotonic clock допустима и
+остаётся внутри принятого `safetyMargin`.
+
+Обычная пауза процесса или vCPU безопасна, если гостевой monotonic clock
+продолжает идти: после возобновления `time.Now()` сразу покажет истечение
+deadline. При live migration платформа виртуализации обязана сохранить
+монотонность и учесть время паузы в гостевом monotonic clock. Миграция, которая
+замораживает этот clock на время переноса, не поддерживается.
+
+В отличие от `CLOCK_BOOTTIME`, `CLOCK_MONOTONIC` не учитывает Linux system
+suspend. Suspend client или server VM во время действия leases не
+поддерживается.
 
 Значения локального времени никогда не сравниваются между машинами и absolute
 timestamp по протоколу не передаётся. 
@@ -487,11 +506,11 @@ validUntil = max(previousValidUntil, quorumValidUntil)
 миллисекундах. Проверка положительного остатка показывает, можно ли начинать
 новую защищённую операцию.
 Абсолютный `validUntil` наружу не выдаётся, поскольку значение
-`CLOCK_BOOTTIME` имеет смысл только на локальной Linux-системе.
+monotonic clock имеет смысл только внутри текущего процесса.
 
-`CLOCK_BOOTTIME` не может остановить уже начатую бизнес-операцию при suspend
-клиентской VM. После resume такая операция может продолжиться уже после
-истечения lease; это входит в явно принятое ограничение отсутствия global
+Локальные часы не могут остановить уже начатую бизнес-операцию при длительной
+паузе client VM. После возобновления такая операция может продолжиться уже
+после истечения lease; это входит в явно принятое ограничение отсутствия global
 fencing token. Клиент проверяет `validUntil` перед запуском новых защищённых
 операций.
 

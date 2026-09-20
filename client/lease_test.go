@@ -3,14 +3,13 @@ package client
 import (
 	"context"
 	"testing"
-
-	"github.com/udovenkoav1981/RedLease/internal/boottime"
+	"time"
 )
 
-func TestLeaseValidityUsesBootTimeBoundary(t *testing.T) {
+func TestLeaseValidityUsesMonotonicTimeBoundary(t *testing.T) {
 	client := testLeaseClient()
 	lease := newLease(client, 0, uint64(1), 1_000)
-	lease.setAcquireValidity(boottime.Now() + 1_000)
+	lease.setAcquireValidity(time.Now().Add(time.Second))
 
 	if lease.RemainingTTLms() == 0 {
 		t.Fatal("lease is not valid before validUntil")
@@ -19,7 +18,7 @@ func TestLeaseValidityUsesBootTimeBoundary(t *testing.T) {
 	if remaining == 0 || remaining > 1_000 {
 		t.Fatalf("remaining TTL = %d, want 1..1000", remaining)
 	}
-	lease.setAcquireValidity(boottime.Now())
+	lease.setAcquireValidity(time.Now())
 	if lease.RemainingTTLms() != 0 {
 		t.Fatal("lease is valid at validUntil boundary")
 	}
@@ -28,14 +27,14 @@ func TestLeaseValidityUsesBootTimeBoundary(t *testing.T) {
 func TestLeaseConfirmationCannotBeShortenedByOlderResponse(t *testing.T) {
 	client := testLeaseClient()
 	lease := newLease(client, 0, uint64(1), 1_000)
-	now := boottime.Now()
-	later := now + 2_000
+	now := time.Now()
+	later := now.Add(2 * time.Second)
 
 	lease.markConfirmed(0, later)
-	lease.markConfirmed(0, now+1_000)
+	lease.markConfirmed(0, now.Add(time.Second))
 
-	if got := lease.confirmedUntil[0]; got != later {
-		t.Fatalf("confirmed until = %d, want %d", got, later)
+	if got := lease.confirmedUntil[0]; !got.Equal(later) {
+		t.Fatalf("confirmed until = %v, want %v", got, later)
 	}
 }
 
@@ -43,14 +42,14 @@ func TestLeaseGetterAndConcurrentState(t *testing.T) {
 	client := testLeaseClient()
 	key := uint64(1)
 	lease := newLease(client, 3, key, 1_000)
-	lease.setAcquireValidity(boottime.Now() + 1_000)
+	lease.setAcquireValidity(time.Now().Add(time.Second))
 
 	const iterations = 1_000
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for iteration := range iterations {
-			lease.markConfirmed(iteration%testServerCount, boottime.Now()+1_000)
+			lease.markConfirmed(iteration%testServerCount, time.Now().Add(time.Second))
 		}
 	}()
 	for range iterations {

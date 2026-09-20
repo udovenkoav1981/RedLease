@@ -176,9 +176,9 @@ linters:
         text: "G404:"
         linters:
           - gosec
-      # CLOCK_BOOTTIME is non-negative, counters fail-stop before underflow,
+      # Counters fail-stop before underflow, durations here are known positive,
       # and a hash modulo slice length always fits int.
-      - path: internal/boottime/boottime_linux.go|server/metrics.go|server/state.go
+      - path: server/metrics.go|server/state.go
         text: "G115:"
         linters:
           - gosec

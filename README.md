@@ -10,7 +10,10 @@ Wire protocol использует size-prefixed FlatBuffers messages повер
 TCP-соединений.
 
 Client и server поддерживаются только на Linux; для отсчёта lease используется
-монотонный suspend-aware clock `CLOCK_BOOTTIME`.
+monotonic-компонента `time.Now()` (`CLOCK_MONOTONIC` на Linux). Она защищает
+validity от перевода wall clock и NTP step. Linux system suspend не
+поддерживается; при live migration гипервизор должен сохранить monotonic clock
+и учесть время паузы VM.
 
 ## Установка
 

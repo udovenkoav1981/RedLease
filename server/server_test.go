@@ -20,9 +20,10 @@ import (
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
-const testEpoch uint64 = 1_000_000
-
-var testLogger = slog.New(slog.DiscardHandler)
+var (
+	testEpoch  = time.Unix(1_000, 0)
+	testLogger = slog.New(slog.DiscardHandler)
+)
 
 func newTestServer(t *testing.T, maxTTL uint64, shardCount uint32) *Server {
 	t.Helper()
@@ -301,7 +302,7 @@ func TestShardPanicIsConvertedToControlledFailure(t *testing.T) {
 	corrupted := &lease{
 		key:       1,
 		id:        id,
-		deadline:  testEpoch + 1_000,
+		deadline:  testEpoch.Add(time.Second),
 		heapIndex: 2,
 	}
 	shard.leases[corrupted.key] = corrupted
@@ -355,9 +356,9 @@ func TestAcquireClampsMaxUint64(t *testing.T) {
 	if response.Status != protocol.StatusOK || response.TTLMS != 2000 {
 		t.Fatalf("Acquire = (%s, %d), want (OK, 2000)", response.Status, response.TTLMS)
 	}
-	wantDeadline := testEpoch + 2_000
-	if got := s.shards[0].leases[1].deadline; got != wantDeadline {
-		t.Fatalf("deadline = %d, want %d", got, wantDeadline)
+	wantDeadline := testEpoch.Add(2 * time.Second)
+	if got := s.shards[0].leases[1].deadline; !got.Equal(wantDeadline) {
+		t.Fatalf("deadline = %v, want %v", got, wantDeadline)
 	}
 }
 
@@ -420,7 +421,7 @@ func TestAcquireEnforcesKeyLimitAndRestoresCapacity(t *testing.T) {
 	}
 
 	thirdID := leaseID{clientID: 3, bootID: 3, leaseSeq: 3}
-	afterCapacityCleanup := s.acquire(shard, operation{kind: operationAcquire, key: 4, leaseID: thirdID, requestedTTLMS: 1000}, testEpoch+1_000)
+	afterCapacityCleanup := s.acquire(shard, operation{kind: operationAcquire, key: 4, leaseID: thirdID, requestedTTLMS: 1000}, testEpoch.Add(time.Second))
 	if afterCapacityCleanup.Status != protocol.StatusOK {
 		t.Fatalf("Acquire after capacity cleanup = %s, want OK", afterCapacityCleanup.Status)
 	}
@@ -453,9 +454,9 @@ func TestCapacityCleanupUsesDeadlineOrderAfterRenew(t *testing.T) {
 
 	s.acquire(shard, operation{kind: operationAcquire, key: 2, leaseID: firstID, requestedTTLMS: 1000}, testEpoch)
 	s.acquire(shard, operation{kind: operationAcquire, key: 3, leaseID: secondID, requestedTTLMS: 2000}, testEpoch)
-	s.renew(shard, operation{kind: operationRenew, key: 2, leaseID: firstID, requestedTTLMS: 5000}, testEpoch+500)
+	s.renew(shard, operation{kind: operationRenew, key: 2, leaseID: firstID, requestedTTLMS: 5000}, testEpoch.Add(500*time.Millisecond))
 
-	response := s.acquire(shard, operation{kind: operationAcquire, key: 4, leaseID: thirdID, requestedTTLMS: 1000}, testEpoch+2_500)
+	response := s.acquire(shard, operation{kind: operationAcquire, key: 4, leaseID: thirdID, requestedTTLMS: 1000}, testEpoch.Add(2_500*time.Millisecond))
 	if response.Status != protocol.StatusOK {
 		t.Fatalf("Acquire after deadline-ordered cleanup = %s, want OK", response.Status)
 	}
@@ -511,7 +512,7 @@ func TestCapacityCleanupReclaimsExpiredLeaseFromAnotherShard(t *testing.T) {
 	second := s.acquire(
 		s.shards[secondShard],
 		operation{kind: operationAcquire, key: secondKey, leaseID: secondID, requestedTTLMS: 1000},
-		testEpoch+1_000,
+		testEpoch.Add(time.Second),
 	)
 	if second.Status != protocol.StatusOK {
 		t.Fatalf("cross-shard Acquire after expiry = %s, want OK", second.Status)
@@ -550,13 +551,13 @@ func TestAcquireAlreadyOwnedDoesNotExtendDeadline(t *testing.T) {
 
 	s.acquire(s.shards[0], operation{kind: operationAcquire, key: 1, leaseID: id, requestedTTLMS: 1000}, now)
 	wantDeadline := s.shards[0].leases[1].deadline
-	now += 250
+	now = now.Add(250 * time.Millisecond)
 	response := s.acquire(s.shards[0], operation{kind: operationAcquire, key: 1, leaseID: id, requestedTTLMS: 2000}, now)
 	if response.Status != protocol.StatusAlreadyOwned || response.TTLMS != 750 {
 		t.Fatalf("repeated Acquire = (%s, %d), want (ALREADY_OWNED, 750)", response.Status, response.TTLMS)
 	}
-	if got := s.shards[0].leases[1].deadline; got != wantDeadline {
-		t.Fatalf("repeated Acquire changed deadline from %d to %d", wantDeadline, got)
+	if got := s.shards[0].leases[1].deadline; !got.Equal(wantDeadline) {
+		t.Fatalf("repeated Acquire changed deadline from %v to %v", wantDeadline, got)
 	}
 
 	other := leaseID{clientID: 9, bootID: 9, leaseSeq: 9}
@@ -573,19 +574,19 @@ func TestRenewExtendsToConfiguredMaximumAndNeverShortens(t *testing.T) {
 	now := testEpoch
 
 	s.acquire(shard, operation{kind: operationAcquire, key: 1, leaseID: id, requestedTTLMS: 1000}, now)
-	now += 200
+	now = now.Add(200 * time.Millisecond)
 	response := s.renew(shard, operation{kind: operationRenew, key: 1, leaseID: id, requestedTTLMS: math.MaxUint64}, now)
 	if response.Status != protocol.StatusOK || response.TTLMS != 2000 {
 		t.Fatalf("max Renew = (%s, %d), want (OK, 2000)", response.Status, response.TTLMS)
 	}
-	wantDeadline := now + 2_000
+	wantDeadline := now.Add(2 * time.Second)
 
 	zero := s.renew(shard, operation{kind: operationRenew, key: 1, leaseID: id, requestedTTLMS: 0}, now)
 	if zero.Status != protocol.StatusOK || zero.TTLMS != 2000 {
 		t.Fatalf("zero Renew = (%s, %d), want (OK, 2000)", zero.Status, zero.TTLMS)
 	}
-	if got := shard.leases[1].deadline; got != wantDeadline {
-		t.Fatalf("zero Renew changed deadline from %d to %d", wantDeadline, got)
+	if got := shard.leases[1].deadline; !got.Equal(wantDeadline) {
+		t.Fatalf("zero Renew changed deadline from %v to %v", wantDeadline, got)
 	}
 }
 
@@ -605,11 +606,11 @@ func TestRenewStaleAndExpiry(t *testing.T) {
 	if foreign.Status != protocol.StatusStale {
 		t.Fatalf("foreign Renew = %s, want STALE", foreign.Status)
 	}
-	if got := shard.leases[1].deadline; got != wantDeadline {
-		t.Fatalf("foreign Renew changed deadline from %d to %d", wantDeadline, got)
+	if got := shard.leases[1].deadline; !got.Equal(wantDeadline) {
+		t.Fatalf("foreign Renew changed deadline from %v to %v", wantDeadline, got)
 	}
 
-	expired := s.renew(shard, operation{kind: operationRenew, key: 1, leaseID: id, requestedTTLMS: 1000}, testEpoch+1_000)
+	expired := s.renew(shard, operation{kind: operationRenew, key: 1, leaseID: id, requestedTTLMS: 1000}, testEpoch.Add(time.Second))
 	if expired.Status != protocol.StatusStale {
 		t.Fatalf("expired Renew = %s, want STALE", expired.Status)
 	}
@@ -657,7 +658,7 @@ func TestMissingAndExpiredLeaseOperationsAreLogged(t *testing.T) {
 		key:            8,
 		leaseID:        id,
 		requestedTTLMS: 1_000,
-	}, testEpoch+1_000)
+	}, testEpoch.Add(time.Second))
 	s.release(shard, operation{
 		requestID: 13,
 		kind:      operationRelease,
@@ -675,7 +676,7 @@ func TestMissingAndExpiredLeaseOperationsAreLogged(t *testing.T) {
 		kind:      operationRelease,
 		key:       10,
 		leaseID:   id,
-	}, testEpoch+1_000)
+	}, testEpoch.Add(time.Second))
 
 	type record struct {
 		Level       string  `json:"level"`
@@ -768,10 +769,10 @@ func TestReleaseIsIdempotentAndDeletesOnlyMatchingLease(t *testing.T) {
 
 func TestRemainingTTLExpiresAndClamps(t *testing.T) {
 	t.Parallel()
-	if got := remainingTTLMS(testEpoch+1, testEpoch, 10); got != 1 {
+	if got := remainingTTLMS(testEpoch.Add(time.Millisecond), testEpoch, 10); got != 1 {
 		t.Fatalf("remaining TTL = %d, want 1", got)
 	}
-	if got := remainingTTLMS(testEpoch+20, testEpoch, 10); got != 10 {
+	if got := remainingTTLMS(testEpoch.Add(20*time.Millisecond), testEpoch, 10); got != 10 {
 		t.Fatalf("clamped TTL = %d, want 10", got)
 	}
 	if got := remainingTTLMS(testEpoch, testEpoch, 10); got != 0 {
@@ -781,8 +782,8 @@ func TestRemainingTTLExpiresAndClamps(t *testing.T) {
 
 func TestDeleteExpiredLeases(t *testing.T) {
 	shard := &leaseShard{leases: make(map[uint64]*lease)}
-	shard.addLease(11, leaseID{}, testEpoch+1)
-	shard.addLease(12, leaseID{}, testEpoch-1)
+	shard.addLease(11, leaseID{}, testEpoch.Add(time.Millisecond))
+	shard.addLease(12, leaseID{}, testEpoch.Add(-time.Millisecond))
 	shard.addLease(13, leaseID{}, testEpoch)
 
 	if deleted := shard.removeExpiredLeases(testEpoch); deleted != 2 {
@@ -916,6 +917,7 @@ func TestConnectionCanReplyOutOfOrderAcrossShards(t *testing.T) {
 
 type writeCountingConn struct {
 	net.Conn
+
 	writes int
 }
 

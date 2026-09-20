@@ -25,9 +25,9 @@ func TestClientAcquireThreeOKEstablishesValidity(t *testing.T) {
 	if acquired.err != nil {
 		t.Fatalf("Acquire: %v", acquired.err)
 	}
-	wantValidUntil := leaseNow(acquired.lease) + 900
-	if got := leaseValidUntil(acquired.lease); got != wantValidUntil {
-		t.Fatalf("validUntil = %d, want %d", got, wantValidUntil)
+	wantValidUntil := leaseNow(acquired.lease).Add(900 * time.Millisecond)
+	if got := leaseValidUntil(acquired.lease); !got.Equal(wantValidUntil) {
+		t.Fatalf("validUntil = %v, want %v", got, wantValidUntil)
 	}
 	if acquired.lease.RemainingTTLms() == 0 {
 		t.Fatal("newly acquired lease is not valid")
@@ -134,9 +134,9 @@ func TestClientAcquireSelectsAnyValidThreeFromHeterogeneousResponses(t *testing.
 	if acquired.err != nil {
 		t.Fatalf("Acquire: %v", acquired.err)
 	}
-	want := leaseNow(acquired.lease) + 1_900
-	if got := leaseValidUntil(acquired.lease); got != want {
-		t.Fatalf("validUntil = %d, want best 3/5 quorum %d", got, want)
+	want := leaseNow(acquired.lease).Add(1_900 * time.Millisecond)
+	if got := leaseValidUntil(acquired.lease); !got.Equal(want) {
+		t.Fatalf("validUntil = %v, want best 3/5 quorum %v", got, want)
 	}
 
 	harness.respondAcquire(4, requests[4], protocol.StatusBusy, 0)
@@ -335,8 +335,8 @@ func TestClientAcquireLateResponsesOnlyUpdateConfirmedReplicas(t *testing.T) {
 	harness.respondAcquire(4, requests[4], protocol.StatusOK, 5_000)
 	waitForConfirmedReplicas(t, acquired.lease, [testServerCount]bool{true, true, true, true, true})
 
-	if got := leaseValidUntil(acquired.lease); got != originalValidUntil {
-		t.Fatalf("late responses changed validity from %d to %d", originalValidUntil, got)
+	if got := leaseValidUntil(acquired.lease); !got.Equal(originalValidUntil) {
+		t.Fatalf("late responses changed validity from %v to %v", originalValidUntil, got)
 	}
 }
 
@@ -543,13 +543,13 @@ func waitForConfirmedReplicas(t *testing.T, lease *Lease, want [testServerCount]
 	}
 }
 
-func leaseNow(lease *Lease) uint64 {
+func leaseNow(lease *Lease) time.Time {
 	lease.stateMu.RLock()
 	defer lease.stateMu.RUnlock()
 	return lease.now
 }
 
-func leaseValidUntil(lease *Lease) uint64 {
+func leaseValidUntil(lease *Lease) time.Time {
 	lease.stateMu.RLock()
 	defer lease.stateMu.RUnlock()
 	return lease.validUntil

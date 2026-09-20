@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/udovenkoav1981/RedLease/internal/boottime"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
@@ -60,8 +59,8 @@ func TestBackgroundHealingRetriesMissingReplicasToFiveOfFive(t *testing.T) {
 		[testServerCount]bool{true, true, true, true, true},
 	)
 
-	if got := leaseValidUntil(acquired.lease); got != originalValidUntil {
-		t.Fatalf("healing changed validity from %d to %d", originalValidUntil, got)
+	if got := leaseValidUntil(acquired.lease); !got.Equal(originalValidUntil) {
+		t.Fatalf("healing changed validity from %v to %v", originalValidUntil, got)
 	}
 }
 
@@ -98,8 +97,8 @@ func TestBackgroundHealingReattachesReplicaAfterStaleRenew(t *testing.T) {
 	harness.respondAcquire(4, healing, protocol.StatusOK, 2_000)
 	waitForConfirmedReplicas(t, lease, [testServerCount]bool{true, true, true, true, true})
 
-	if got := leaseValidUntil(lease); got != renewedValidUntil {
-		t.Fatalf("healing changed renewed validity from %d to %d", renewedValidUntil, got)
+	if got := leaseValidUntil(lease); !got.Equal(renewedValidUntil) {
+		t.Fatalf("healing changed renewed validity from %v to %v", renewedValidUntil, got)
 	}
 }
 
@@ -162,7 +161,7 @@ func TestBackgroundHealingStopsAfterLocalValidityExpires(t *testing.T) {
 	}
 
 	acquired.lease.stateMu.Lock()
-	acquired.lease.validUntil = boottime.Now()
+	acquired.lease.validUntil = time.Now()
 	acquired.lease.stateMu.Unlock()
 	for replica := testQuorumSize; replica < testServerCount; replica++ {
 		harness.respondAcquire(

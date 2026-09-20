@@ -5,6 +5,9 @@ package protocol
 
 import redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 
+// MaxTTLMS is the maximum lease TTL representable by the RedLease protocol.
+const MaxTTLMS uint64 = 5_000
+
 type Operation = redleasev1.ClientOperation
 
 const (

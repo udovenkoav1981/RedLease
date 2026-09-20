@@ -11,12 +11,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/udovenkoav1981/RedLease/internal/boottime"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
 const (
 	// ProtocolMaxTTL is the maximum configured TTL allowed by the protocol.
-	ProtocolMaxTTL = 5 * time.Second
+	ProtocolMaxTTL = time.Duration(protocol.MaxTTLMS) * time.Millisecond
 	// RestartQuarantineDuration is the minimum delay enforced by the built-in
 	// restart quarantine. An embedded owner which skips that quarantine assumes
 	// responsibility for enforcing the same delay when prior RAM state may have
@@ -289,7 +289,7 @@ func (s *Server) runExpiredLeaseCleanup() {
 	for {
 		select {
 		case <-ticker.C:
-			if s.active() && !s.removeExpiredKeys(boottime.Now()) {
+			if s.active() && !s.removeExpiredKeys(time.Now()) {
 				return
 			}
 		case <-s.ctx.Done():

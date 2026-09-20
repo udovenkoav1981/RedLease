@@ -249,7 +249,7 @@ func TestAcquireReturnsNotAcquiredWhenSendQueueIsFull(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("writer did not start")
 	}
-	for request := uint64(0); request < sendQueueCapacity; request++ {
+	for request := range uint64(sendQueueCapacity) {
 		if err := generation.submitNoResponse(client.newReleaseRequest(request+2, request+2)); err != nil {
 			t.Fatalf("fill send queue at request %d: %v", request, err)
 		}

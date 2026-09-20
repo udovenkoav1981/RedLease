@@ -15,6 +15,7 @@ import (
 
 type recordingConn struct {
 	bytes.Buffer
+
 	reads  int
 	writes int
 }

@@ -2,9 +2,9 @@ package client
 
 import (
 	"context"
+	"time"
 
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
-	"github.com/udovenkoav1981/RedLease/internal/boottime"
 )
 
 // backgroundHeal keeps trying to place this lease on every replica while the
@@ -38,15 +38,15 @@ func (l *Lease) backgroundHeal() {
 func (l *Lease) healingTargets() ([]int, bool) {
 	l.stateMu.RLock()
 	defer l.stateMu.RUnlock()
-	now := boottime.Now()
+	now := time.Now()
 
-	if l.lifecycle != leaseActive || now >= l.validUntil {
+	if l.lifecycle != leaseActive || !now.Before(l.validUntil) {
 		return nil, false
 	}
 
 	targets := make([]int, 0, len(l.confirmedUntil))
 	for replica, confirmedUntil := range l.confirmedUntil {
-		if now >= confirmedUntil {
+		if !now.Before(confirmedUntil) {
 			targets = append(targets, replica)
 		}
 	}
@@ -100,7 +100,7 @@ func (l *Lease) healReplicas(replicas []int) int {
 			operationStart,
 			result.response.TTLMS,
 		)
-		if boottime.Now() < candidate {
+		if time.Now().Before(candidate) {
 			l.markConfirmed(result.replica, candidate)
 			confirmed++
 		}

@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"sync"
+	"time"
 
-	"github.com/udovenkoav1981/RedLease/internal/boottime"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
@@ -31,7 +31,7 @@ type leaseID struct {
 type lease struct {
 	key       uint64
 	id        leaseID
-	deadline  uint64
+	deadline  time.Time
 	heapIndex int
 }
 
@@ -40,7 +40,7 @@ type leaseDeadlineHeap []*lease
 func (h leaseDeadlineHeap) Len() int { return len(h) }
 
 func (h leaseDeadlineHeap) Less(i, j int) bool {
-	return h[i].deadline < h[j].deadline
+	return h[i].deadline.Before(h[j].deadline)
 }
 
 func (h leaseDeadlineHeap) Swap(i, j int) {
@@ -134,7 +134,7 @@ func (s *Server) failRecoveredPanic(scope string, recovered any) {
 	))
 }
 
-func (shard *leaseShard) addLease(key uint64, id leaseID, deadline uint64) {
+func (shard *leaseShard) addLease(key uint64, id leaseID, deadline time.Time) {
 	current := &lease{
 		key:       key,
 		id:        id,
@@ -150,9 +150,9 @@ func (shard *leaseShard) removeLease(current *lease) {
 	heap.Remove(&shard.deadlines, current.heapIndex)
 }
 
-func (shard *leaseShard) removeExpiredLeases(now uint64) uint64 {
+func (shard *leaseShard) removeExpiredLeases(now time.Time) uint64 {
 	var deleted uint64
-	for len(shard.deadlines) != 0 && shard.deadlines[0].deadline <= now {
+	for len(shard.deadlines) != 0 && !shard.deadlines[0].deadline.After(now) {
 		current := heap.Pop(&shard.deadlines).(*lease)
 		delete(shard.leases, current.key)
 		deleted++
@@ -160,7 +160,7 @@ func (shard *leaseShard) removeExpiredLeases(now uint64) uint64 {
 	return deleted
 }
 
-func (s *Server) removeExpiredKeys(now uint64) bool {
+func (s *Server) removeExpiredKeys(now time.Time) bool {
 	s.cleanupMu.Lock()
 	defer s.cleanupMu.Unlock()
 
@@ -171,7 +171,7 @@ func (s *Server) removeExpiredKeys(now uint64) bool {
 	return s.releaseKeys(deleted)
 }
 
-func removeExpiredKeysFromShard(shard *leaseShard, now uint64) uint64 {
+func removeExpiredKeysFromShard(shard *leaseShard, now time.Time) uint64 {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 	return shard.removeExpiredLeases(now)
@@ -186,7 +186,7 @@ func (s *Server) apply(shard *leaseShard, op operation) protocol.Response {
 		return notReadyResponse(op)
 	}
 	s.operationTotals[op.kind].Add(1)
-	now := boottime.Now()
+	now := time.Now()
 	switch op.kind {
 	case operationAcquire:
 		return s.acquire(shard, op, now)
@@ -199,7 +199,7 @@ func (s *Server) apply(shard *leaseShard, op operation) protocol.Response {
 	}
 }
 
-func (s *Server) acquire(shard *leaseShard, op operation, now uint64) protocol.Response {
+func (s *Server) acquire(shard *leaseShard, op operation, now time.Time) protocol.Response {
 	effectiveTTLMS := min(op.requestedTTLMS, s.config.MaxTTL)
 	cleanupAttempted := false
 	for {
@@ -221,21 +221,21 @@ func (s *Server) acquire(shard *leaseShard, op operation, now uint64) protocol.R
 func (s *Server) acquireLocked(
 	shard *leaseShard,
 	op operation,
-	now uint64,
+	now time.Time,
 	effectiveTTLMS uint64,
 ) (protocol.Response, bool) {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
 	current, exists := shard.leases[op.key]
-	if exists && current.deadline > now && current.id == op.leaseID {
+	if exists && current.deadline.After(now) && current.id == op.leaseID {
 		return acquireResponse(
 			op.requestID,
 			protocol.StatusAlreadyOwned,
 			remainingTTLMS(current.deadline, now, s.config.MaxTTL),
 		), false
 	}
-	if exists && current.deadline > now {
+	if exists && current.deadline.After(now) {
 		return acquireResponse(op.requestID, protocol.StatusBusy, 0), false
 	}
 	if exists {
@@ -254,12 +254,12 @@ func (s *Server) acquireLocked(
 	shard.addLease(
 		op.key,
 		op.leaseID,
-		now+effectiveTTLMS,
+		now.Add(time.Duration(effectiveTTLMS)*time.Millisecond),
 	)
 	return acquireResponse(op.requestID, protocol.StatusOK, effectiveTTLMS), false
 }
 
-func (s *Server) renew(shard *leaseShard, op operation, now uint64) protocol.Response {
+func (s *Server) renew(shard *leaseShard, op operation, now time.Time) protocol.Response {
 	shard.mu.Lock()
 
 	current, exists := shard.leases[op.key]
@@ -276,8 +276,8 @@ func (s *Server) renew(shard *leaseShard, op operation, now uint64) protocol.Res
 		)
 		return renewResponse(op.requestID, protocol.StatusStale, 0)
 	}
-	if current.deadline <= now {
-		expiredByMS := now - current.deadline
+	if !current.deadline.After(now) {
+		expiredByMS := uint64(now.Sub(current.deadline).Milliseconds())
 		shard.removeLease(current)
 		released := s.releaseKeys(1)
 		shard.mu.Unlock()
@@ -301,8 +301,8 @@ func (s *Server) renew(shard *leaseShard, op operation, now uint64) protocol.Res
 	}
 
 	effectiveTTLMS := min(op.requestedTTLMS, s.config.MaxTTL)
-	candidate := now + effectiveTTLMS
-	if candidate > current.deadline {
+	candidate := now.Add(time.Duration(effectiveTTLMS) * time.Millisecond)
+	if candidate.After(current.deadline) {
 		current.deadline = candidate
 		heap.Fix(&shard.deadlines, current.heapIndex)
 	}
@@ -311,7 +311,7 @@ func (s *Server) renew(shard *leaseShard, op operation, now uint64) protocol.Res
 	return renewResponse(op.requestID, protocol.StatusOK, remaining)
 }
 
-func (s *Server) release(shard *leaseShard, op operation, now uint64) protocol.Response {
+func (s *Server) release(shard *leaseShard, op operation, now time.Time) protocol.Response {
 	shard.mu.Lock()
 
 	current, exists := shard.leases[op.key]
@@ -319,8 +319,8 @@ func (s *Server) release(shard *leaseShard, op operation, now uint64) protocol.R
 		shard.mu.Unlock()
 		return releaseResponse(op.requestID, protocol.StatusOK)
 	}
-	if current.deadline <= now {
-		expiredByMS := now - current.deadline
+	if !current.deadline.After(now) {
+		expiredByMS := uint64(now.Sub(current.deadline).Milliseconds())
 		shard.removeLease(current)
 		released := s.releaseKeys(1)
 		shard.mu.Unlock()
@@ -383,8 +383,12 @@ func (s *Server) logLeaseOperation(
 	s.logger.LogAttrs(ctx, level, message, attrs[:count]...)
 }
 
-func remainingTTLMS(deadline, now, maximum uint64) uint64 {
-	return min(boottime.Remaining(deadline, now), maximum)
+func remainingTTLMS(deadline, now time.Time, maximum uint64) uint64 {
+	remaining := deadline.Sub(now).Milliseconds()
+	if remaining <= 0 {
+		return 0
+	}
+	return min(uint64(remaining), maximum)
 }
 
 func acquireResponse(requestID uint64, status protocol.Status, ttlMS uint64) protocol.Response {

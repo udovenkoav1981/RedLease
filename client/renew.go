@@ -3,8 +3,8 @@ package client
 import (
 	"context"
 	"errors"
+	"time"
 
-	"github.com/udovenkoav1981/RedLease/internal/boottime"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
@@ -102,7 +102,7 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 	}
 
 	var (
-		candidates   = make([]uint64, serverCount)
+		candidates   = make([]time.Time, serverCount)
 		successful   = make([]bool, serverCount)
 		firstFailure error
 		received     int
@@ -121,13 +121,13 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 			} else if result.response.Status != protocol.StatusOK {
 				l.clearConfirmed(result.replica)
 			} else {
-				now := boottime.Now()
+				now := time.Now()
 				successful[result.replica] = true
 				candidates[result.replica] = candidateValidUntil(
 					operationStart,
 					result.response.TTLMS,
 				)
-				if now < candidates[result.replica] {
+				if now.Before(candidates[result.replica]) {
 					l.markConfirmed(result.replica, candidates[result.replica])
 				} else {
 					l.clearConfirmed(result.replica)
@@ -138,7 +138,7 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 					successful,
 					quorumSize,
 				)
-				if hasQuorum && now < quorumValidUntil {
+				if hasQuorum && now.Before(quorumValidUntil) {
 					if err := l.renewCancellationError(ctx); err != nil {
 						firstFailure = err
 						collecting = false
@@ -163,7 +163,7 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 				candidates,
 				successful,
 				serverCount-received,
-				boottime.Now(),
+				time.Now(),
 				quorumSize,
 			) {
 				collecting = false
@@ -225,7 +225,7 @@ func (l *Lease) submitRenew(
 
 func (l *Lease) collectRemainingRenewResults(
 	cancelCollection context.CancelFunc,
-	operationStart uint64,
+	operationStart time.Time,
 	results <-chan renewReplicaResult,
 	remaining int,
 ) {
@@ -242,7 +242,7 @@ func (l *Lease) collectRemainingRenewResults(
 			operationStart,
 			result.response.TTLMS,
 		)
-		if boottime.Now() < candidate {
+		if time.Now().Before(candidate) {
 			l.markConfirmed(result.replica, candidate)
 		} else {
 			l.clearConfirmed(result.replica)

@@ -16,6 +16,7 @@ func BenchmarkServerLeaseStorage(b *testing.B) {
 	for _, workers := range []int{1, 2, 4, 8, 16, 32, 64} {
 		b.Run(fmt.Sprintf("workers=%d", workers), func(b *testing.B) {
 			server := &Server{shards: make([]*leaseShard, defaultShardCount)}
+			deadline := time.Now().Add(time.Minute)
 			for index := range server.shards {
 				shard := &leaseShard{leases: make(map[uint64]*lease)}
 				server.shards[index] = shard
@@ -29,7 +30,7 @@ func BenchmarkServerLeaseStorage(b *testing.B) {
 					shard := server.shards[server.shardIndex(key)]
 
 					shard.mu.Lock()
-					shard.addLease(key, id, 1)
+					shard.addLease(key, id, deadline)
 					shard.mu.Unlock()
 
 					shard = server.shards[server.shardIndex(key)]

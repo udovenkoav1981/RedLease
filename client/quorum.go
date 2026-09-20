@@ -1,6 +1,10 @@
 package client
 
-import "github.com/udovenkoav1981/RedLease/internal/protocol"
+import (
+	"time"
+
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
+)
 
 // Quorum selects one supported majority configuration.
 type Quorum uint8
@@ -34,11 +38,11 @@ func (q Quorum) size() int {
 	return size
 }
 
-func candidateValidUntil(operationStart, ttlMS uint64) uint64 {
-	if ttlMS <= safetyMarginMS {
+func candidateValidUntil(operationStart time.Time, ttlMS uint64) time.Time {
+	if ttlMS <= safetyMarginMS || ttlMS > protocol.MaxTTLMS {
 		return operationStart
 	}
-	return operationStart + (ttlMS - safetyMarginMS)
+	return operationStart.Add(time.Duration(ttlMS-safetyMarginMS) * time.Millisecond)
 }
 
 func isSuccessfulAcquire(status protocol.Status) bool {

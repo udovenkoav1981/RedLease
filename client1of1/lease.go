@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
-	"github.com/udovenkoav1981/RedLease/internal/boottime"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
@@ -59,11 +59,11 @@ type Lease struct {
 	client   *Client
 	sequence uint64
 	key      uint64
-	now      uint64
+	now      time.Time
 
 	stateMu    sync.RWMutex
 	lifecycle  leaseLifecycle
-	validUntil uint64
+	validUntil time.Time
 
 	renewMu     sync.Mutex
 	releaseOnce sync.Once
@@ -86,7 +86,7 @@ func (c *Client) Acquire(
 		client:    c,
 		sequence:  sequence,
 		key:       key,
-		now:       boottime.Now(),
+		now:       time.Now(),
 		lifecycle: leaseActive,
 	}
 
@@ -120,7 +120,7 @@ func (l *Lease) acceptAcquireResponse(
 	switch response.Status {
 	case protocol.StatusOK, protocol.StatusAlreadyOwned:
 		validUntil := candidateValidUntil(l.now, response.TTLMS)
-		if boottime.Now() >= validUntil {
+		if !time.Now().Before(validUntil) {
 			return false, nil
 		}
 		l.validUntil = validUntil
@@ -141,7 +141,11 @@ func (l *Lease) RemainingTTLms() uint64 {
 	if !active {
 		return 0
 	}
-	return boottime.Remaining(validUntil, boottime.Now())
+	remaining := time.Until(validUntil).Milliseconds()
+	if remaining <= 0 {
+		return 0
+	}
+	return uint64(remaining)
 }
 
 // Renew attempts to extend this lease on its lock-server. Failure leaves the
@@ -155,7 +159,7 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 		l.stateMu.Unlock()
 		return &operationError{kind: ErrNotRenewed, cause: ErrLeaseReleased}
 	}
-	l.now = boottime.Now()
+	l.now = time.Now()
 	l.stateMu.Unlock()
 
 	renewed := false
@@ -188,7 +192,7 @@ func (l *Lease) acceptRenewResponse(
 		return false, nil
 	}
 	validUntil := candidateValidUntil(l.now, response.TTLMS)
-	if boottime.Now() >= validUntil {
+	if !time.Now().Before(validUntil) {
 		return false, nil
 	}
 
@@ -197,7 +201,7 @@ func (l *Lease) acceptRenewResponse(
 	if l.lifecycle != leaseActive {
 		return false, ErrLeaseReleased
 	}
-	if validUntil > l.validUntil {
+	if validUntil.After(l.validUntil) {
 		l.validUntil = validUntil
 	}
 	return true, nil
@@ -210,7 +214,7 @@ func (l *Lease) Release() {
 	l.releaseOnce.Do(func() {
 		l.stateMu.Lock()
 		l.lifecycle = leaseReleased
-		l.validUntil = 0
+		l.validUntil = time.Time{}
 		l.stateMu.Unlock()
 
 		l.client.release(l.key, l.sequence)
@@ -221,11 +225,11 @@ func (c *Client) release(key, sequence uint64) {
 	_ = c.submitNoResponse(c.newReleaseRequest(key, sequence))
 }
 
-func candidateValidUntil(operationStart, ttlMS uint64) uint64 {
-	if ttlMS <= safetyMarginMS {
+func candidateValidUntil(operationStart time.Time, ttlMS uint64) time.Time {
+	if ttlMS <= safetyMarginMS || ttlMS > protocol.MaxTTLMS {
 		return operationStart
 	}
-	return operationStart + (ttlMS - safetyMarginMS)
+	return operationStart.Add(time.Duration(ttlMS-safetyMarginMS) * time.Millisecond)
 }
 
 func (c *Client) newAcquireRequest(key, sequence, ttlMS uint64) *outboundConnectionRequest {
