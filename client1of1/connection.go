@@ -18,10 +18,11 @@ var (
 	errSendQueueFull    = errors.New("connection send queue full")
 )
 
-const sendQueueCapacity = 256
+const sendQueueCapacity = 4096
 
 type leaseConnection interface {
-	SendClientRequest(request *redleasev1.ClientRequest) error
+	BufferClientRequest(request *redleasev1.ClientRequest) error
+	FlushClientRequests() error
 	Recv() (protocol.Response, error)
 	Close() error
 }
@@ -229,20 +230,38 @@ func (g *connectionGeneration) send() {
 	defer g.workers.Done()
 
 	for {
+		var outbound *outboundConnectionRequest
 		select {
 		case <-g.done:
 			return
-		case outbound := <-g.sendQueue:
+		case outbound = <-g.sendQueue:
+		}
+
+		for {
 			if err := g.err(); err != nil {
 				outbound.recycle()
 				return
 			}
-			err := g.connection.SendClientRequest(&outbound.request)
+			err := g.connection.BufferClientRequest(&outbound.request)
 			outbound.recycle()
 			if err != nil {
 				g.terminate(fmt.Errorf("send: %w", err))
 				return
 			}
+
+			if err := g.err(); err != nil {
+				return
+			}
+			select {
+			case outbound = <-g.sendQueue:
+				continue
+			default:
+			}
+			if err := g.connection.FlushClientRequests(); err != nil {
+				g.terminate(fmt.Errorf("flush send batch: %w", err))
+				return
+			}
+			break
 		}
 	}
 }

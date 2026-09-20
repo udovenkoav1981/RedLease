@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"errors"
@@ -63,7 +64,7 @@ func TestFrameReader(t *testing.T) {
 		t.Fatal(err)
 	}
 	var reader FrameReader
-	got, err := reader.ReadFrame(bytes.NewReader(want))
+	got, err := reader.ReadFrame(bufio.NewReader(bytes.NewReader(want)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +79,7 @@ func TestFrameReaderRejectsInvalidPayloadSize(t *testing.T) {
 		var prefix [sizePrefixBytes]byte
 		binary.LittleEndian.PutUint32(prefix[:], payloadSize)
 		var reader FrameReader
-		if _, err := reader.ReadFrame(bytes.NewReader(prefix[:])); !errors.Is(err, ErrMalformedFrame) {
+		if _, err := reader.ReadFrame(bufio.NewReader(bytes.NewReader(prefix[:]))); !errors.Is(err, ErrMalformedFrame) {
 			t.Fatalf("payload size %d error = %v, want ErrMalformedFrame", payloadSize, err)
 		}
 	}
@@ -89,7 +90,7 @@ func TestFrameReaderRejectsTruncatedPayload(t *testing.T) {
 	var frame [sizePrefixBytes + 1]byte
 	binary.LittleEndian.PutUint32(frame[:sizePrefixBytes], 2)
 	var reader FrameReader
-	if _, err := reader.ReadFrame(bytes.NewReader(frame[:])); !errors.Is(err, io.ErrUnexpectedEOF) {
+	if _, err := reader.ReadFrame(bufio.NewReader(bytes.NewReader(frame[:]))); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("truncated payload error = %v, want io.ErrUnexpectedEOF", err)
 	}
 }

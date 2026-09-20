@@ -147,28 +147,44 @@ func (s *Server) serveConnection(conn net.Conn) (result error) {
 	go session.receiveSafely()
 
 	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
-	recvDone := session.recvDone
+	writer := transport.NewFrameWriter(conn)
+	return session.writeResponses(writer, builder)
+}
+
+func (s *connectionSession) writeResponses(
+	writer *transport.FrameWriter,
+	builder *flatbuffers.Builder,
+) error {
+	recvDone := s.recvDone
+
+connectionLoop:
 	for {
 		select {
-		case response, ok := <-session.responses:
+		case response, ok := <-s.responses:
 			if !ok {
-				return s.unavailableErrorUnlessClosed()
+				return s.server.unavailableErrorUnlessClosed()
 			}
-			if err := s.unavailableError(); err != nil {
-				session.releaseSlot()
-				return err
+
+			for {
+				if err := s.bufferResponse(writer, builder, response); err != nil {
+					return err
+				}
+				select {
+				case response, ok = <-s.responses:
+					if ok {
+						continue
+					}
+					if err := writer.Flush(); err != nil && s.server.ctx.Err() == nil {
+						return fmt.Errorf("flush response batch: %w", err)
+					}
+					return s.server.unavailableErrorUnlessClosed()
+				default:
+					if err := writer.Flush(); err != nil {
+						return fmt.Errorf("flush response batch: %w", err)
+					}
+					continue connectionLoop
+				}
 			}
-			frame, err := protocol.EncodeResponse(builder, response)
-			if err != nil {
-				session.releaseSlot()
-				s.fail(fmt.Errorf("encode response: %w", err))
-				return s.unavailableError()
-			}
-			if err := transport.WriteFrame(conn, frame); err != nil {
-				session.releaseSlot()
-				return fmt.Errorf("write response: %w", err)
-			}
-			session.releaseSlot()
 
 		case err := <-recvDone:
 			if err != nil && !errors.Is(err, io.EOF) {
@@ -176,10 +192,33 @@ func (s *Server) serveConnection(conn net.Conn) (result error) {
 			}
 			recvDone = nil
 
-		case <-ctx.Done():
-			return s.unavailableErrorUnlessClosed()
+		case <-s.ctx.Done():
+			return s.server.unavailableErrorUnlessClosed()
 		}
 	}
+}
+
+func (s *connectionSession) bufferResponse(
+	writer *transport.FrameWriter,
+	builder *flatbuffers.Builder,
+	response protocol.Response,
+) error {
+	if err := s.server.unavailableError(); err != nil {
+		s.releaseSlot()
+		return err
+	}
+	frame, err := protocol.EncodeResponse(builder, response)
+	if err != nil {
+		s.releaseSlot()
+		s.server.fail(fmt.Errorf("encode response: %w", err))
+		return s.server.unavailableError()
+	}
+	if err := writer.BufferFrame(frame); err != nil {
+		s.releaseSlot()
+		return fmt.Errorf("buffer response: %w", err)
+	}
+	s.releaseSlot()
+	return nil
 }
 
 func (s *connectionSession) receiveSafely() {
@@ -209,9 +248,9 @@ func (s *connectionSession) receive() {
 		}()
 	}()
 
-	var reader protocol.FrameReader
+	reader := transport.NewFrameReader(s.conn)
 	for {
-		frame, err := reader.ReadFrame(s.conn)
+		frame, err := reader.ReadFrame()
 		if err != nil {
 			s.recvDone <- err
 			return

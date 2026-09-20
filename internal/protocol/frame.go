@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -16,26 +17,42 @@ const (
 // NewBuilderSize is the initial capacity used for the small RedLease frames.
 const NewBuilderSize = initialBufferSize
 
-// FrameReader owns reusable storage for one size-prefixed FlatBuffer.
+// FrameReader returns size-prefixed FlatBuffers directly from a bufio.Reader.
+// A returned frame remains valid only until the next ReadFrame call.
 type FrameReader struct {
-	buffer [MaxFrameBytes]byte
+	pendingBytes int
 }
 
-func (r *FrameReader) ReadFrame(reader io.Reader) ([]byte, error) {
-	prefix := r.buffer[:sizePrefixBytes]
-	if _, err := io.ReadFull(reader, prefix); err != nil {
-		return nil, err
+func (r *FrameReader) ReadFrame(reader *bufio.Reader) ([]byte, error) {
+	if r.pendingBytes != 0 {
+		if _, err := reader.Discard(r.pendingBytes); err != nil {
+			return nil, err
+		}
+		r.pendingBytes = 0
+	}
+
+	prefix, err := reader.Peek(sizePrefixBytes)
+	if err != nil {
+		return nil, frameReadError(prefix, err)
 	}
 	payloadSize := binary.LittleEndian.Uint32(prefix)
-	if payloadSize == 0 || payloadSize > uint32(len(r.buffer)-sizePrefixBytes) {
+	if payloadSize == 0 || payloadSize > uint32(MaxFrameBytes-sizePrefixBytes) {
 		return nil, fmt.Errorf("%w: payload size %d exceeds limit", ErrMalformedFrame, payloadSize)
 	}
 	frameSize := sizePrefixBytes + int(payloadSize)
-	frame := r.buffer[:frameSize]
-	if _, err := io.ReadFull(reader, frame[sizePrefixBytes:]); err != nil {
-		return nil, err
+	frame, err := reader.Peek(frameSize)
+	if err != nil {
+		return nil, frameReadError(frame, err)
 	}
+	r.pendingBytes = frameSize
 	return frame, nil
+}
+
+func frameReadError(partial []byte, err error) error {
+	if errors.Is(err, io.EOF) && len(partial) != 0 {
+		return io.ErrUnexpectedEOF
+	}
+	return err
 }
 
 func WriteFrame(writer io.Writer, frame []byte) error {

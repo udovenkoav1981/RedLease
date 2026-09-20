@@ -17,9 +17,10 @@ type fakeLeaseConnection struct {
 	requests  chan protocol.Request
 	responses chan protocol.Response
 	sendStart chan struct{}
+	flushes   chan struct{}
 }
 
-func (c *fakeLeaseConnection) SendClientRequest(request *redleasev1.ClientRequest) error {
+func (c *fakeLeaseConnection) BufferClientRequest(request *redleasev1.ClientRequest) error {
 	decoded, err := protocol.DecodeRequest(request.Table().Bytes)
 	if err != nil {
 		return err
@@ -36,6 +37,13 @@ func (c *fakeLeaseConnection) SendClientRequest(request *redleasev1.ClientReques
 	case <-c.ctx.Done():
 		return c.ctx.Err()
 	}
+}
+
+func (c *fakeLeaseConnection) FlushClientRequests() error {
+	if c.flushes != nil {
+		c.flushes <- struct{}{}
+	}
+	return nil
 }
 
 func (c *fakeLeaseConnection) Recv() (protocol.Response, error) {
@@ -112,6 +120,56 @@ func TestStreamGenerationCancellationUnblocksAwait(t *testing.T) {
 	cancel()
 	if _, err := future.await(ctx, nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("await error = %v, want context.Canceled", err)
+	}
+}
+
+func TestConnectionGenerationFlushesAvailableRequestsAsOneBatch(t *testing.T) {
+	connectionContext, cancelConnection := context.WithCancel(context.Background())
+	connection := &fakeLeaseConnection{
+		ctx:       connectionContext,
+		requests:  make(chan protocol.Request),
+		responses: make(chan protocol.Response),
+		sendStart: make(chan struct{}, 1),
+		flushes:   make(chan struct{}, 1),
+	}
+	generation := newConnectionGeneration(connection, cancelConnection)
+	defer generation.Close()
+	client := &Client{}
+
+	if err := generation.submitNoResponse(client.newReleaseRequest(1, 1)); err != nil {
+		t.Fatalf("submit first request: %v", err)
+	}
+	select {
+	case <-connection.sendStart:
+	case <-time.After(time.Second):
+		t.Fatal("writer did not start")
+	}
+	if err := generation.submitNoResponse(client.newReleaseRequest(2, 2)); err != nil {
+		t.Fatalf("submit second request: %v", err)
+	}
+	if err := generation.submitNoResponse(client.newReleaseRequest(3, 3)); err != nil {
+		t.Fatalf("submit third request: %v", err)
+	}
+
+	for wantKey := uint64(1); wantKey <= 3; wantKey++ {
+		select {
+		case request := <-connection.requests:
+			if request.Key != wantKey {
+				t.Fatalf("request key = %d, want %d", request.Key, wantKey)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("request %d was not buffered", wantKey)
+		}
+	}
+	select {
+	case <-connection.flushes:
+	case <-time.After(time.Second):
+		t.Fatal("available request batch was not flushed")
+	}
+	select {
+	case <-connection.flushes:
+		t.Fatal("available requests were split into multiple flushes")
+	default:
 	}
 }
 

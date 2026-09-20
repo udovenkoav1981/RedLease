@@ -34,6 +34,11 @@ Server-to-server hot path  none
 Wire format                FlatBuffers, size-prefixed frames
 Client transport           N persistent ordered TCP connections
 TCP frame write timeout    1 s (fixed)
+Client TCP write batching  block for first request, drain available queue, flush
+Server TCP write batching  block for first response, drain available queue, flush
+TCP read buffering         64 KiB per connection on client and server
+TCP write buffering        64 KiB per connection on client and server
+client1of1 send queue      4096 requests per connection generation
 Initial ownership          >= Q/N
 Steady-state target        N/N
 Restart protection         built-in quarantine by default; explicit owner-managed opt-out
@@ -532,11 +537,30 @@ response кодируется отдельным стандартным size-pre
 а один reader последовательно читает responses. На server действует зеркальная
 схема: один reader принимает requests и один writer отправляет responses. Это
 исключает перемешивание байтов нескольких frames без mutex вокруг socket I/O.
+Reader на обеих сторонах использует собственный connection-scoped буфер 64 KiB.
+Один TCP `Read` может получить prefix, payload и несколько следующих frames;
+разбор уже накопленных frames не обращается к socket повторно. Reader получает
+frame через `Peek()` непосредственно из этого буфера и вызывает `Discard()`
+перед чтением следующего frame, не копируя каждый frame в промежуточный массив.
 Перед записью каждого полного frame writer устанавливает отдельный TCP write
 deadline на фиксированную константу 1 секунду. Timeout делает соединение
 непригодным: оно закрывается, вся ещё не отправленная очередь этого поколения
 отбрасывается, а client запускает reconnect. Запросы старого поколения на новое
 соединение автоматически не переносятся.
+
+Writer `client1of1` блокируется в ожидании первого request. Получив его, writer
+копирует frame в connection write buffer и затем забирает остальные уже
+доступные элементы send queue без блокировки. Когда доступная часть очереди
+заканчивается, writer делает один `Flush()` и снова блокируется в ожидании
+первого request следующего batch. Искусственной задержки для накопления batch
+нет. Поэтому одиночный request отправляется сразу, а burst из нескольких
+requests требует меньше TCP `Write` calls.
+
+Server response writer следует той же схеме для `session.responses`: блокируется
+до первого response, копирует его и остальные уже доступные responses в
+connection write buffer, один раз вызывает `Flush()` и возвращается к
+блокирующему ожиданию. Connection in-flight slot освобождается после копирования
+response в write buffer; последующая ошибка flush закрывает соединение.
 
 Client помещает запрос в send queue без ожидания свободного места. Если очередь
 заполнена, только новый запрос отклоняется как не выполненный: существующее

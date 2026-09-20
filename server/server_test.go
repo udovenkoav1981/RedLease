@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	flatbuffers "github.com/google/flatbuffers/go"
+
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
@@ -910,6 +912,71 @@ func TestConnectionCanReplyOutOfOrderAcrossShards(t *testing.T) {
 		t.Fatalf("second response request_id = %d, want 1", response.RequestID)
 	}
 	closeTestConnection(t, connection, errDone)
+}
+
+type writeCountingConn struct {
+	net.Conn
+	writes int
+}
+
+func (c *writeCountingConn) Write(value []byte) (int, error) {
+	c.writes++
+	return c.Conn.Write(value)
+}
+
+func TestConnectionResponseWriterFlushesAvailableResponsesAsOneBatch(t *testing.T) {
+	s := newTestServer(t, 1_000, 1)
+	activateServer(t, s)
+
+	serverConn, clientConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = serverConn.Close()
+		_ = clientConn.Close()
+	})
+	countingConn := &writeCountingConn{Conn: serverConn}
+	ctx, cancel := context.WithCancel(context.Background())
+	session := &connectionSession{
+		server:    s,
+		conn:      countingConn,
+		ctx:       ctx,
+		responses: make(chan protocol.Response, 2),
+		slots:     make(chan struct{}, 2),
+		recvDone:  make(chan error),
+	}
+	session.slots <- struct{}{}
+	session.slots <- struct{}{}
+	session.responses <- acquireResponse(1, protocol.StatusOK, 1_000)
+	session.responses <- releaseResponse(2, protocol.StatusOK)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- session.writeResponses(
+			transport.NewFrameWriter(countingConn),
+			flatbuffers.NewBuilder(protocol.NewBuilderSize),
+		)
+	}()
+	client := transport.NewConnection(clientConn)
+	for requestID := uint64(1); requestID <= 2; requestID++ {
+		response, err := client.Recv()
+		if err != nil {
+			t.Fatalf("receive response %d: %v", requestID, err)
+		}
+		if response.RequestID != requestID {
+			t.Fatalf("response request ID = %d, want %d", response.RequestID, requestID)
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("write responses: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("response writer did not stop")
+	}
+	if countingConn.writes != 1 {
+		t.Fatalf("TCP writes = %d, want 1", countingConn.writes)
+	}
 }
 
 func blockShard(t *testing.T, shard *leaseShard, key uint64) func() {
