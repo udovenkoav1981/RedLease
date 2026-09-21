@@ -1,6 +1,5 @@
-// Package protocol defines RedLease wire messages and their FlatBuffers
-// encoding. Decoded messages own their scalar values and never retain a view
-// of a receive buffer.
+// Package protocol defines RedLease wire framing, shared constants, and owned
+// response values. Server requests are decoded directly into server operations.
 package protocol
 
 import redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
@@ -27,18 +26,6 @@ const (
 	StatusNotReady        = redleasev1.LeaseStatusNOT_READY
 	StatusKeyLimitReached = redleasev1.LeaseStatusKEY_LIMIT_REACHED
 )
-
-// Request is the owned scalar representation queued by clients and dispatched
-// by servers. Fields not used by Operation are zero.
-type Request struct {
-	RequestID      uint64
-	Operation      Operation
-	Key            uint64
-	ClientID       uint32
-	BootID         uint32
-	LeaseSequence  uint64
-	RequestedTTLMS uint64
-}
 
 // Response is the owned scalar representation returned by a server. TTLMS is
 // the effective TTL for Acquire/Renew and configuredMaxTTL for GetTTL.

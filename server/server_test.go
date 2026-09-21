@@ -18,6 +18,7 @@ import (
 
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
+	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
 var (
@@ -104,7 +105,7 @@ func TestQuarantineAndGetTTL(t *testing.T) {
 		t.Fatalf("Release during quarantine = %s", got)
 	}
 
-	_, getTTL, direct, err := s.decodeRequest(getTTLRequest(13))
+	_, getTTL, direct, err := s.decodeRequest(getTTLRequest(13).Table().Bytes)
 	if err != nil {
 		t.Fatalf("decode GetTTL: %v", err)
 	}
@@ -808,7 +809,7 @@ func TestConnectionRejectsRequestDuringQuarantine(t *testing.T) {
 	s := newTestServer(t, 1_000, 1)
 	connection, errDone := newTestConnection(t, s)
 
-	if err := connection.Send(acquireRequest(1, 1, 1)); err != nil {
+	if err := sendClientRequest(connection, acquireRequest(1, 1, 1)); err != nil {
 		t.Fatalf("send Acquire: %v", err)
 	}
 	response, err := connection.Recv()
@@ -847,10 +848,10 @@ func TestConnectionPreservesSameKeyFIFO(t *testing.T) {
 	shard := s.shards[s.shardIndex(key)]
 	unblockShard := blockShard(t, shard, key)
 	connection, errDone := newTestConnection(t, s)
-	if err := connection.Send(acquireRequest(1, key, 1)); err != nil {
+	if err := sendClientRequest(connection, acquireRequest(1, key, 1)); err != nil {
 		t.Fatalf("send first Acquire: %v", err)
 	}
-	if err := connection.Send(acquireRequest(2, key, 1)); err != nil {
+	if err := sendClientRequest(connection, acquireRequest(2, key, 1)); err != nil {
 		t.Fatalf("send second Acquire: %v", err)
 	}
 
@@ -890,10 +891,10 @@ func TestConnectionCanReplyOutOfOrderAcrossShards(t *testing.T) {
 		firstKey,
 	)
 	connection, errDone := newTestConnection(t, s)
-	if err := connection.Send(acquireRequest(1, firstKey, 1)); err != nil {
+	if err := sendClientRequest(connection, acquireRequest(1, firstKey, 1)); err != nil {
 		t.Fatalf("send first Acquire: %v", err)
 	}
-	if err := connection.Send(acquireRequest(2, secondKey, 2)); err != nil {
+	if err := sendClientRequest(connection, acquireRequest(2, secondKey, 2)); err != nil {
 		t.Fatalf("send second Acquire: %v", err)
 	}
 
@@ -941,21 +942,26 @@ func TestConnectionResponseWriterFlushesAvailableResponsesAsOneBatch(t *testing.
 		server:    s,
 		conn:      countingConn,
 		ctx:       ctx,
-		responses: make(chan protocol.Response, 2),
+		responses: make(chan *outboundResponse, 2),
 		slots:     make(chan struct{}, 2),
 		recvDone:  make(chan error),
 	}
 	session.slots <- struct{}{}
 	session.slots <- struct{}{}
-	session.responses <- acquireResponse(1, protocol.StatusOK, 1_000)
-	session.responses <- releaseResponse(2, protocol.StatusOK)
+	first, err := s.newOutboundResponse(acquireResponse(1, protocol.StatusOK, 1_000))
+	if err != nil {
+		t.Fatalf("encode Acquire response: %v", err)
+	}
+	second, err := s.newOutboundResponse(releaseResponse(2, protocol.StatusOK))
+	if err != nil {
+		t.Fatalf("encode Release response: %v", err)
+	}
+	session.responses <- first
+	session.responses <- second
 
 	done := make(chan error, 1)
 	go func() {
-		done <- session.writeResponses(
-			transport.NewFrameWriter(countingConn),
-			flatbuffers.NewBuilder(protocol.NewBuilderSize),
-		)
+		done <- session.writeResponses(transport.NewFrameWriter(countingConn))
 	}()
 	client := transport.NewConnection(clientConn)
 	for requestID := uint64(1); requestID <= 2; requestID++ {
@@ -1044,31 +1050,90 @@ func closeTestConnection(t *testing.T, connection *transport.Connection, errDone
 	}
 }
 
-func acquireRequest(requestID, key, sequence uint64) protocol.Request {
-	return protocol.Request{
-		RequestID:      requestID,
-		Operation:      protocol.OperationAcquire,
-		Key:            key,
-		ClientID:       1,
-		BootID:         1,
-		LeaseSequence:  sequence,
-		RequestedTTLMS: 1000,
+func sendClientRequest(
+	connection *transport.Connection,
+	request *redleasev1.ClientRequest,
+) error {
+	if err := connection.BufferClientRequest(request); err != nil {
+		return err
 	}
+	return connection.FlushClientRequests()
 }
 
-func getTTLRequest(requestID uint64) protocol.Request {
-	return protocol.Request{RequestID: requestID, Operation: protocol.OperationGetTTL}
+func acquireRequest(requestID, key, sequence uint64) *redleasev1.ClientRequest {
+	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
+	redleasev1.ClientRequestStart(builder)
+	redleasev1.ClientRequestAddRequestId(builder, requestID)
+	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationACQUIRE)
+	redleasev1.ClientRequestAddAcquire(builder, redleasev1.CreateAcquireRequest(
+		builder,
+		key,
+		1,
+		1,
+		sequence,
+		1000,
+	))
+	return finishTestClientRequest(builder)
+}
+
+func getTTLRequest(requestID uint64) *redleasev1.ClientRequest {
+	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
+	redleasev1.ClientRequestStart(builder)
+	redleasev1.ClientRequestAddRequestId(builder, requestID)
+	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationGET_TTL)
+	return finishTestClientRequest(builder)
+}
+
+func requestWithoutPayload(operation redleasev1.ClientOperation) *redleasev1.ClientRequest {
+	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
+	redleasev1.ClientRequestStart(builder)
+	redleasev1.ClientRequestAddOperation(builder, operation)
+	return finishTestClientRequest(builder)
+}
+
+func finishTestClientRequest(builder *flatbuffers.Builder) *redleasev1.ClientRequest {
+	root := redleasev1.ClientRequestEnd(builder)
+	redleasev1.FinishSizePrefixedClientRequestBuffer(builder, root)
+	return redleasev1.GetSizePrefixedRootAsClientRequest(builder.FinishedBytes(), 0)
 }
 
 func TestDecodeInvalidRequest(t *testing.T) {
 	s := newTestServer(t, 1_000, 1)
-	for _, request := range []protocol.Request{
-		{},
-		{Operation: protocol.Operation(255)},
+	for _, request := range []*redleasev1.ClientRequest{
+		requestWithoutPayload(redleasev1.ClientOperationACQUIRE),
+		requestWithoutPayload(redleasev1.ClientOperationRENEW),
+		requestWithoutPayload(redleasev1.ClientOperationRELEASE),
+		requestWithoutPayload(redleasev1.ClientOperation(255)),
 	} {
-		_, _, _, err := s.decodeRequest(request)
-		if err == nil {
-			t.Fatalf("decodeRequest(%v) succeeded, want error", request)
+		_, _, _, err := s.decodeRequest(request.Table().Bytes)
+		if !errors.Is(err, protocol.ErrMalformedFrame) {
+			t.Fatalf("decodeRequest(%v) error = %v, want ErrMalformedFrame", request, err)
 		}
+	}
+	for _, frame := range [][]byte{
+		nil,
+		{1, 0, 0, 0, 0},
+		{255, 0, 0, 0, 0, 0, 0, 0},
+		{4, 0, 0, 0, 255, 255, 255, 127},
+	} {
+		_, _, _, err := s.decodeRequest(frame)
+		if !errors.Is(err, protocol.ErrMalformedFrame) {
+			t.Fatalf("decodeRequest(%x) error = %v, want ErrMalformedFrame", frame, err)
+		}
+	}
+}
+
+func TestDecodeRequestOwnsScalarsAfterReceiveBufferReuse(t *testing.T) {
+	s := newTestServer(t, 1_000, 1)
+	frame := acquireRequest(21, 22, 23).Table().Bytes
+	op, _, direct, err := s.decodeRequest(frame)
+	if err != nil || direct {
+		t.Fatalf("decode Acquire: operation=%+v direct=%t error=%v", op, direct, err)
+	}
+	clear(frame)
+	if op.requestID != 21 || op.kind != operationAcquire || op.key != 22 ||
+		op.leaseID != (leaseID{clientID: 1, bootID: 1, leaseSeq: 23}) ||
+		op.requestedTTLMS != 1_000 {
+		t.Fatalf("decoded operation changed after frame reuse: %+v", op)
 	}
 }

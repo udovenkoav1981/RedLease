@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
+	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
 var (
@@ -195,7 +196,7 @@ func (l *Lease) submitRenew(
 	submitContext context.Context,
 	collectionContext context.Context,
 	replica int,
-	request protocol.Request,
+	request *outboundConnectionRequest,
 	submissions chan<- acquireSubmission,
 	results chan<- renewReplicaResult,
 ) {
@@ -266,13 +267,20 @@ func (l *Lease) renewCancellationError(callerContext context.Context) error {
 	return nil
 }
 
-func (c *Client) newRenewRequest(key, sequence, ttlMS uint64) protocol.Request {
-	return protocol.Request{
-		Operation:      protocol.OperationRenew,
-		Key:            key,
-		ClientID:       c.clientID,
-		BootID:         c.bootID,
-		LeaseSequence:  sequence,
-		RequestedTTLMS: ttlMS,
-	}
+func (c *Client) newRenewRequest(key, sequence, ttlMS uint64) *outboundConnectionRequest {
+	outbound := c.newOutboundRequest()
+	builder := outbound.builder
+	redleasev1.ClientRequestStart(builder)
+	redleasev1.ClientRequestAddRequestId(builder, c.nextRequestID.Add(1))
+	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationRENEW)
+	redleasev1.ClientRequestAddRenew(builder, redleasev1.CreateRenewRequest(
+		builder,
+		key,
+		c.clientID,
+		c.bootID,
+		sequence,
+		ttlMS,
+	))
+	c.finishOutboundRequest(outbound)
+	return outbound
 }

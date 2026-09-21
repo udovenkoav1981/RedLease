@@ -24,6 +24,7 @@ type Client struct {
 	clientID        uint32
 	bootID          uint32
 	nextSequence    atomic.Uint64
+	nextRequestID   atomic.Uint64
 	quorum          Quorum
 	servers         []ServerConfig
 	responseTimeout time.Duration
@@ -36,6 +37,8 @@ type Client struct {
 
 	closeOnce sync.Once
 	closeErr  error
+
+	requestBuilderPool sync.Pool
 }
 
 // New creates a client and starts connecting to all configured servers. It

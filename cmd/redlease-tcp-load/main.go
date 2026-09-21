@@ -15,8 +15,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	flatbuffers "github.com/google/flatbuffers/go"
+
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
+	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
 const (
@@ -181,13 +184,11 @@ func waitForActive(parent context.Context, config *options, bootID uint32) error
 		<-ctx.Done()
 		_ = connection.Close()
 	}()
+	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
 
 	for sequence := uint64(1); ; sequence++ {
 		requestID := sequence*2 - 1
-		if err := connection.Send(protocol.Request{
-			RequestID: requestID, Operation: protocol.OperationAcquire, Key: 0,
-			ClientID: 1, BootID: bootID, LeaseSequence: sequence, RequestedTTLMS: config.ttlMS,
-		}); err != nil {
+		if err := sendAcquire(connection, builder, requestID, 0, bootID, sequence, config.ttlMS); err != nil {
 			return fmt.Errorf("send readiness Acquire: %w", err)
 		}
 		response, err := connection.Recv()
@@ -199,10 +200,7 @@ func waitForActive(parent context.Context, config *options, bootID uint32) error
 		}
 		switch response.Status {
 		case protocol.StatusOK:
-			if err := connection.Send(protocol.Request{
-				RequestID: requestID + 1, Operation: protocol.OperationRelease, Key: 0,
-				ClientID: 1, BootID: bootID, LeaseSequence: sequence,
-			}); err != nil {
+			if err := sendRelease(connection, builder, requestID+1, 0, bootID, sequence); err != nil {
 				return fmt.Errorf("send readiness Release: %w", err)
 			}
 			release, err := connection.Recv()
@@ -228,6 +226,7 @@ func waitForActive(parent context.Context, config *options, bootID uint32) error
 }
 
 func sendRequests(ctx context.Context, connection *transport.Connection, config *options, bootID uint32) error {
+	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
 	for sequence := uint64(1); ; sequence++ {
 		select {
 		case <-ctx.Done():
@@ -237,19 +236,72 @@ func sendRequests(ctx context.Context, connection *transport.Connection, config 
 
 		key := (sequence-1)%config.keyCount + 1
 		requestID := sequence*2 - 1
-		if err := connection.Send(protocol.Request{
-			RequestID: requestID, Operation: protocol.OperationAcquire, Key: key,
-			ClientID: 1, BootID: bootID, LeaseSequence: sequence, RequestedTTLMS: config.ttlMS,
-		}); err != nil {
+		if err := sendAcquire(connection, builder, requestID, key, bootID, sequence, config.ttlMS); err != nil {
 			return fmt.Errorf("send Acquire: %w", err)
 		}
-		if err := connection.Send(protocol.Request{
-			RequestID: requestID + 1, Operation: protocol.OperationRelease, Key: key,
-			ClientID: 1, BootID: bootID, LeaseSequence: sequence,
-		}); err != nil {
+		if err := sendRelease(connection, builder, requestID+1, key, bootID, sequence); err != nil {
 			return fmt.Errorf("send Release: %w", err)
 		}
 	}
+}
+
+func sendAcquire(
+	connection *transport.Connection,
+	builder *flatbuffers.Builder,
+	requestID uint64,
+	key uint64,
+	bootID uint32,
+	sequence uint64,
+	ttlMS uint64,
+) error {
+	builder.Reset()
+	redleasev1.ClientRequestStart(builder)
+	redleasev1.ClientRequestAddRequestId(builder, requestID)
+	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationACQUIRE)
+	redleasev1.ClientRequestAddAcquire(builder, redleasev1.CreateAcquireRequest(
+		builder,
+		key,
+		1,
+		bootID,
+		sequence,
+		ttlMS,
+	))
+	return sendBuiltRequest(connection, builder)
+}
+
+func sendRelease(
+	connection *transport.Connection,
+	builder *flatbuffers.Builder,
+	requestID uint64,
+	key uint64,
+	bootID uint32,
+	sequence uint64,
+) error {
+	builder.Reset()
+	redleasev1.ClientRequestStart(builder)
+	redleasev1.ClientRequestAddRequestId(builder, requestID)
+	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationRELEASE)
+	redleasev1.ClientRequestAddRelease(builder, redleasev1.CreateReleaseRequest(
+		builder,
+		key,
+		1,
+		bootID,
+		sequence,
+	))
+	return sendBuiltRequest(connection, builder)
+}
+
+func sendBuiltRequest(
+	connection *transport.Connection,
+	builder *flatbuffers.Builder,
+) error {
+	root := redleasev1.ClientRequestEnd(builder)
+	redleasev1.FinishSizePrefixedClientRequestBuffer(builder, root)
+	request := redleasev1.GetSizePrefixedRootAsClientRequest(builder.FinishedBytes(), 0)
+	if err := connection.BufferClientRequest(request); err != nil {
+		return err
+	}
+	return connection.FlushClientRequests()
 }
 
 func receiveResponses(connection *transport.Connection, counters *responseCounters) error {

@@ -7,18 +7,16 @@ import (
 	"sync"
 	"time"
 
+	flatbuffers "github.com/google/flatbuffers/go"
+
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
+	"github.com/udovenkoav1981/RedLease/internal/transport"
+	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
 var errConnectionClosed = errors.New("connection generation closed")
 
-// leaseConnection permits one Send goroutine and one Recv goroutine. Closing
-// it must unblock both operations.
-type leaseConnection interface {
-	Send(request protocol.Request) error
-	Recv() (protocol.Response, error)
-	Close() error
-}
+const initialSendBatchCapacity = 64
 
 type connectionTransportError struct {
 	cause error
@@ -74,7 +72,9 @@ const (
 )
 
 type outboundConnectionRequest struct {
-	request protocol.Request
+	request     redleasev1.ClientRequest
+	builder     *flatbuffers.Builder
+	builderPool *sync.Pool
 
 	mu       sync.Mutex
 	state    outboundRequestState
@@ -83,16 +83,44 @@ type outboundConnectionRequest struct {
 	deadline time.Time
 }
 
-func newOutboundConnectionRequest(
-	request protocol.Request,
-	deadline time.Time,
-) *outboundConnectionRequest {
+func (c *Client) newOutboundRequest() *outboundConnectionRequest {
+	var builder *flatbuffers.Builder
+	if pooled := c.requestBuilderPool.Get(); pooled != nil {
+		if reusable, ok := pooled.(*flatbuffers.Builder); ok {
+			builder = reusable
+			builder.Reset()
+		}
+	}
+	if builder == nil {
+		builder = flatbuffers.NewBuilder(protocol.NewBuilderSize)
+	}
 	return &outboundConnectionRequest{
-		request:  request,
-		state:    outboundRequestQueued,
-		accepted: make(chan struct{}),
-		sent:     make(chan struct{}),
-		deadline: deadline,
+		builder:     builder,
+		builderPool: &c.requestBuilderPool,
+		state:       outboundRequestQueued,
+		accepted:    make(chan struct{}),
+		sent:        make(chan struct{}),
+	}
+}
+
+func (*Client) finishOutboundRequest(outbound *outboundConnectionRequest) {
+	root := redleasev1.ClientRequestEnd(outbound.builder)
+	redleasev1.FinishSizePrefixedClientRequestBuffer(outbound.builder, root)
+	frame := outbound.builder.FinishedBytes()
+	rootOffset := flatbuffers.GetUOffsetT(frame[flatbuffers.SizeUint32:]) +
+		flatbuffers.UOffsetT(flatbuffers.SizeUint32)
+	outbound.request.Init(frame, rootOffset)
+}
+
+func (r *outboundConnectionRequest) releaseRequest() {
+	r.request = redleasev1.ClientRequest{}
+	if r.builder == nil {
+		return
+	}
+	builder := r.builder
+	r.builder = nil
+	if r.builderPool != nil {
+		r.builderPool.Put(builder)
 	}
 }
 
@@ -117,7 +145,7 @@ func (r *outboundConnectionRequest) beginSend() bool {
 	}
 	r.state = outboundRequestAccepted
 	// Closing accepted is the submission barrier: the single writer has accepted
-	// this request into connection order before it invokes Send.
+	// this request into connection order before it buffers the FlatBuffer frame.
 	close(r.accepted)
 	return true
 }
@@ -138,14 +166,11 @@ func (r *outboundConnectionRequest) currentState() outboundRequestState {
 }
 
 type connectionGeneration struct {
-	connection leaseConnection
+	connection transport.LeaseConnection
 	cancel     context.CancelFunc
 
 	sendQueue chan *outboundConnectionRequest
 	done      chan struct{}
-
-	requestIDMu   sync.Mutex
-	nextRequestID uint64
 
 	pendingMu   sync.Mutex
 	pending     map[uint64]*pendingConnectionCall
@@ -157,7 +182,10 @@ type connectionGeneration struct {
 	closeConnectionErr error
 }
 
-func newConnectionGeneration(connection leaseConnection, cancel context.CancelFunc) *connectionGeneration {
+func newConnectionGeneration(
+	connection transport.LeaseConnection,
+	cancel context.CancelFunc,
+) *connectionGeneration {
 	generation := &connectionGeneration{
 		connection: connection,
 		cancel:     cancel,
@@ -175,7 +203,7 @@ func newConnectionGeneration(connection leaseConnection, cancel context.CancelFu
 
 func (g *connectionGeneration) call(
 	ctx context.Context,
-	request protocol.Request,
+	request *outboundConnectionRequest,
 ) (protocol.Response, error) {
 	future, err := g.submit(ctx, request)
 	if err != nil {
@@ -186,18 +214,16 @@ func (g *connectionGeneration) call(
 
 func (g *connectionGeneration) submit(
 	ctx context.Context,
-	request protocol.Request,
+	outbound *outboundConnectionRequest,
 ) (*connectionFuture, error) {
-	requestID := g.allocateRequestID()
+	requestID := outbound.request.RequestId()
 
 	call := &pendingConnectionCall{result: make(chan connectionCallResult, 1)}
 	if err := g.register(requestID, call); err != nil {
+		outbound.releaseRequest()
 		return nil, err
 	}
-	requestCopy := request
-	requestCopy.RequestID = requestID
-	deadline, _ := ctx.Deadline()
-	outbound := newOutboundConnectionRequest(requestCopy, deadline)
+	outbound.deadline, _ = ctx.Deadline()
 	future := &connectionFuture{
 		generation: g,
 		requestID:  requestID,
@@ -207,6 +233,7 @@ func (g *connectionGeneration) submit(
 
 	if err := ctx.Err(); err != nil {
 		g.complete(requestID, connectionCallResult{err: err})
+		outbound.releaseRequest()
 		return nil, err
 	}
 
@@ -214,8 +241,10 @@ func (g *connectionGeneration) submit(
 	case g.sendQueue <- outbound:
 	case <-ctx.Done():
 		g.complete(requestID, connectionCallResult{err: ctx.Err()})
+		outbound.releaseRequest()
 		return nil, ctx.Err()
 	case <-g.done:
+		outbound.releaseRequest()
 		return nil, g.err()
 	}
 
@@ -265,15 +294,6 @@ func (g *connectionGeneration) Close() error {
 	return g.closeConnectionErr
 }
 
-func (g *connectionGeneration) allocateRequestID() uint64 {
-	g.requestIDMu.Lock()
-	defer g.requestIDMu.Unlock()
-
-	requestID := g.nextRequestID
-	g.nextRequestID++
-	return requestID
-}
-
 func (g *connectionGeneration) register(requestID uint64, call *pendingConnectionCall) error {
 	g.pendingMu.Lock()
 	defer g.pendingMu.Unlock()
@@ -301,25 +321,57 @@ func (g *connectionGeneration) complete(requestID uint64, result connectionCallR
 
 func (g *connectionGeneration) sendLoop() {
 	defer g.workers.Done()
+	batch := make([]*outboundConnectionRequest, 0, initialSendBatchCapacity)
 
 	for {
+		var outbound *outboundConnectionRequest
 		select {
 		case <-g.done:
 			return
-		case outbound := <-g.sendQueue:
-			if !outbound.beginSend() {
+		case outbound = <-g.sendQueue:
+		}
+
+		batch = batch[:0]
+		for {
+			if outbound.beginSend() {
+				if !outbound.deadline.IsZero() {
+					go g.watchSendDeadline(outbound)
+				}
+				batch = append(batch, outbound)
+
+				err := g.connection.BufferClientRequest(&outbound.request)
+				outbound.releaseRequest()
+				if err != nil {
+					finishSendBatch(batch)
+					g.terminate(fmt.Errorf("send: %w", err))
+					return
+				}
+			} else {
+				outbound.releaseRequest()
+			}
+
+			select {
+			case outbound = <-g.sendQueue:
 				continue
+			default:
 			}
-			if !outbound.deadline.IsZero() {
-				go g.watchSendDeadline(outbound)
+			if len(batch) == 0 {
+				break
 			}
-			err := g.connection.Send(outbound.request)
-			outbound.finishSend()
-			if err != nil {
-				g.terminate(fmt.Errorf("send: %w", err))
+			if err := g.connection.FlushClientRequests(); err != nil {
+				finishSendBatch(batch)
+				g.terminate(fmt.Errorf("flush send batch: %w", err))
 				return
 			}
+			finishSendBatch(batch)
+			break
 		}
+	}
+}
+
+func finishSendBatch(batch []*outboundConnectionRequest) {
+	for _, outbound := range batch {
+		outbound.finishSend()
 	}
 }
 

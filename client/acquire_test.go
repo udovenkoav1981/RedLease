@@ -73,7 +73,7 @@ func TestClientAcquireUsesEverySupportedQuorum(t *testing.T) {
 			}
 
 			result := startClientAcquire(client, context.Background(), uint64(1), 2_000)
-			requests := make([]protocol.Request, serverCount)
+			requests := make([]observedRequest, serverCount)
 			for replica, stream := range streams {
 				requests[replica] = receiveAcquireRequest(t, stream)
 			}
@@ -252,7 +252,7 @@ func TestClientAcquireWaitsForAllFiveSubmissionBarriers(t *testing.T) {
 	harness.streams[4].waitForSendAttempt(t)
 
 	result := startClientAcquire(harness.client, context.Background(), uint64(1), 2_000)
-	var requests [testServerCount]protocol.Request
+	var requests [testServerCount]observedRequest
 	for replica := range testServerCount - 1 {
 		requests[replica] = receiveAcquireRequest(t, harness.streams[replica])
 	}
@@ -294,7 +294,7 @@ func TestClientAcquireCanUseQuorumAfterUnacceptedSubmitTimesOut(t *testing.T) {
 	harness.streams[4].waitForSendAttempt(t)
 
 	result := startClientAcquire(harness.client, context.Background(), uint64(1), 2_000)
-	var requests [testServerCount - 1]protocol.Request
+	var requests [testServerCount - 1]observedRequest
 	for replica := range requests {
 		requests[replica] = receiveAcquireRequest(t, harness.streams[replica])
 	}
@@ -411,9 +411,9 @@ func newAcquireHarness(t *testing.T) *acquireHarness {
 	return harness
 }
 
-func (h *acquireHarness) receiveAcquireRequests(t *testing.T) [testServerCount]protocol.Request {
+func (h *acquireHarness) receiveAcquireRequests(t *testing.T) [testServerCount]observedRequest {
 	t.Helper()
-	var requests [testServerCount]protocol.Request
+	var requests [testServerCount]observedRequest
 	for replica, stream := range h.streams {
 		requests[replica] = receiveAcquireRequest(t, stream)
 	}
@@ -422,7 +422,7 @@ func (h *acquireHarness) receiveAcquireRequests(t *testing.T) [testServerCount]p
 
 func (h *acquireHarness) respondAcquire(
 	replica int,
-	request protocol.Request,
+	request observedRequest,
 	status protocol.Status,
 	ttl uint64,
 ) {
@@ -438,7 +438,7 @@ func (h *acquireHarness) respondAcquire(
 
 func (h *acquireHarness) receiveAndRespondToCleanup(
 	t *testing.T,
-	acquireRequests *[testServerCount]protocol.Request,
+	acquireRequests *[testServerCount]observedRequest,
 ) {
 	t.Helper()
 	for replica, stream := range h.streams {
@@ -485,7 +485,7 @@ func receiveAcquireCallResult(t *testing.T, result <-chan acquireCallResult) acq
 	}
 }
 
-func receiveAcquireRequest(t *testing.T, stream *fakeLeaseClientStream) protocol.Request {
+func receiveAcquireRequest(t *testing.T, stream *fakeLeaseClientStream) observedRequest {
 	t.Helper()
 	request := receiveSentRequest(t, stream)
 	if request.Operation != protocol.OperationAcquire {
@@ -496,7 +496,7 @@ func receiveAcquireRequest(t *testing.T, stream *fakeLeaseClientStream) protocol
 
 func respondAcquireOnStream(
 	stream *fakeLeaseClientStream,
-	request protocol.Request,
+	request observedRequest,
 	status protocol.Status,
 	ttl uint64,
 ) {
@@ -510,7 +510,7 @@ func respondAcquireOnStream(
 	}
 }
 
-func receiveReleaseRequest(t *testing.T, stream *fakeLeaseClientStream) protocol.Request {
+func receiveReleaseRequest(t *testing.T, stream *fakeLeaseClientStream) observedRequest {
 	t.Helper()
 	request := receiveSentRequest(t, stream)
 	if request.Operation != protocol.OperationRelease {
@@ -576,7 +576,7 @@ func waitForNoPendingStreamCalls(t *testing.T, client *Client) {
 	}
 }
 
-func sameLeaseID(first, second protocol.Request) bool {
+func sameLeaseID(first, second observedRequest) bool {
 	return first.ClientID == second.ClientID &&
 		first.BootID == second.BootID &&
 		first.LeaseSequence == second.LeaseSequence

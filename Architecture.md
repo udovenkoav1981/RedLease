@@ -33,7 +33,7 @@ Leader                     none
 Server-to-server hot path  none
 Wire format                FlatBuffers, size-prefixed frames
 Client transport           N persistent ordered TCP connections
-TCP frame write timeout    1 s (fixed)
+TCP batch flush timeout    1 s (fixed)
 Client TCP write batching  block for first request, drain available queue, flush
 Server TCP write batching  block for first response, drain available queue, flush
 TCP read buffering         64 KiB per connection on client and server
@@ -561,32 +561,49 @@ Reader на обеих сторонах использует собственн�
 разбор уже накопленных frames не обращается к socket повторно. Reader получает
 frame через `Peek()` непосредственно из этого буфера и вызывает `Discard()`
 перед чтением следующего frame, не копируя каждый frame в промежуточный массив.
-Перед записью каждого полного frame writer устанавливает отдельный TCP write
-deadline на фиксированную константу 1 секунду. Timeout делает соединение
-непригодным: оно закрывается, вся ещё не отправленная очередь этого поколения
-отбрасывается, а client запускает reconnect. Запросы старого поколения на новое
-соединение автоматически не переносятся.
+Writer устанавливает TCP write deadline на фиксированную константу 1 секунду
+не перед копированием каждого frame, а непосредственно перед `Flush()` непустого
+connection write buffer. Если следующий frame не помещается в оставшуюся часть
+буфера 64 KiB, writer сначала выполняет промежуточный `Flush()` с новым
+deadline, а затем копирует frame в освободившийся буфер. Поэтому `bufio.Writer`
+никогда не начинает неявную socket write со старым deadline. Timeout делает
+соединение непригодным: оно закрывается, вся ещё не отправленная очередь этого
+поколения отбрасывается, а client запускает reconnect. Запросы старого поколения
+на новое соединение автоматически не переносятся.
 
-Writer `client1of1` блокируется в ожидании первого request. Получив его, writer
-копирует frame в connection write buffer и затем забирает остальные уже
-доступные элементы send queue без блокировки. Когда доступная часть очереди
-заканчивается, writer делает один `Flush()` и снова блокируется в ожидании
-первого request следующего batch. Искусственной задержки для накопления batch
-нет. Поэтому одиночный request отправляется сразу, а burst из нескольких
-requests требует меньше TCP `Write` calls.
+Writer каждого client connection блокируется в ожидании первого request.
+Получив его, writer копирует frame в connection write buffer и затем забирает
+остальные уже доступные элементы send queue без блокировки. Когда доступная
+часть очереди заканчивается, writer делает финальный `Flush()` и снова
+блокируется в ожидании первого request следующего batch. Для batch размером до
+64 KiB это единственный `Flush()`; больший batch разбивается только на границах
+заполнения write buffer. Искусственной задержки для накопления batch нет.
+Поэтому одиночный request отправляется сразу, а burst из нескольких requests
+требует меньше TCP `Write` calls и установок write deadline. Оба client package
+используют общий `internal/transport.LeaseConnection`; различается только
+управление request lifecycle и quorum поверх transport. Оба client package
+также сразу строят generated FlatBuffers `ClientRequest`, без промежуточного
+owned request. Server разбирает generated FlatBuffers view и до чтения
+следующего frame сразу копирует нужные скаляры в `server.operation`, который
+можно безопасно передать в shard queue независимо от receive buffer.
 
-Server response writer следует той же схеме для `session.responses`: блокируется
-до первого response, копирует его и остальные уже доступные responses в
-connection write buffer, один раз вызывает `Flush()` и возвращается к
-блокирующему ожиданию. Connection in-flight slot освобождается после копирования
+После применения операции server сразу собирает generated FlatBuffers
+`ServerResponse` на builder из общего pool; в `session.responses` передаётся
+готовый frame, а не промежуточная структура для последующего кодирования.
+Server response writer блокируется до первого response, копирует его и остальные уже доступные responses в
+connection write buffer, выполняет промежуточные `Flush()` только при заполнении
+64 KiB и финальный `Flush()` перед возвратом к блокирующему ожиданию. Connection
+in-flight slot освобождается, а builder возвращается в pool после копирования
 response в write buffer; последующая ошибка flush закрывает соединение.
+При закрытии соединения неотправленные responses освобождают свои slots и
+возвращают builders в pool.
 
-Client помещает запрос в send queue без ожидания свободного места. Если очередь
-заполнена, только новый запрос отклоняется как не выполненный: существующее
-соединение и уже поставленные в очередь запросы продолжают работу. Для `Acquire`
-это возвращается приложению как `ErrNotAcquired`. Если причиной переполнения был
-зависший socket writer, соединение будет закрыто самим writer по TCP write
-timeout; переполнение очереди отдельно не запускает reconnect.
+`client1of1` помещает запрос в send queue без ожидания свободного места. Если
+очередь заполнена, только новый запрос отклоняется как не выполненный:
+существующее соединение и уже поставленные в очередь запросы продолжают работу.
+Для `Acquire` это возвращается приложению как `ErrNotAcquired`. Если причиной
+переполнения был зависший socket writer, соединение будет закрыто самим writer
+по TCP write timeout; переполнение очереди отдельно не запускает reconnect.
 
 Каждый запрос содержит `requestID`, уникальный в пределах одного соединения. Server
 возвращает тот же `requestID` в ответе. Это correlation identifier, а не номер

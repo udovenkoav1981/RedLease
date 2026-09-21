@@ -179,7 +179,7 @@ func TestLeaseRenewCanUseQuorumAfterUnacceptedSubmitTimesOut(t *testing.T) {
 	harness.streams[4].waitForSendAttempt(t)
 
 	result := startLeaseRenew(lease, context.Background(), 3_000)
-	var requests [testServerCount - 1]protocol.Request
+	var requests [testServerCount - 1]observedRequest
 	for replica := range requests {
 		request := receiveSentRequest(t, harness.streams[replica])
 		if request.Operation != protocol.OperationRenew {
@@ -372,9 +372,9 @@ func receiveRenewResult(t *testing.T, result <-chan renewCallResult) error {
 	}
 }
 
-func (h *acquireHarness) receiveRenewRequests(t *testing.T) [testServerCount]protocol.Request {
+func (h *acquireHarness) receiveRenewRequests(t *testing.T) [testServerCount]observedRequest {
 	t.Helper()
-	var requests [testServerCount]protocol.Request
+	var requests [testServerCount]observedRequest
 	for replica, stream := range h.streams {
 		request := receiveSentRequest(t, stream)
 		if request.Operation != protocol.OperationRenew {
@@ -387,7 +387,7 @@ func (h *acquireHarness) receiveRenewRequests(t *testing.T) [testServerCount]pro
 
 func (h *acquireHarness) respondRenew(
 	replica int,
-	request protocol.Request,
+	request observedRequest,
 	status protocol.Status,
 	ttl uint64,
 ) {
@@ -401,16 +401,16 @@ func (h *acquireHarness) respondRenew(
 	}
 }
 
-func (h *acquireHarness) receiveReleaseRequests(t *testing.T) [testServerCount]protocol.Request {
+func (h *acquireHarness) receiveReleaseRequests(t *testing.T) [testServerCount]observedRequest {
 	t.Helper()
-	var requests [testServerCount]protocol.Request
+	var requests [testServerCount]observedRequest
 	for replica, stream := range h.streams {
 		requests[replica] = receiveReleaseRequest(t, stream)
 	}
 	return requests
 }
 
-func (h *acquireHarness) respondRelease(replica int, request protocol.Request) {
+func (h *acquireHarness) respondRelease(replica int, request observedRequest) {
 	h.streams[replica].receive <- fakeReceive{
 		response: protocol.Response{
 			RequestID: request.RequestID,

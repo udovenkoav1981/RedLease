@@ -1,5 +1,6 @@
 // Package transport implements the persistent TCP connection used by
-// RedLease clients. FlatBuffers framing and messages live in internal/protocol.
+// RedLease clients. Framing lives in internal/protocol; generated messages
+// live in proto/redlease/v1.
 package transport
 
 import (
@@ -11,15 +12,13 @@ import (
 	"net"
 	"time"
 
-	flatbuffers "github.com/google/flatbuffers/go"
-
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
-// TCPWriteTimeout bounds one complete RedLease frame write. A timeout makes
-// the connection unusable; its owner closes it and discards that connection
-// generation's remaining send queue.
+// TCPWriteTimeout bounds one direct frame write or one buffered batch flush.
+// A timeout makes the connection unusable; its owner closes it and discards
+// that connection generation's remaining send queue.
 const TCPWriteTimeout = time.Second
 
 const (
@@ -27,13 +26,12 @@ const (
 	connectionWriteBufferBytes = 64 * 1024
 )
 
-// Connection permits one concurrent Send caller and one concurrent Recv
-// caller. RedLease connection generations enforce that ownership model.
+// Connection permits one buffered writer goroutine and one concurrent Recv
+// goroutine. RedLease connection generations enforce that ownership model.
 type Connection struct {
-	conn    net.Conn
-	builder *flatbuffers.Builder
-	reader  *FrameReader
-	writer  *FrameWriter
+	conn   net.Conn
+	reader *FrameReader
+	writer *FrameWriter
 }
 
 // FrameReader reads complete FlatBuffers frames through one connection-scoped
@@ -49,6 +47,18 @@ type FrameWriter struct {
 	conn   net.Conn
 	buffer *bufio.Writer
 }
+
+// LeaseConnection is the client-side transport boundary shared by RedLease
+// client implementations. Exactly one goroutine owns buffered writes and one
+// goroutine owns reads; Close must unblock both.
+type LeaseConnection interface {
+	BufferClientRequest(request *redleasev1.ClientRequest) error
+	FlushClientRequests() error
+	Recv() (protocol.Response, error)
+	Close() error
+}
+
+var _ LeaseConnection = (*Connection)(nil)
 
 func Dial(ctx context.Context, target string) (*Connection, error) {
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", target)
@@ -88,20 +98,6 @@ func NewFrameWriter(conn net.Conn) *FrameWriter {
 	}
 }
 
-func (c *Connection) Send(request protocol.Request) error {
-	if c.builder == nil {
-		c.builder = flatbuffers.NewBuilder(protocol.NewBuilderSize)
-	}
-	frame, err := protocol.EncodeRequest(c.builder, request)
-	if err != nil {
-		return err
-	}
-	if err := c.writer.BufferFrame(frame); err != nil {
-		return err
-	}
-	return c.FlushClientRequests()
-}
-
 // BufferClientRequest copies an already encoded generated FlatBuffers request
 // into the connection's write buffer. The caller may reuse its backing buffer
 // after this method returns. FlushClientRequests makes buffered requests
@@ -114,10 +110,20 @@ func (c *Connection) BufferClientRequest(request *redleasev1.ClientRequest) erro
 }
 
 // BufferFrame copies one complete size-prefixed frame into the write buffer.
+// If the frame does not fit, the previously buffered batch is flushed first.
 // The frame's backing storage may be reused after this method returns.
 func (w *FrameWriter) BufferFrame(frame []byte) error {
-	if err := w.conn.SetWriteDeadline(time.Now().Add(TCPWriteTimeout)); err != nil {
-		return fmt.Errorf("set TCP write deadline: %w", err)
+	if len(frame) > w.buffer.Size() {
+		return fmt.Errorf(
+			"frame size %d exceeds write buffer capacity %d",
+			len(frame),
+			w.buffer.Size(),
+		)
+	}
+	if len(frame) > w.buffer.Available() {
+		if err := w.Flush(); err != nil {
+			return fmt.Errorf("flush full write buffer: %w", err)
+		}
 	}
 	return protocol.WriteFrame(w.buffer, frame)
 }
@@ -129,6 +135,12 @@ func (c *Connection) FlushClientRequests() error {
 
 // Flush writes all currently buffered frames to the TCP connection.
 func (w *FrameWriter) Flush() error {
+	if w.buffer.Buffered() == 0 {
+		return nil
+	}
+	if err := w.conn.SetWriteDeadline(time.Now().Add(TCPWriteTimeout)); err != nil {
+		return fmt.Errorf("set TCP write deadline: %w", err)
+	}
 	return w.buffer.Flush()
 }
 

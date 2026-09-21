@@ -12,16 +12,26 @@ import (
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
+type observedRequest struct {
+	RequestID      uint64
+	Operation      protocol.Operation
+	Key            uint64
+	ClientID       uint32
+	BootID         uint32
+	LeaseSequence  uint64
+	RequestedTTLMS uint64
+}
+
 type fakeLeaseConnection struct {
 	ctx       context.Context //nolint:containedctx // Test connection owns this context.
-	requests  chan protocol.Request
+	requests  chan observedRequest
 	responses chan protocol.Response
 	sendStart chan struct{}
 	flushes   chan struct{}
 }
 
 func (c *fakeLeaseConnection) BufferClientRequest(request *redleasev1.ClientRequest) error {
-	decoded, err := protocol.DecodeRequest(request.Table().Bytes)
+	decoded, err := observeClientRequest(request)
 	if err != nil {
 		return err
 	}
@@ -37,6 +47,48 @@ func (c *fakeLeaseConnection) BufferClientRequest(request *redleasev1.ClientRequ
 	case <-c.ctx.Done():
 		return c.ctx.Err()
 	}
+}
+
+func observeClientRequest(request *redleasev1.ClientRequest) (observedRequest, error) {
+	observed := observedRequest{
+		RequestID: request.RequestId(),
+		Operation: request.Operation(),
+	}
+	switch observed.Operation {
+	case protocol.OperationAcquire:
+		var acquire redleasev1.AcquireRequest
+		if request.Acquire(&acquire) == nil {
+			return observedRequest{}, errors.New("Acquire payload is missing")
+		}
+		observed.Key = acquire.Key()
+		observed.ClientID = acquire.ClientId()
+		observed.BootID = acquire.BootId()
+		observed.LeaseSequence = acquire.LeaseSeq()
+		observed.RequestedTTLMS = acquire.RequestedTtlMs()
+	case protocol.OperationRenew:
+		var renew redleasev1.RenewRequest
+		if request.Renew(&renew) == nil {
+			return observedRequest{}, errors.New("Renew payload is missing")
+		}
+		observed.Key = renew.Key()
+		observed.ClientID = renew.ClientId()
+		observed.BootID = renew.BootId()
+		observed.LeaseSequence = renew.LeaseSeq()
+		observed.RequestedTTLMS = renew.RequestedTtlMs()
+	case protocol.OperationRelease:
+		var release redleasev1.ReleaseRequest
+		if request.Release(&release) == nil {
+			return observedRequest{}, errors.New("Release payload is missing")
+		}
+		observed.Key = release.Key()
+		observed.ClientID = release.ClientId()
+		observed.BootID = release.BootId()
+		observed.LeaseSequence = release.LeaseSeq()
+	case protocol.OperationGetTTL:
+	default:
+		return observedRequest{}, errors.New("unsupported request operation")
+	}
+	return observed, nil
 }
 
 func (c *fakeLeaseConnection) FlushClientRequests() error {
@@ -61,7 +113,7 @@ func TestStreamGenerationMultiplexesOutOfOrderResponses(t *testing.T) {
 	streamContext, cancelStream := context.WithCancel(context.Background())
 	connection := &fakeLeaseConnection{
 		ctx:       streamContext,
-		requests:  make(chan protocol.Request, 2),
+		requests:  make(chan observedRequest, 2),
 		responses: make(chan protocol.Response, 2),
 	}
 	generation := newConnectionGeneration(connection, cancelStream)
@@ -105,7 +157,7 @@ func TestStreamGenerationCancellationUnblocksAwait(t *testing.T) {
 	streamContext, cancelStream := context.WithCancel(context.Background())
 	connection := &fakeLeaseConnection{
 		ctx:       streamContext,
-		requests:  make(chan protocol.Request, 1),
+		requests:  make(chan observedRequest, 1),
 		responses: make(chan protocol.Response),
 	}
 	generation := newConnectionGeneration(connection, cancelStream)
@@ -127,7 +179,7 @@ func TestConnectionGenerationFlushesAvailableRequestsAsOneBatch(t *testing.T) {
 	connectionContext, cancelConnection := context.WithCancel(context.Background())
 	connection := &fakeLeaseConnection{
 		ctx:       connectionContext,
-		requests:  make(chan protocol.Request),
+		requests:  make(chan observedRequest),
 		responses: make(chan protocol.Response),
 		sendStart: make(chan struct{}, 1),
 		flushes:   make(chan struct{}, 1),
@@ -177,7 +229,7 @@ func TestConnectionFutureResponseTimeoutUnblocksAwait(t *testing.T) {
 	connectionContext, cancelConnection := context.WithCancel(context.Background())
 	connection := &fakeLeaseConnection{
 		ctx:       connectionContext,
-		requests:  make(chan protocol.Request, 1),
+		requests:  make(chan observedRequest, 1),
 		responses: make(chan protocol.Response, 2),
 	}
 	generation := newConnectionGeneration(connection, cancelConnection)
@@ -221,7 +273,7 @@ func TestAcquireReturnsNotAcquiredWhenSendQueueIsFull(t *testing.T) {
 	connectionContext, cancelConnection := context.WithCancel(context.Background())
 	connection := &fakeLeaseConnection{
 		ctx:       connectionContext,
-		requests:  make(chan protocol.Request),
+		requests:  make(chan observedRequest),
 		responses: make(chan protocol.Response),
 		sendStart: make(chan struct{}, 1),
 	}
@@ -279,7 +331,7 @@ func TestFailedAcquireQueuesCleanupRelease(t *testing.T) {
 	streamContext, cancelStream := context.WithCancel(context.Background())
 	connection := &fakeLeaseConnection{
 		ctx:       streamContext,
-		requests:  make(chan protocol.Request, 2),
+		requests:  make(chan observedRequest, 2),
 		responses: make(chan protocol.Response, 2),
 	}
 	generation := newConnectionGeneration(connection, cancelStream)
@@ -298,7 +350,7 @@ func TestFailedAcquireQueuesCleanupRelease(t *testing.T) {
 		changed:         make(chan struct{}),
 	}
 
-	acquireSent := make(chan protocol.Request, 1)
+	acquireSent := make(chan observedRequest, 1)
 	go func() {
 		request := <-connection.requests
 		acquireSent <- request

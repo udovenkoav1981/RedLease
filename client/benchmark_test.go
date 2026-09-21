@@ -94,7 +94,7 @@ func serveBenchmarkReplica(done <-chan struct{}, stream *fakeLeaseClientStream) 
 	}
 }
 
-func benchmarkResponse(request protocol.Request) protocol.Response {
+func benchmarkResponse(request observedRequest) protocol.Response {
 	response := protocol.Response{
 		RequestID: request.RequestID,
 		Operation: request.Operation,

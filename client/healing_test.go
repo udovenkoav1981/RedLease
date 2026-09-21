@@ -280,8 +280,8 @@ func TestBackgroundHealingDoesNotAcquireAfterReleaseAndReconnect(t *testing.T) {
 
 func assertHealingAcquire(
 	t *testing.T,
-	healing protocol.Request,
-	initial protocol.Request,
+	healing observedRequest,
+	initial observedRequest,
 ) {
 	t.Helper()
 	if healing.Key != initial.Key {

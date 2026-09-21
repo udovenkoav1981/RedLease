@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
+	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
 func TestReplicaConnLogsStateTransitionsWithoutRetrySpam(t *testing.T) {
@@ -191,7 +192,7 @@ func TestReplicaConnConcurrentCalls(t *testing.T) {
 		results[i] = startReplicaCall(connection, acquireStreamRequest(uint64(i+1)))
 	}
 
-	requests := make([]protocol.Request, calls)
+	requests := make([]observedRequest, calls)
 	for i := range calls {
 		requests[i] = receiveSentRequest(t, stream)
 	}
@@ -224,7 +225,7 @@ func newScriptedStreamFactory() *scriptedStreamFactory {
 	return &scriptedStreamFactory{results: make(chan streamFactoryResult, 16)}
 }
 
-func (f *scriptedStreamFactory) open(ctx context.Context) (leaseConnection, error) {
+func (f *scriptedStreamFactory) open(ctx context.Context) (transport.LeaseConnection, error) {
 	f.openCalls.Add(1)
 	select {
 	case result := <-f.results:
@@ -258,7 +259,7 @@ func newTestReplicaConnWithoutCleanup(factory connectionFactory) *replicaConn {
 
 func newReplicaFakeStream() *fakeLeaseClientStream {
 	return &fakeLeaseClientStream{
-		sent:        make(chan protocol.Request),
+		sent:        make(chan observedRequest),
 		receive:     make(chan fakeReceive, 256),
 		sendAttempt: make(chan struct{}),
 		closed:      make(chan struct{}),
@@ -267,7 +268,7 @@ func newReplicaFakeStream() *fakeLeaseClientStream {
 
 func startReplicaCall(
 	connection *replicaConn,
-	request protocol.Request,
+	request *outboundConnectionRequest,
 ) <-chan connectionCallResult {
 	result := make(chan connectionCallResult, 1)
 	go func() {
@@ -329,6 +330,6 @@ func assertReplicaUnavailableCause(t *testing.T, err, cause error) {
 // Assert that the test-only stream still satisfies the production factory
 // result type after concurrent lifecycle tests evolve.
 var (
-	_ leaseConnection   = (*fakeLeaseClientStream)(nil)
-	_ connectionFactory = (*scriptedStreamFactory)(nil)
+	_ transport.LeaseConnection = (*fakeLeaseClientStream)(nil)
+	_ connectionFactory         = (*scriptedStreamFactory)(nil)
 )

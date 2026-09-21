@@ -9,30 +9,9 @@ import (
 	"testing"
 
 	flatbuffers "github.com/google/flatbuffers/go"
-)
 
-func TestRequestRoundTrip(t *testing.T) {
-	t.Parallel()
-	tests := []Request{
-		{RequestID: 1, Operation: OperationAcquire, Key: 2, ClientID: 3, BootID: 4, LeaseSequence: 5, RequestedTTLMS: 6},
-		{RequestID: 7, Operation: OperationRenew, Key: 8, ClientID: 9, BootID: 10, LeaseSequence: 11, RequestedTTLMS: 12},
-		{RequestID: 13, Operation: OperationRelease, Key: 14, ClientID: 15, BootID: 16, LeaseSequence: 17},
-		{RequestID: 18, Operation: OperationGetTTL},
-	}
-	for _, want := range tests {
-		frame, err := EncodeRequest(flatbuffers.NewBuilder(NewBuilderSize), want)
-		if err != nil {
-			t.Fatalf("encode %+v: %v", want, err)
-		}
-		got, err := DecodeRequest(frame)
-		if err != nil {
-			t.Fatalf("decode %+v: %v", want, err)
-		}
-		if got != want {
-			t.Fatalf("round trip = %+v, want %+v", got, want)
-		}
-	}
-}
+	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+)
 
 func TestResponseRoundTrip(t *testing.T) {
 	t.Parallel()
@@ -43,10 +22,7 @@ func TestResponseRoundTrip(t *testing.T) {
 		{RequestID: 6, Operation: OperationGetTTL, Status: StatusOK, TTLMS: 7},
 	}
 	for _, want := range tests {
-		frame, err := EncodeResponse(flatbuffers.NewBuilder(NewBuilderSize), want)
-		if err != nil {
-			t.Fatalf("encode %+v: %v", want, err)
-		}
+		frame := testResponseFrame(want)
 		got, err := DecodeResponse(frame)
 		if err != nil {
 			t.Fatalf("decode %+v: %v", want, err)
@@ -57,12 +33,45 @@ func TestResponseRoundTrip(t *testing.T) {
 	}
 }
 
+func testResponseFrame(response Response) []byte {
+	builder := flatbuffers.NewBuilder(NewBuilderSize)
+	redleasev1.ServerResponseStart(builder)
+	redleasev1.ServerResponseAddRequestId(builder, response.RequestID)
+	switch response.Operation {
+	case OperationAcquire:
+		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultACQUIRE)
+		redleasev1.ServerResponseAddAcquire(builder, redleasev1.CreateAcquireResponse(
+			builder, response.Status, response.TTLMS,
+		))
+	case OperationRenew:
+		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultRENEW)
+		redleasev1.ServerResponseAddRenew(builder, redleasev1.CreateRenewResponse(
+			builder, response.Status, response.TTLMS,
+		))
+	case OperationRelease:
+		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultRELEASE)
+		redleasev1.ServerResponseAddRelease(builder, redleasev1.CreateReleaseResponse(
+			builder, response.Status,
+		))
+	case OperationGetTTL:
+		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultGET_TTL)
+		redleasev1.ServerResponseAddGetTtl(builder, redleasev1.CreateGetTTLResponse(
+			builder, response.TTLMS,
+		))
+	}
+	root := redleasev1.ServerResponseEnd(builder)
+	redleasev1.FinishSizePrefixedServerResponseBuffer(builder, root)
+	return builder.FinishedBytes()
+}
+
 func TestFrameReader(t *testing.T) {
 	t.Parallel()
-	want, err := EncodeRequest(flatbuffers.NewBuilder(NewBuilderSize), Request{Operation: OperationGetTTL})
-	if err != nil {
-		t.Fatal(err)
-	}
+	builder := flatbuffers.NewBuilder(NewBuilderSize)
+	redleasev1.ClientRequestStart(builder)
+	redleasev1.ClientRequestAddOperation(builder, OperationGetTTL)
+	root := redleasev1.ClientRequestEnd(builder)
+	redleasev1.FinishSizePrefixedClientRequestBuffer(builder, root)
+	want := builder.FinishedBytes()
 	var reader FrameReader
 	got, err := reader.ReadFrame(bufio.NewReader(bytes.NewReader(want)))
 	if err != nil {
@@ -70,6 +79,9 @@ func TestFrameReader(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("frame differs: %x != %x", got, want)
+	}
+	if err := ValidateFrame(got); err != nil {
+		t.Fatalf("validate frame: %v", err)
 	}
 }
 
@@ -119,8 +131,8 @@ func (w *limitedWriter) Write(value []byte) (int, error) {
 func TestMalformedFrame(t *testing.T) {
 	t.Parallel()
 	for _, frame := range [][]byte{nil, {1, 0, 0, 0, 0}, {255, 0, 0, 0, 0, 0, 0, 0}} {
-		if _, err := DecodeRequest(frame); !errors.Is(err, ErrMalformedFrame) {
-			t.Fatalf("DecodeRequest(%x) error = %v", frame, err)
+		if err := ValidateFrame(frame); !errors.Is(err, ErrMalformedFrame) {
+			t.Fatalf("ValidateFrame(%x) error = %v", frame, err)
 		}
 	}
 }

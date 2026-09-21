@@ -8,10 +8,9 @@ import (
 	"net"
 	"sync"
 
-	flatbuffers "github.com/google/flatbuffers/go"
-
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
+	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
 var (
@@ -24,7 +23,7 @@ type connectionSession struct {
 	conn   net.Conn
 	ctx    context.Context //nolint:containedctx // Session owns this connection-scoped context.
 
-	responses chan protocol.Response
+	responses chan *outboundResponse
 	slots     chan struct{}
 	recvDone  chan error
 }
@@ -135,26 +134,25 @@ func (s *Server) serveConnection(conn net.Conn) (result error) {
 	defer s.activeConnections.Add(-1)
 
 	ctx, cancel := context.WithCancel(s.ctx)
-	defer cancel()
 	session := &connectionSession{
 		server:    s,
 		conn:      conn,
 		ctx:       ctx,
-		responses: make(chan protocol.Response, s.config.MaxInFlightPerConnection),
+		responses: make(chan *outboundResponse, s.config.MaxInFlightPerConnection),
 		slots:     make(chan struct{}, s.config.MaxInFlightPerConnection),
 		recvDone:  make(chan error, 1),
 	}
+	defer func() {
+		cancel()
+		go session.discardResponses()
+	}()
 	go session.receiveSafely()
 
-	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
 	writer := transport.NewFrameWriter(conn)
-	return session.writeResponses(writer, builder)
+	return session.writeResponses(writer)
 }
 
-func (s *connectionSession) writeResponses(
-	writer *transport.FrameWriter,
-	builder *flatbuffers.Builder,
-) error {
+func (s *connectionSession) writeResponses(writer *transport.FrameWriter) error {
 	recvDone := s.recvDone
 
 connectionLoop:
@@ -166,7 +164,7 @@ connectionLoop:
 			}
 
 			for {
-				if err := s.bufferResponse(writer, builder, response); err != nil {
+				if err := s.bufferResponse(writer, response); err != nil {
 					return err
 				}
 				select {
@@ -200,25 +198,24 @@ connectionLoop:
 
 func (s *connectionSession) bufferResponse(
 	writer *transport.FrameWriter,
-	builder *flatbuffers.Builder,
-	response protocol.Response,
+	response *outboundResponse,
 ) error {
+	defer s.releaseSlot()
+	defer s.server.recycleOutboundResponse(response)
 	if err := s.server.unavailableError(); err != nil {
-		s.releaseSlot()
 		return err
 	}
-	frame, err := protocol.EncodeResponse(builder, response)
-	if err != nil {
-		s.releaseSlot()
-		s.server.fail(fmt.Errorf("encode response: %w", err))
-		return s.server.unavailableError()
-	}
-	if err := writer.BufferFrame(frame); err != nil {
-		s.releaseSlot()
+	if err := writer.BufferFrame(response.message.Table().Bytes); err != nil {
 		return fmt.Errorf("buffer response: %w", err)
 	}
-	s.releaseSlot()
 	return nil
+}
+
+func (s *connectionSession) discardResponses() {
+	for response := range s.responses {
+		s.server.recycleOutboundResponse(response)
+		s.releaseSlot()
+	}
 }
 
 func (s *connectionSession) receiveSafely() {
@@ -255,20 +252,13 @@ func (s *connectionSession) receive() {
 			s.recvDone <- err
 			return
 		}
-		request, err := protocol.DecodeRequest(frame)
+		decoded, directResponse, direct, err := s.server.decodeRequest(frame)
 		if err != nil {
 			s.recvDone <- err
 			return
 		}
 		phaseAtReceive := serverPhase(s.server.phase.Load())
 		if err := s.reserveSlot(); err != nil {
-			s.recvDone <- err
-			return
-		}
-
-		decoded, directResponse, direct, err := s.server.decodeRequest(request)
-		if err != nil {
-			s.releaseSlot()
 			s.recvDone <- err
 			return
 		}
@@ -281,9 +271,16 @@ func (s *connectionSession) receive() {
 		pending.Add(1)
 		complete := func(response protocol.Response) {
 			defer pending.Done()
+			outbound, err := s.server.newOutboundResponse(response)
+			if err != nil {
+				s.releaseSlot()
+				s.server.fail(fmt.Errorf("encode response: %w", err))
+				return
+			}
 			select {
-			case s.responses <- response:
+			case s.responses <- outbound:
 			case <-s.ctx.Done():
+				s.server.recycleOutboundResponse(outbound)
 				s.releaseSlot()
 			}
 		}
@@ -351,49 +348,86 @@ func (s *Server) unavailableErrorUnlessClosed() error {
 	return s.unavailableError()
 }
 
-func (s *Server) decodeRequest(request protocol.Request) (operation, protocol.Response, bool, error) {
-	switch request.Operation {
+func (s *Server) decodeRequest(
+	frame []byte,
+) (decoded operation, response protocol.Response, direct bool, err error) {
+	// FlatBuffers getters view the receive buffer. Copy scalars into operation
+	// before the reader advances and reuses that buffer for another frame.
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			decoded = operation{}
+			response = protocol.Response{}
+			direct = false
+			err = fmt.Errorf("%w: %v", protocol.ErrMalformedFrame, recovered)
+		}
+	}()
+	if err := protocol.ValidateFrame(frame); err != nil {
+		return operation{}, protocol.Response{}, false, err
+	}
+	request := redleasev1.GetSizePrefixedRootAsClientRequest(frame, 0)
+	switch request.Operation() {
 	case protocol.OperationAcquire:
+		var acquire redleasev1.AcquireRequest
+		if request.Acquire(&acquire) == nil {
+			return operation{}, protocol.Response{}, false, fmt.Errorf(
+				"%w: Acquire payload is missing",
+				protocol.ErrMalformedFrame,
+			)
+		}
 		return operation{
-			requestID: request.RequestID,
+			requestID: request.RequestId(),
 			kind:      operationAcquire,
-			key:       request.Key,
+			key:       acquire.Key(),
 			leaseID: leaseID{
-				clientID: request.ClientID,
-				bootID:   request.BootID,
-				leaseSeq: request.LeaseSequence,
+				clientID: acquire.ClientId(),
+				bootID:   acquire.BootId(),
+				leaseSeq: acquire.LeaseSeq(),
 			},
-			requestedTTLMS: request.RequestedTTLMS,
+			requestedTTLMS: acquire.RequestedTtlMs(),
 		}, protocol.Response{}, false, nil
 
 	case protocol.OperationRenew:
+		var renew redleasev1.RenewRequest
+		if request.Renew(&renew) == nil {
+			return operation{}, protocol.Response{}, false, fmt.Errorf(
+				"%w: Renew payload is missing",
+				protocol.ErrMalformedFrame,
+			)
+		}
 		return operation{
-			requestID: request.RequestID,
+			requestID: request.RequestId(),
 			kind:      operationRenew,
-			key:       request.Key,
+			key:       renew.Key(),
 			leaseID: leaseID{
-				clientID: request.ClientID,
-				bootID:   request.BootID,
-				leaseSeq: request.LeaseSequence,
+				clientID: renew.ClientId(),
+				bootID:   renew.BootId(),
+				leaseSeq: renew.LeaseSeq(),
 			},
-			requestedTTLMS: request.RequestedTTLMS,
+			requestedTTLMS: renew.RequestedTtlMs(),
 		}, protocol.Response{}, false, nil
 
 	case protocol.OperationRelease:
+		var release redleasev1.ReleaseRequest
+		if request.Release(&release) == nil {
+			return operation{}, protocol.Response{}, false, fmt.Errorf(
+				"%w: Release payload is missing",
+				protocol.ErrMalformedFrame,
+			)
+		}
 		return operation{
-			requestID: request.RequestID,
+			requestID: request.RequestId(),
 			kind:      operationRelease,
-			key:       request.Key,
+			key:       release.Key(),
 			leaseID: leaseID{
-				clientID: request.ClientID,
-				bootID:   request.BootID,
-				leaseSeq: request.LeaseSequence,
+				clientID: release.ClientId(),
+				bootID:   release.BootId(),
+				leaseSeq: release.LeaseSeq(),
 			},
 		}, protocol.Response{}, false, nil
 
 	case protocol.OperationGetTTL:
 		return operation{}, protocol.Response{
-			RequestID: request.RequestID,
+			RequestID: request.RequestId(),
 			Operation: protocol.OperationGetTTL,
 			Status:    protocol.StatusOK,
 			TTLMS:     s.config.MaxTTL,
@@ -401,8 +435,9 @@ func (s *Server) decodeRequest(request protocol.Request) (operation, protocol.Re
 
 	default:
 		return operation{}, protocol.Response{}, false, fmt.Errorf(
-			"unsupported request operation %d",
-			request.Operation,
+			"%w: unsupported request operation %d",
+			protocol.ErrMalformedFrame,
+			request.Operation(),
 		)
 	}
 }

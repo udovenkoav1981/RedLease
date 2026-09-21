@@ -30,7 +30,7 @@ func (e *replicaUnavailableError) Unwrap() error {
 }
 
 type connectionFactory interface {
-	open(ctx context.Context) (leaseConnection, error)
+	open(ctx context.Context) (transport.LeaseConnection, error)
 	close() error
 }
 
@@ -42,7 +42,7 @@ func newTCPConnectionFactory(target string) *tcpConnectionFactory {
 	return &tcpConnectionFactory{target: target}
 }
 
-func (f *tcpConnectionFactory) open(ctx context.Context) (leaseConnection, error) {
+func (f *tcpConnectionFactory) open(ctx context.Context) (transport.LeaseConnection, error) {
 	return transport.Dial(ctx, f.target)
 }
 
@@ -88,7 +88,7 @@ func newReplicaConn(factory connectionFactory, logger *slog.Logger) *replicaConn
 
 func (c *replicaConn) call(
 	ctx context.Context,
-	request protocol.Request,
+	request *outboundConnectionRequest,
 ) (protocol.Response, error) {
 	future, err := c.submit(ctx, request)
 	if err != nil {
@@ -99,7 +99,7 @@ func (c *replicaConn) call(
 
 func (c *replicaConn) submit(
 	ctx context.Context,
-	request protocol.Request,
+	request *outboundConnectionRequest,
 ) (*connectionFuture, error) {
 	c.stateMu.Lock()
 	generation := c.generation
@@ -111,6 +111,7 @@ func (c *replicaConn) submit(
 	c.stateMu.Unlock()
 
 	if generation == nil {
+		request.releaseRequest()
 		return nil, &replicaUnavailableError{cause: cause}
 	}
 

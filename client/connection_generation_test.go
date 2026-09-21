@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
+	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
 func TestStreamGenerationCorrelatesOutOfOrderResponses(t *testing.T) {
@@ -98,7 +99,8 @@ func TestStreamSubmitReturnsAfterWriterAcceptanceBeforeSendCompletes(t *testing.
 	submission := startStreamSubmit(generation, context.Background(), acquireStreamRequest(1))
 	stream.waitForSendAttempt(t)
 
-	// fake Send cannot complete until the test receives from stream.sent.
+	// fake BufferClientRequest cannot complete until the test receives from
+	// stream.sent.
 	// Submission must nevertheless complete because the single writer has
 	// already accepted the request into FIFO order.
 	submitted := receiveSubmitResult(t, submission)
@@ -297,7 +299,7 @@ func TestStreamGenerationConcurrentCalls(t *testing.T) {
 		results[i] = startStreamCall(generation, acquireStreamRequest(uint64(i+1)))
 	}
 
-	requests := make([]protocol.Request, calls)
+	requests := make([]observedRequest, calls)
 	for i := range calls {
 		requests[i] = receiveSentRequest(t, stream)
 	}
@@ -329,10 +331,62 @@ type fakeStreamOptions struct {
 	closeErr error
 }
 
+type observedRequest struct {
+	RequestID      uint64
+	Operation      protocol.Operation
+	Key            uint64
+	ClientID       uint32
+	BootID         uint32
+	LeaseSequence  uint64
+	RequestedTTLMS uint64
+}
+
+func observeClientRequest(request *redleasev1.ClientRequest) (observedRequest, error) {
+	observed := observedRequest{
+		RequestID: request.RequestId(),
+		Operation: request.Operation(),
+	}
+	switch observed.Operation {
+	case protocol.OperationAcquire:
+		var acquire redleasev1.AcquireRequest
+		if request.Acquire(&acquire) == nil {
+			return observedRequest{}, errors.New("Acquire payload is missing")
+		}
+		observed.Key = acquire.Key()
+		observed.ClientID = acquire.ClientId()
+		observed.BootID = acquire.BootId()
+		observed.LeaseSequence = acquire.LeaseSeq()
+		observed.RequestedTTLMS = acquire.RequestedTtlMs()
+	case protocol.OperationRenew:
+		var renew redleasev1.RenewRequest
+		if request.Renew(&renew) == nil {
+			return observedRequest{}, errors.New("Renew payload is missing")
+		}
+		observed.Key = renew.Key()
+		observed.ClientID = renew.ClientId()
+		observed.BootID = renew.BootId()
+		observed.LeaseSequence = renew.LeaseSeq()
+		observed.RequestedTTLMS = renew.RequestedTtlMs()
+	case protocol.OperationRelease:
+		var release redleasev1.ReleaseRequest
+		if request.Release(&release) == nil {
+			return observedRequest{}, errors.New("Release payload is missing")
+		}
+		observed.Key = release.Key()
+		observed.ClientID = release.ClientId()
+		observed.BootID = release.BootId()
+		observed.LeaseSequence = release.LeaseSeq()
+	case protocol.OperationGetTTL:
+	default:
+		return observedRequest{}, errors.New("unsupported request operation")
+	}
+	return observed, nil
+}
+
 type fakeLeaseClientStream struct {
 	ctx context.Context //nolint:containedctx // Test stream owns this context.
 
-	sent        chan protocol.Request
+	sent        chan observedRequest
 	receive     chan fakeReceive
 	sendAttempt chan struct{}
 	closed      chan struct{}
@@ -345,20 +399,28 @@ type fakeLeaseClientStream struct {
 	sendAttemptOnce sync.Once
 }
 
-func (s *fakeLeaseClientStream) Send(request protocol.Request) error {
+func (s *fakeLeaseClientStream) BufferClientRequest(request *redleasev1.ClientRequest) error {
 	s.sendAttemptOnce.Do(func() { close(s.sendAttempt) })
 	if s.sendErr != nil {
 		return s.sendErr
 	}
+	decoded, err := observeClientRequest(request)
+	if err != nil {
+		return err
+	}
 
 	select {
-	case s.sent <- request:
+	case s.sent <- decoded:
 		return nil
 	case <-s.closed:
 		return errConnectionClosed
 	case <-s.ctx.Done():
 		return s.ctx.Err()
 	}
+}
+
+func (s *fakeLeaseClientStream) FlushClientRequests() error {
+	return nil
 }
 
 func (s *fakeLeaseClientStream) Recv() (protocol.Response, error) {
@@ -401,7 +463,7 @@ func newTestStreamGenerationWithOptions(
 	streamContext, cancel := context.WithCancel(context.Background())
 	stream := &fakeLeaseClientStream{
 		ctx:         streamContext,
-		sent:        make(chan protocol.Request),
+		sent:        make(chan observedRequest),
 		receive:     make(chan fakeReceive, 256),
 		sendAttempt: make(chan struct{}),
 		closed:      make(chan struct{}),
@@ -415,7 +477,7 @@ func newTestStreamGenerationWithOptions(
 
 func startStreamCall(
 	generation *connectionGeneration,
-	request protocol.Request,
+	request *outboundConnectionRequest,
 ) <-chan connectionCallResult {
 	return startStreamCallWithContext(generation, context.Background(), request)
 }
@@ -423,7 +485,7 @@ func startStreamCall(
 func startStreamCallWithContext(
 	generation *connectionGeneration,
 	ctx context.Context,
-	request protocol.Request,
+	request *outboundConnectionRequest,
 ) <-chan connectionCallResult {
 	result := make(chan connectionCallResult, 1)
 	go func() {
@@ -436,7 +498,7 @@ func startStreamCallWithContext(
 func startStreamSubmit(
 	generation *connectionGeneration,
 	ctx context.Context,
-	request protocol.Request,
+	request *outboundConnectionRequest,
 ) <-chan streamSubmitResult {
 	result := make(chan streamSubmitResult, 1)
 	go func() {
@@ -457,14 +519,14 @@ func receiveSubmitResult(t *testing.T, result <-chan streamSubmitResult) streamS
 	}
 }
 
-func receiveSentRequest(t *testing.T, stream *fakeLeaseClientStream) protocol.Request {
+func receiveSentRequest(t *testing.T, stream *fakeLeaseClientStream) observedRequest {
 	t.Helper()
 	select {
 	case request := <-stream.sent:
 		return request
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for sent request")
-		return protocol.Request{}
+		return observedRequest{}
 	}
 }
 
@@ -489,8 +551,10 @@ func assertTransportCause(t *testing.T, err, cause error) {
 	}
 }
 
-func acquireStreamRequest(key uint64) protocol.Request {
-	return protocol.Request{Operation: protocol.OperationAcquire, Key: key}
+var testRequestClient Client
+
+func acquireStreamRequest(key uint64) *outboundConnectionRequest {
+	return testRequestClient.newAcquireRequest(key, 0, 0)
 }
 
 func streamResponse(requestID uint64, status protocol.Status) protocol.Response {

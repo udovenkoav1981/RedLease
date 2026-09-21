@@ -16,8 +16,9 @@ import (
 type recordingConn struct {
 	bytes.Buffer
 
-	reads  int
-	writes int
+	reads          int
+	writes         int
+	writeDeadlines int
 }
 
 func (c *recordingConn) Read(value []byte) (int, error) {
@@ -30,12 +31,15 @@ func (c *recordingConn) Write(value []byte) (int, error) {
 	return c.Buffer.Write(value)
 }
 
-func (*recordingConn) Close() error                     { return nil }
-func (*recordingConn) LocalAddr() net.Addr              { return nil }
-func (*recordingConn) RemoteAddr() net.Addr             { return nil }
-func (*recordingConn) SetDeadline(time.Time) error      { return nil }
-func (*recordingConn) SetReadDeadline(time.Time) error  { return nil }
-func (*recordingConn) SetWriteDeadline(time.Time) error { return nil }
+func (*recordingConn) Close() error                    { return nil }
+func (*recordingConn) LocalAddr() net.Addr             { return nil }
+func (*recordingConn) RemoteAddr() net.Addr            { return nil }
+func (*recordingConn) SetDeadline(time.Time) error     { return nil }
+func (*recordingConn) SetReadDeadline(time.Time) error { return nil }
+func (c *recordingConn) SetWriteDeadline(time.Time) error {
+	c.writeDeadlines++
+	return nil
+}
 
 func TestConnectionFlushesBufferedClientRequestsWithOneWrite(t *testing.T) {
 	network := &recordingConn{}
@@ -43,14 +47,13 @@ func TestConnectionFlushesBufferedClientRequestsWithOneWrite(t *testing.T) {
 	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
 
 	for requestID := uint64(1); requestID <= 2; requestID++ {
-		frame, err := protocol.EncodeRequest(builder, protocol.Request{
-			RequestID: requestID,
-			Operation: protocol.OperationGetTTL,
-		})
-		if err != nil {
-			t.Fatalf("encode request %d: %v", requestID, err)
-		}
-		request := redleasev1.GetSizePrefixedRootAsClientRequest(frame, 0)
+		builder.Reset()
+		redleasev1.ClientRequestStart(builder)
+		redleasev1.ClientRequestAddRequestId(builder, requestID)
+		redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationGET_TTL)
+		root := redleasev1.ClientRequestEnd(builder)
+		redleasev1.FinishSizePrefixedClientRequestBuffer(builder, root)
+		request := redleasev1.GetSizePrefixedRootAsClientRequest(builder.FinishedBytes(), 0)
 		if err := connection.BufferClientRequest(request); err != nil {
 			t.Fatalf("buffer request %d: %v", requestID, err)
 		}
@@ -58,11 +61,17 @@ func TestConnectionFlushesBufferedClientRequestsWithOneWrite(t *testing.T) {
 	if network.writes != 0 {
 		t.Fatalf("writes before flush = %d, want 0", network.writes)
 	}
+	if network.writeDeadlines != 0 {
+		t.Fatalf("write deadlines before flush = %d, want 0", network.writeDeadlines)
+	}
 	if err := connection.FlushClientRequests(); err != nil {
 		t.Fatalf("flush requests: %v", err)
 	}
 	if network.writes != 1 {
 		t.Fatalf("writes after flush = %d, want 1", network.writes)
+	}
+	if network.writeDeadlines != 1 {
+		t.Fatalf("write deadlines after flush = %d, want 1", network.writeDeadlines)
 	}
 
 	reader := NewFrameReader(&network.Buffer)
@@ -71,13 +80,60 @@ func TestConnectionFlushesBufferedClientRequestsWithOneWrite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read request %d: %v", requestID, err)
 		}
-		request, err := protocol.DecodeRequest(frame)
-		if err != nil {
+		if err := protocol.ValidateFrame(frame); err != nil {
 			t.Fatalf("decode request %d: %v", requestID, err)
 		}
-		if request.RequestID != requestID {
-			t.Fatalf("request ID = %d, want %d", request.RequestID, requestID)
+		request := redleasev1.GetSizePrefixedRootAsClientRequest(frame, 0)
+		if request.RequestId() != requestID {
+			t.Fatalf("request ID = %d, want %d", request.RequestId(), requestID)
 		}
+	}
+}
+
+func TestFrameWriterFlushesBeforeFrameExceedsAvailableBuffer(t *testing.T) {
+	network := &recordingConn{}
+	writer := NewFrameWriter(network)
+	frame := make([]byte, connectionWriteBufferBytes/2+1)
+
+	if err := writer.BufferFrame(frame); err != nil {
+		t.Fatalf("buffer first frame: %v", err)
+	}
+	if err := writer.BufferFrame(frame); err != nil {
+		t.Fatalf("buffer second frame: %v", err)
+	}
+	if network.writes != 1 || network.writeDeadlines != 1 {
+		t.Fatalf(
+			"intermediate flush = %d writes and %d deadlines, want 1 and 1",
+			network.writes,
+			network.writeDeadlines,
+		)
+	}
+
+	if err := writer.Flush(); err != nil {
+		t.Fatalf("flush second frame: %v", err)
+	}
+	if network.writes != 2 || network.writeDeadlines != 2 {
+		t.Fatalf(
+			"final flush = %d writes and %d deadlines, want 2 and 2",
+			network.writes,
+			network.writeDeadlines,
+		)
+	}
+}
+
+func TestFrameWriterEmptyFlushDoesNotSetDeadline(t *testing.T) {
+	network := &recordingConn{}
+	writer := NewFrameWriter(network)
+
+	if err := writer.Flush(); err != nil {
+		t.Fatalf("flush empty writer: %v", err)
+	}
+	if network.writes != 0 || network.writeDeadlines != 0 {
+		t.Fatalf(
+			"empty flush = %d writes and %d deadlines, want 0 and 0",
+			network.writes,
+			network.writeDeadlines,
+		)
 	}
 }
 
@@ -86,14 +142,16 @@ func TestFrameReaderReadsBufferedFramesWithOneRead(t *testing.T) {
 	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
 
 	for requestID := uint64(1); requestID <= 2; requestID++ {
-		frame, err := protocol.EncodeResponse(builder, protocol.Response{
-			RequestID: requestID,
-			Operation: protocol.OperationRelease,
-			Status:    protocol.StatusOK,
-		})
-		if err != nil {
-			t.Fatalf("encode response %d: %v", requestID, err)
-		}
+		builder.Reset()
+		redleasev1.ServerResponseStart(builder)
+		redleasev1.ServerResponseAddRequestId(builder, requestID)
+		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultRELEASE)
+		redleasev1.ServerResponseAddRelease(builder, redleasev1.CreateReleaseResponse(
+			builder, redleasev1.LeaseStatusOK,
+		))
+		root := redleasev1.ServerResponseEnd(builder)
+		redleasev1.FinishSizePrefixedServerResponseBuffer(builder, root)
+		frame := builder.FinishedBytes()
 		if _, err := network.Buffer.Write(frame); err != nil {
 			t.Fatalf("prepare response %d: %v", requestID, err)
 		}

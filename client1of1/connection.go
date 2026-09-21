@@ -10,6 +10,7 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
+	"github.com/udovenkoav1981/RedLease/internal/transport"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
@@ -19,13 +20,6 @@ var (
 )
 
 const sendQueueCapacity = 4096
-
-type leaseConnection interface {
-	BufferClientRequest(request *redleasev1.ClientRequest) error
-	FlushClientRequests() error
-	Recv() (protocol.Response, error)
-	Close() error
-}
 
 type connectionTransportError struct {
 	cause error
@@ -105,7 +99,7 @@ func (c *Client) releaseResponseTimer(timer *time.Timer) {
 }
 
 type connectionGeneration struct {
-	connection leaseConnection
+	connection transport.LeaseConnection
 	cancel     context.CancelFunc
 
 	sendQueue chan *outboundConnectionRequest
@@ -124,7 +118,7 @@ type connectionGeneration struct {
 }
 
 func newConnectionGeneration(
-	connection leaseConnection,
+	connection transport.LeaseConnection,
 	cancel context.CancelFunc,
 ) *connectionGeneration {
 	generation := &connectionGeneration{

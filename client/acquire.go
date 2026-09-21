@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
+	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
 // ErrNotAcquired identifies every Acquire result which did not establish a
@@ -203,7 +204,7 @@ func (c *Client) submitAcquire(
 	submitContext context.Context,
 	collectionContext context.Context,
 	replica int,
-	request protocol.Request,
+	request *outboundConnectionRequest,
 	submissions chan<- acquireSubmission,
 	results chan<- acquireReplicaResult,
 ) {
@@ -294,23 +295,37 @@ func bestAcquireQuorum(
 	return validities[len(validities)-quorumSize], true
 }
 
-func (c *Client) newAcquireRequest(key, sequence, ttlMS uint64) protocol.Request {
-	return protocol.Request{
-		Operation:      protocol.OperationAcquire,
-		Key:            key,
-		ClientID:       c.clientID,
-		BootID:         c.bootID,
-		LeaseSequence:  sequence,
-		RequestedTTLMS: ttlMS,
-	}
+func (c *Client) newAcquireRequest(key, sequence, ttlMS uint64) *outboundConnectionRequest {
+	outbound := c.newOutboundRequest()
+	builder := outbound.builder
+	redleasev1.ClientRequestStart(builder)
+	redleasev1.ClientRequestAddRequestId(builder, c.nextRequestID.Add(1))
+	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationACQUIRE)
+	redleasev1.ClientRequestAddAcquire(builder, redleasev1.CreateAcquireRequest(
+		builder,
+		key,
+		c.clientID,
+		c.bootID,
+		sequence,
+		ttlMS,
+	))
+	c.finishOutboundRequest(outbound)
+	return outbound
 }
 
-func (c *Client) newReleaseRequest(key, sequence uint64) protocol.Request {
-	return protocol.Request{
-		Operation:     protocol.OperationRelease,
-		Key:           key,
-		ClientID:      c.clientID,
-		BootID:        c.bootID,
-		LeaseSequence: sequence,
-	}
+func (c *Client) newReleaseRequest(key, sequence uint64) *outboundConnectionRequest {
+	outbound := c.newOutboundRequest()
+	builder := outbound.builder
+	redleasev1.ClientRequestStart(builder)
+	redleasev1.ClientRequestAddRequestId(builder, c.nextRequestID.Add(1))
+	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationRELEASE)
+	redleasev1.ClientRequestAddRelease(builder, redleasev1.CreateReleaseRequest(
+		builder,
+		key,
+		c.clientID,
+		c.bootID,
+		sequence,
+	))
+	c.finishOutboundRequest(outbound)
+	return outbound
 }
