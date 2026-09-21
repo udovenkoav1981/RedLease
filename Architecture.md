@@ -38,7 +38,7 @@ Client TCP write batching  block for first request, drain available queue, flush
 Server TCP write batching  block for first response, drain available queue, flush
 TCP read buffering         64 KiB per connection on client and server
 TCP write buffering        64 KiB per connection on client and server
-client1of1 send queue      4096 requests per connection generation
+client1of1 send queue      4096 requests per client, persistent across reconnect
 Initial ownership          >= Q/N
 Steady-state target        N/N
 Restart protection         built-in quarantine by default; explicit owner-managed opt-out
@@ -371,9 +371,11 @@ if current.leaseID == requested.leaseID:
 `client1of1` однократно пытается синхронно поместить `Release` в FIFO send
 queue, после чего возвращает управление, не ожидая отправки в socket или ответа
 server. При успешном enqueue следующая операция, последовательно вызванная
-после `Lease.Release()`, попадает в то же соединение после него. Ответ на `Release`
-клиенту не нужен и игнорируется. При разрыве соединения запрос не повторяется:
-неосвобождённый lease остаётся на server до TTL. Запоздалый `Release` содержит
+после `Lease.Release()`, попадает в FIFO после него. Ответ на `Release`
+клиенту не нужен и игнорируется. Оставшийся в очереди `Release` будет отправлен
+после reconnect; уже извлечённый старым writer запрос не повторяется. Между
+разными TCP-сессиями порядок обработки server не гарантирован. Неосвобождённый
+lease остаётся на server до TTL. Запоздалый `Release` содержит
 прежний `leaseID` и не может удалить новый lease того же key.
 
 Универсальный `client` сохраняет bounded retry `Release` по отдельным replicas.
@@ -567,9 +569,11 @@ connection write buffer. Если следующий frame не помещает
 буфера 64 KiB, writer сначала выполняет промежуточный `Flush()` с новым
 deadline, а затем копирует frame в освободившийся буфер. Поэтому `bufio.Writer`
 никогда не начинает неявную socket write со старым deadline. Timeout делает
-соединение непригодным: оно закрывается, вся ещё не отправленная очередь этого
-поколения отбрасывается, а client запускает reconnect. Запросы старого поколения
-на новое соединение автоматически не переносятся.
+соединение непригодным: оно закрывается, а client запускает reconnect. У
+`client1of1` очередь принадлежит client и сохраняется между TCP-сессиями.
+Запросы, уже извлечённые writer из очереди к моменту ошибки, могут потеряться:
+автоматически повторно они не отправляются. У общего `client` очередь остаётся
+привязанной к соединению и при его закрытии отбрасывается.
 
 Writer каждого client connection блокируется в ожидании первого request.
 Получив его, writer копирует frame в connection write buffer и затем забирает
@@ -605,7 +609,8 @@ response в write buffer; последующая ошибка flush закрыв
 переполнения был зависший socket writer, соединение будет закрыто самим writer
 по TCP write timeout; переполнение очереди отдельно не запускает reconnect.
 
-Каждый запрос содержит `requestID`, уникальный в пределах одного соединения. Server
+Каждый запрос содержит `requestID`, уникальный в пределах одного соединения
+(у `client1of1` — в течение жизни client). Server
 возвращает тот же `requestID` в ответе. Это correlation identifier, а не номер
 операции: он не задаёт порядок применения, не сохраняется server после reconnect
 и не обеспечивает дедупликацию.
@@ -623,12 +628,18 @@ TCP writer. Поэтому ответы для разных ключей мог�
 
 Для каждого ожидаемого ответа client хранит отдельный deadline. После timeout
 запрос перестаёт участвовать в quorum, а возможный поздний ответ игнорируется.
-Разрыв соединения завершает все его незавершённые запросы transport error и
-запускает reconnect; client никогда не ждёт отдельный пропущенный ответ
-бесконечно. `requestID` не устраняет неопределённость результата при разрыве
+У общего `client` разрыв соединения завершает все его незавершённые запросы
+transport error. У `client1of1` ожидающие ответы сохраняются: после reconnect
+ответ может прийти для запроса, оставшегося в очереди. Уже отправленный или
+извлечённый старым writer запрос может остаться без ответа и завершится по
+своему timeout. При `Close()` все ожидания завершаются сразу, очередь очищается.
+Перед подключением следующей TCP-сессии reader и writer предыдущей полностью
+завершаются, поэтому общую очередь никогда не читают два writer одновременно.
+Между запросами, попавшими на разные TCP-сессии, серверный порядок обработки
+не гарантирован. `requestID` не устраняет неопределённость результата при разрыве
 соединения: повторная отправка опирается на идемпотентность операций по `leaseID`.
 
-После transport error отдельный Acquire на реплике повторяется background
+У универсального `client` после transport error отдельный Acquire на реплике повторяется background
 healing с тем же `leaseID` и исходным `requestedTTL`. Перед каждой новой
 отправкой client повторно проверяет общее состояние `Lease`: retry разрешён
 только пока lease остаётся активным и локально действительным. Lease мог уже

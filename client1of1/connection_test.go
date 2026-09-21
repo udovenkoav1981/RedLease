@@ -24,6 +24,7 @@ type observedRequest struct {
 
 type fakeLeaseConnection struct {
 	ctx       context.Context //nolint:containedctx // Test connection owns this context.
+	cancel    context.CancelFunc
 	requests  chan observedRequest
 	responses chan protocol.Response
 	sendStart chan struct{}
@@ -107,26 +108,59 @@ func (c *fakeLeaseConnection) Recv() (protocol.Response, error) {
 	}
 }
 
-func (c *fakeLeaseConnection) Close() error { return nil }
+func (c *fakeLeaseConnection) Close() error {
+	c.cancel()
+	return nil
+}
 
-func TestStreamGenerationMultiplexesOutOfOrderResponses(t *testing.T) {
+func startTestConnection(t *testing.T, connection *fakeLeaseConnection, timeout time.Duration) (*Client, <-chan error) {
+	t.Helper()
+	clientContext, cancelClient := context.WithCancel(context.Background())
+	client := &Client{
+		clientID:        7,
+		bootID:          1,
+		responseTimeout: timeout,
+		logger:          slog.New(slog.DiscardHandler),
+		ctx:             clientContext,
+		cancel:          cancelClient,
+		connection:      connection,
+		changed:         make(chan struct{}),
+		sendQueue:       make(chan *outboundConnectionRequest, sendQueueCapacity),
+		pending:         make(map[uint64]chan connectionResult),
+	}
+	done := make(chan error, 1)
+	client.manager.Go(func() {
+		done <- client.runConnection(connection)
+		close(done)
+	})
+	t.Cleanup(func() {
+		_ = client.Close()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("connection workers did not stop")
+		}
+	})
+	return client, done
+}
+
+func TestConnectionMultiplexesOutOfOrderResponses(t *testing.T) {
 	streamContext, cancelStream := context.WithCancel(context.Background())
 	connection := &fakeLeaseConnection{
 		ctx:       streamContext,
 		requests:  make(chan observedRequest, 2),
 		responses: make(chan protocol.Response, 2),
 	}
-	generation := newConnectionGeneration(connection, cancelStream)
-	defer generation.Close()
-	client := &Client{}
+	connection.cancel = cancelStream
+	client, _ := startTestConnection(t, connection, time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	first, err := generation.submit(client.newReleaseRequest(1, 0))
+	first, err := client.submit(client.newReleaseRequest(1, 0))
 	if err != nil {
 		t.Fatalf("submit first: %v", err)
 	}
-	second, err := generation.submit(client.newReleaseRequest(2, 0))
+	second, err := client.submit(client.newReleaseRequest(2, 0))
 	if err != nil {
 		t.Fatalf("submit second: %v", err)
 	}
@@ -153,19 +187,18 @@ func TestStreamGenerationMultiplexesOutOfOrderResponses(t *testing.T) {
 	}
 }
 
-func TestStreamGenerationCancellationUnblocksAwait(t *testing.T) {
+func TestConnectionCancellationUnblocksAwait(t *testing.T) {
 	streamContext, cancelStream := context.WithCancel(context.Background())
 	connection := &fakeLeaseConnection{
 		ctx:       streamContext,
 		requests:  make(chan observedRequest, 1),
 		responses: make(chan protocol.Response),
 	}
-	generation := newConnectionGeneration(connection, cancelStream)
-	defer generation.Close()
-	client := &Client{}
+	connection.cancel = cancelStream
+	client, _ := startTestConnection(t, connection, time.Second)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	future, err := generation.submit(client.newReleaseRequest(1, 0))
+	future, err := client.submit(client.newReleaseRequest(1, 0))
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -175,7 +208,7 @@ func TestStreamGenerationCancellationUnblocksAwait(t *testing.T) {
 	}
 }
 
-func TestConnectionGenerationFlushesAvailableRequestsAsOneBatch(t *testing.T) {
+func TestConnectionFlushesAvailableRequestsAsOneBatch(t *testing.T) {
 	connectionContext, cancelConnection := context.WithCancel(context.Background())
 	connection := &fakeLeaseConnection{
 		ctx:       connectionContext,
@@ -184,11 +217,10 @@ func TestConnectionGenerationFlushesAvailableRequestsAsOneBatch(t *testing.T) {
 		sendStart: make(chan struct{}, 1),
 		flushes:   make(chan struct{}, 1),
 	}
-	generation := newConnectionGeneration(connection, cancelConnection)
-	defer generation.Close()
-	client := &Client{}
+	connection.cancel = cancelConnection
+	client, _ := startTestConnection(t, connection, time.Second)
 
-	if err := generation.submitNoResponse(client.newReleaseRequest(1, 1)); err != nil {
+	if err := client.submitNoResponse(client.newReleaseRequest(1, 1)); err != nil {
 		t.Fatalf("submit first request: %v", err)
 	}
 	select {
@@ -196,10 +228,10 @@ func TestConnectionGenerationFlushesAvailableRequestsAsOneBatch(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("writer did not start")
 	}
-	if err := generation.submitNoResponse(client.newReleaseRequest(2, 2)); err != nil {
+	if err := client.submitNoResponse(client.newReleaseRequest(2, 2)); err != nil {
 		t.Fatalf("submit second request: %v", err)
 	}
-	if err := generation.submitNoResponse(client.newReleaseRequest(3, 3)); err != nil {
+	if err := client.submitNoResponse(client.newReleaseRequest(3, 3)); err != nil {
 		t.Fatalf("submit third request: %v", err)
 	}
 
@@ -232,11 +264,10 @@ func TestConnectionFutureResponseTimeoutUnblocksAwait(t *testing.T) {
 		requests:  make(chan observedRequest, 1),
 		responses: make(chan protocol.Response, 2),
 	}
-	generation := newConnectionGeneration(connection, cancelConnection)
-	defer generation.Close()
-	client := &Client{responseTimeout: time.Millisecond}
+	connection.cancel = cancelConnection
+	client, _ := startTestConnection(t, connection, time.Millisecond)
 
-	future, err := generation.submit(client.newReleaseRequest(1, 0))
+	future, err := client.submit(client.newReleaseRequest(1, 0))
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -245,15 +276,15 @@ func TestConnectionFutureResponseTimeoutUnblocksAwait(t *testing.T) {
 		t.Fatalf("await error = %v, want context.DeadlineExceeded", err)
 	}
 
-	generation.stateMu.Lock()
-	_, pending := generation.pending[future.requestID]
-	generation.stateMu.Unlock()
+	client.pendingMu.Lock()
+	_, pending := client.pending[future.requestID]
+	client.pendingMu.Unlock()
 	if pending {
 		t.Fatal("timed-out request remains pending")
 	}
 
 	client.responseTimeout = time.Second
-	second, err := generation.submit(client.newReleaseRequest(2, 0))
+	second, err := client.submit(client.newReleaseRequest(2, 0))
 	if err != nil {
 		t.Fatalf("submit after timeout: %v", err)
 	}
@@ -277,23 +308,10 @@ func TestAcquireReturnsNotAcquiredWhenSendQueueIsFull(t *testing.T) {
 		responses: make(chan protocol.Response),
 		sendStart: make(chan struct{}, 1),
 	}
-	generation := newConnectionGeneration(connection, cancelConnection)
-	defer generation.Close()
+	connection.cancel = cancelConnection
+	client, done := startTestConnection(t, connection, time.Second)
 
-	clientContext, cancelClient := context.WithCancel(context.Background())
-	defer cancelClient()
-	client := &Client{
-		clientID:        7,
-		bootID:          1,
-		responseTimeout: time.Second,
-		logger:          slog.New(slog.DiscardHandler),
-		ctx:             clientContext,
-		cancel:          cancelClient,
-		generation:      generation,
-		changed:         make(chan struct{}),
-	}
-
-	if err := generation.submitNoResponse(client.newReleaseRequest(1, 1)); err != nil {
+	if err := client.submitNoResponse(client.newReleaseRequest(1, 1)); err != nil {
 		t.Fatalf("submit request blocking writer: %v", err)
 	}
 	select {
@@ -302,7 +320,7 @@ func TestAcquireReturnsNotAcquiredWhenSendQueueIsFull(t *testing.T) {
 		t.Fatal("writer did not start")
 	}
 	for request := range uint64(sendQueueCapacity) {
-		if err := generation.submitNoResponse(client.newReleaseRequest(request+2, request+2)); err != nil {
+		if err := client.submitNoResponse(client.newReleaseRequest(request+2, request+2)); err != nil {
 			t.Fatalf("fill send queue at request %d: %v", request, err)
 		}
 	}
@@ -318,12 +336,9 @@ func TestAcquireReturnsNotAcquiredWhenSendQueueIsFull(t *testing.T) {
 		t.Fatalf("Acquire cause = %v, want errSendQueueFull", err)
 	}
 	select {
-	case <-generation.done:
+	case <-done:
 		t.Fatal("full send queue terminated the connection")
 	default:
-	}
-	if generation.err() != nil {
-		t.Fatalf("connection error after full send queue = %v", generation.err())
 	}
 }
 
@@ -334,21 +349,8 @@ func TestFailedAcquireQueuesCleanupRelease(t *testing.T) {
 		requests:  make(chan observedRequest, 2),
 		responses: make(chan protocol.Response, 2),
 	}
-	generation := newConnectionGeneration(connection, cancelStream)
-	defer generation.Close()
-
-	clientContext, cancelClient := context.WithCancel(context.Background())
-	defer cancelClient()
-	client := &Client{
-		clientID:        7,
-		bootID:          1,
-		responseTimeout: 10 * time.Millisecond,
-		logger:          slog.New(slog.DiscardHandler),
-		ctx:             clientContext,
-		cancel:          cancelClient,
-		generation:      generation,
-		changed:         make(chan struct{}),
-	}
+	connection.cancel = cancelStream
+	client, _ := startTestConnection(t, connection, 10*time.Millisecond)
 
 	acquireSent := make(chan observedRequest, 1)
 	go func() {
@@ -386,9 +388,9 @@ func TestFailedAcquireQueuesCleanupRelease(t *testing.T) {
 			t.Fatal("cleanup Release used a different lease ID")
 		}
 
-		generation.stateMu.Lock()
-		_, waitsForResponse := generation.pending[releaseRequest.RequestID]
-		generation.stateMu.Unlock()
+		client.pendingMu.Lock()
+		_, waitsForResponse := client.pending[releaseRequest.RequestID]
+		client.pendingMu.Unlock()
 		if waitsForResponse {
 			t.Fatal("cleanup Release waits for a server response")
 		}
@@ -400,6 +402,126 @@ func TestFailedAcquireQueuesCleanupRelease(t *testing.T) {
 	case request := <-connection.requests:
 		t.Fatalf("failed Acquire retried cleanup Release: %+v", request)
 	case <-time.After(5 * client.responseTimeout):
+	}
+}
+
+func TestReconnectKeepsQueuedRequestAndPendingResponses(t *testing.T) {
+	firstContext, cancelFirst := context.WithCancel(context.Background())
+	first := &fakeLeaseConnection{
+		ctx: firstContext, cancel: cancelFirst,
+		requests: make(chan observedRequest), responses: make(chan protocol.Response),
+		sendStart: make(chan struct{}, 1),
+	}
+	client, firstDone := startTestConnection(t, first, time.Second)
+	firstFuture, err := client.submit(client.newReleaseRequest(1, 1))
+	if err != nil {
+		t.Fatalf("submit first: %v", err)
+	}
+	select {
+	case <-first.sendStart:
+	case <-time.After(time.Second):
+		t.Fatal("first writer did not start")
+	}
+	secondFuture, err := client.submit(client.newReleaseRequest(2, 2))
+	if err != nil {
+		t.Fatalf("submit queued request: %v", err)
+	}
+	_ = first.Close()
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("old reader or writer did not finish")
+	}
+	if got := len(client.sendQueue); got != 1 {
+		t.Fatalf("queue after disconnect = %d, want 1", got)
+	}
+	client.pendingMu.Lock()
+	pendingCount := len(client.pending)
+	client.pendingMu.Unlock()
+	if pendingCount != 2 {
+		t.Fatalf("pending after disconnect = %d, want 2", pendingCount)
+	}
+	thirdFuture, err := client.submit(client.newReleaseRequest(3, 3))
+	if err != nil {
+		t.Fatalf("submit while disconnected: %v", err)
+	}
+
+	secondContext, cancelSecond := context.WithCancel(context.Background())
+	second := &fakeLeaseConnection{
+		ctx: secondContext, cancel: cancelSecond,
+		requests: make(chan observedRequest, 2), responses: make(chan protocol.Response, 2),
+	}
+	client.stateMu.Lock()
+	client.connection = second
+	client.stateMu.Unlock()
+	secondDone := make(chan struct{})
+	client.manager.Go(func() {
+		_ = client.runConnection(second)
+		close(secondDone)
+	})
+	request := <-second.requests
+	if request.Key != 2 {
+		t.Fatalf("reconnected writer sent key %d, want 2", request.Key)
+	}
+	thirdRequest := <-second.requests
+	if thirdRequest.Key != 3 {
+		t.Fatalf("reconnected writer sent next key %d, want 3", thirdRequest.Key)
+	}
+	second.responses <- releaseServerResponse(request.RequestID)
+	second.responses <- releaseServerResponse(thirdRequest.RequestID)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	response, err := secondFuture.await(ctx, nil)
+	if err != nil || response.RequestID != request.RequestID {
+		t.Fatalf("queued response = (%+v, %v)", response, err)
+	}
+	response, err = thirdFuture.await(ctx, nil)
+	if err != nil || response.RequestID != thirdRequest.RequestID {
+		t.Fatalf("offline queued response = (%+v, %v)", response, err)
+	}
+	_, err = firstFuture.await(context.Background(), time.After(10*time.Millisecond))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("lost request error = %v, want timeout", err)
+	}
+	_ = second.Close()
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("new reader or writer did not finish")
+	}
+}
+
+func TestClientCloseWakesPendingAndDiscardsQueue(t *testing.T) {
+	connectionContext, cancelConnection := context.WithCancel(context.Background())
+	connection := &fakeLeaseConnection{
+		ctx: connectionContext, cancel: cancelConnection,
+		requests: make(chan observedRequest), responses: make(chan protocol.Response),
+		sendStart: make(chan struct{}, 1),
+	}
+	client, _ := startTestConnection(t, connection, time.Second)
+	first, err := client.submit(client.newReleaseRequest(1, 1))
+	if err != nil {
+		t.Fatalf("submit first: %v", err)
+	}
+	select {
+	case <-connection.sendStart:
+	case <-time.After(time.Second):
+		t.Fatal("writer did not start")
+	}
+	second, err := client.submit(client.newReleaseRequest(2, 2))
+	if err != nil {
+		t.Fatalf("submit second: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	for _, future := range []*connectionFuture{first, second} {
+		if _, err := future.await(context.Background(), nil); !errors.Is(err, ErrClientClosed) {
+			t.Fatalf("pending result after Close = %v, want ErrClientClosed", err)
+		}
+	}
+	if got := len(client.sendQueue); got != 0 {
+		t.Fatalf("queue after Close = %d, want 0", got)
 	}
 }
 

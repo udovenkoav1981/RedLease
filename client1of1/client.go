@@ -3,7 +3,6 @@ package client1of1
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -16,21 +15,6 @@ import (
 
 // ErrClientClosed is returned when an operation is attempted after Close.
 var ErrClientClosed = errors.New("RedLease 1/1 client closed")
-
-type serverUnavailableError struct {
-	cause error
-}
-
-func (e *serverUnavailableError) Error() string {
-	if e.cause == nil {
-		return "server unavailable"
-	}
-	return "server unavailable: " + e.cause.Error()
-}
-
-func (e *serverUnavailableError) Unwrap() error {
-	return e.cause
-}
 
 // Client owns one persistent reconnecting TCP connection to one lock-server.
 type Client struct {
@@ -46,10 +30,14 @@ type Client struct {
 	cancel context.CancelFunc
 
 	stateMu    sync.Mutex
-	generation *connectionGeneration
-	lastErr    error
+	connection transport.LeaseConnection
 	closed     bool
 	changed    chan struct{}
+
+	sendQueue  chan *outboundConnectionRequest
+	pendingMu  sync.Mutex
+	pending    map[uint64]chan connectionResult
+	futurePool sync.Pool
 
 	manager sync.WaitGroup
 
@@ -82,9 +70,11 @@ func New(config Config) (*Client, error) {
 			slog.Uint64("client_id", uint64(config.ClientID)),
 			slog.String("server_target", config.Target),
 		),
-		ctx:     ctx,
-		cancel:  cancel,
-		changed: make(chan struct{}),
+		ctx:       ctx,
+		cancel:    cancel,
+		changed:   make(chan struct{}),
+		sendQueue: make(chan *outboundConnectionRequest, sendQueueCapacity),
+		pending:   make(map[uint64]chan connectionResult),
 	}
 	if config.ResponseTimeout != 0 {
 		client.responseTimeout = time.Duration(config.ResponseTimeout) * time.Millisecond
@@ -107,7 +97,7 @@ func (c *Client) WaitReady(ctx context.Context) error {
 		}
 
 		c.stateMu.Lock()
-		ready := c.generation != nil && !c.closed
+		ready := c.connection != nil && !c.closed
 		closed := c.closed
 		changed := c.changed
 		c.stateMu.Unlock()
@@ -136,55 +126,25 @@ func (c *Client) Close() error {
 
 		c.stateMu.Lock()
 		c.closed = true
-		generation := c.generation
-		c.generation = nil
-		c.lastErr = ErrClientClosed
+		connection := c.connection
+		c.connection = nil
 		c.notifyStateChangeLocked()
 		c.stateMu.Unlock()
 
-		if generation != nil {
-			generation.Close()
+		c.pendingMu.Lock()
+		pending := c.pending
+		c.pending = make(map[uint64]chan connectionResult)
+		c.pendingMu.Unlock()
+		for _, result := range pending {
+			result <- connectionResult{err: ErrClientClosed}
+		}
+		if connection != nil {
+			_ = connection.Close()
 		}
 		c.manager.Wait()
+		c.discardQueuedRequests()
 	})
 	return c.closeErr
-}
-
-func (c *Client) submit(
-	request *outboundConnectionRequest,
-) (*connectionFuture, error) {
-	generation, err := c.currentGeneration()
-	if err != nil {
-		request.recycle()
-		return nil, err
-	}
-	return generation.submit(request)
-}
-
-func (c *Client) submitNoResponse(
-	request *outboundConnectionRequest,
-) error {
-	generation, err := c.currentGeneration()
-	if err != nil {
-		request.recycle()
-		return err
-	}
-	return generation.submitNoResponse(request)
-}
-
-func (c *Client) currentGeneration() (*connectionGeneration, error) {
-	c.stateMu.Lock()
-	generation := c.generation
-	cause := c.lastErr
-	if c.closed {
-		generation = nil
-		cause = ErrClientClosed
-	}
-	c.stateMu.Unlock()
-	if generation == nil {
-		return nil, &serverUnavailableError{cause: cause}
-	}
-	return generation, nil
 }
 
 func (c *Client) cancellationError(caller context.Context) error {
@@ -206,7 +166,6 @@ func (c *Client) manageConnection() {
 	for {
 		connection, err := transport.Dial(c.ctx, c.target)
 		if err != nil {
-			c.recordFailure(fmt.Errorf("open connection: %w", err))
 			if !unavailable && c.ctx.Err() == nil {
 				c.logger.Warn(
 					"server connection unavailable",
@@ -222,9 +181,8 @@ func (c *Client) manageConnection() {
 			continue
 		}
 
-		generation := newConnectionGeneration(connection, func() {})
-		if !c.publish(generation) {
-			generation.Close()
+		if !c.publish(connection) {
+			_ = connection.Close()
 			return
 		}
 		c.logger.Info(
@@ -234,14 +192,8 @@ func (c *Client) manageConnection() {
 		)
 		attempt = 0
 
-		select {
-		case <-generation.done:
-		case <-c.ctx.Done():
-		}
-
-		cause := generation.err()
-		c.clear(generation, cause)
-		generation.Close()
+		cause := c.runConnection(connection)
+		c.clear(connection)
 		if c.ctx.Err() != nil {
 			return
 		}
@@ -258,35 +210,25 @@ func (c *Client) manageConnection() {
 	}
 }
 
-func (c *Client) publish(generation *connectionGeneration) bool {
+func (c *Client) publish(connection transport.LeaseConnection) bool {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
-	if c.closed {
+	if c.closed || c.ctx.Err() != nil {
 		return false
 	}
-	c.generation = generation
-	c.lastErr = nil
+	c.connection = connection
 	c.notifyStateChangeLocked()
 	return true
 }
 
-func (c *Client) clear(generation *connectionGeneration, cause error) {
+func (c *Client) clear(connection transport.LeaseConnection) {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
-	if c.generation != generation {
+	if c.connection != connection {
 		return
 	}
-	c.generation = nil
-	c.lastErr = cause
+	c.connection = nil
 	c.notifyStateChangeLocked()
-}
-
-func (c *Client) recordFailure(cause error) {
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
-	if !c.closed {
-		c.lastErr = cause
-	}
 }
 
 func (c *Client) notifyStateChangeLocked() {

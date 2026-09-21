@@ -14,24 +14,9 @@ import (
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
-var (
-	errConnectionClosed = errors.New("connection closed")
-	errSendQueueFull    = errors.New("connection send queue full")
-)
+var errSendQueueFull = errors.New("connection send queue full")
 
 const sendQueueCapacity = 4096
-
-type connectionTransportError struct {
-	cause error
-}
-
-func (e *connectionTransportError) Error() string {
-	return "connection transport: " + e.cause.Error()
-}
-
-func (e *connectionTransportError) Unwrap() error {
-	return e.cause
-}
 
 type connectionResult struct {
 	response protocol.Response
@@ -39,9 +24,9 @@ type connectionResult struct {
 }
 
 type connectionFuture struct {
-	generation *connectionGeneration
-	requestID  uint64
-	result     chan connectionResult
+	client    *Client
+	requestID uint64
+	result    chan connectionResult
 }
 
 type outboundConnectionRequest struct {
@@ -50,258 +35,188 @@ type outboundConnectionRequest struct {
 	pool    *sync.Pool
 }
 
-func (f *connectionFuture) await(
-	ctx context.Context,
-	timeout <-chan time.Time,
-) (protocol.Response, error) {
+func (f *connectionFuture) await(ctx context.Context, timeout <-chan time.Time) (protocol.Response, error) {
 	var result connectionResult
 	select {
 	case result = <-f.result:
 	case <-ctx.Done():
-		f.generation.complete(f.requestID, connectionResult{err: ctx.Err()})
+		f.client.complete(f.requestID, connectionResult{err: ctx.Err()})
 		result = <-f.result
 	case <-timeout:
-		f.generation.complete(f.requestID, connectionResult{err: context.DeadlineExceeded})
+		f.client.complete(f.requestID, connectionResult{err: context.DeadlineExceeded})
 		result = <-f.result
 	}
-	f.generation.releaseFuture(f)
+	f.client.releaseFuture(f)
 	return result.response, result.err
 }
 
-func (c *Client) awaitResponse(
-	ctx context.Context,
-	future *connectionFuture,
-) (protocol.Response, error) {
-	timer := c.acquireResponseTimer()
+func (c *Client) awaitResponse(ctx context.Context, future *connectionFuture) (protocol.Response, error) {
+	timer, ok := c.responseTimerPool.Get().(*time.Timer)
+	if ok {
+		timer.Reset(c.responseTimeout)
+	} else {
+		timer = time.NewTimer(c.responseTimeout)
+	}
+
 	response, err := future.await(ctx, timer.C)
-	c.releaseResponseTimer(timer)
+
+	timer.Stop()
+	c.responseTimerPool.Put(timer)
 	return response, err
 }
 
-func (c *Client) acquireResponseTimer() *time.Timer {
-	if pooled := c.responseTimerPool.Get(); pooled != nil {
-		if timer, ok := pooled.(*time.Timer); ok {
-			timer.Reset(c.responseTimeout)
-			return timer
-		}
-	}
-	return time.NewTimer(c.responseTimeout)
-}
-
-func (c *Client) releaseResponseTimer(timer *time.Timer) {
-	if !timer.Stop() {
-		select {
-		case <-timer.C:
-		default:
-		}
-	}
-	c.responseTimerPool.Put(timer)
-}
-
-type connectionGeneration struct {
-	connection transport.LeaseConnection
-	cancel     context.CancelFunc
-
-	sendQueue chan *outboundConnectionRequest
-	done      chan struct{}
-
-	stateMu     sync.Mutex
-	pending     map[uint64]chan connectionResult
-	terminalErr error
-	futurePool  sync.Pool
-
-	terminateOnce       sync.Once
-	workers             sync.WaitGroup
-	closeOnce           sync.Once
-	connectionCloseOnce sync.Once
-	closeDone           chan struct{}
-}
-
-func newConnectionGeneration(
-	connection transport.LeaseConnection,
-	cancel context.CancelFunc,
-) *connectionGeneration {
-	generation := &connectionGeneration{
-		connection: connection,
-		cancel:     cancel,
-		sendQueue:  make(chan *outboundConnectionRequest, sendQueueCapacity),
-		done:       make(chan struct{}),
-		pending:    make(map[uint64]chan connectionResult),
-		closeDone:  make(chan struct{}),
-	}
-	generation.workers.Add(2)
-	go generation.send()
-	go generation.receive()
-	return generation
-}
-
-// submit returns after the request has entered the FIFO send queue. This is
-// the ordering barrier used before a cleanup Release is submitted after an
-// ambiguous mutation.
-func (g *connectionGeneration) submit(
-	request *outboundConnectionRequest,
-) (*connectionFuture, error) {
-	future := g.acquireFuture(request.request.RequestId())
-	requestID, err := g.enqueue(request, future.result)
-	if err != nil {
-		g.releaseFuture(future)
+// submit registers the waiter before putting the request into the persistent
+// FIFO. The queue insertion is the ordering barrier for a cleanup Release.
+func (c *Client) submit(request *outboundConnectionRequest) (*connectionFuture, error) {
+	future := c.acquireFuture(request.request.RequestId())
+	if err := c.enqueue(request, future.result); err != nil {
+		c.releaseFuture(future)
 		return nil, err
 	}
-	future.requestID = requestID
 	return future, nil
 }
 
-func (g *connectionGeneration) acquireFuture(requestID uint64) *connectionFuture {
-	if pooled := g.futurePool.Get(); pooled != nil {
+func (c *Client) acquireFuture(requestID uint64) *connectionFuture {
+	if pooled := c.futurePool.Get(); pooled != nil {
 		if future, ok := pooled.(*connectionFuture); ok {
-			future.generation = g
+			future.client = c
 			future.requestID = requestID
 			return future
 		}
 	}
 	return &connectionFuture{
-		generation: g,
-		requestID:  requestID,
-		result:     make(chan connectionResult, 1),
+		client:    c,
+		requestID: requestID,
+		result:    make(chan connectionResult, 1),
 	}
 }
 
-func (g *connectionGeneration) releaseFuture(future *connectionFuture) {
-	future.generation = nil
+func (c *Client) releaseFuture(future *connectionFuture) {
+	future.client = nil
 	future.requestID = 0
-	g.futurePool.Put(future)
+	c.futurePool.Put(future)
 }
 
-func (g *connectionGeneration) submitNoResponse(
-	request *outboundConnectionRequest,
-) error {
-	_, err := g.enqueue(request, nil)
-	return err
+func (c *Client) submitNoResponse(request *outboundConnectionRequest) error {
+	return c.enqueue(request, nil)
 }
 
-func (g *connectionGeneration) enqueue(
-	request *outboundConnectionRequest,
-	result chan connectionResult,
-) (uint64, error) {
+func (c *Client) enqueue(request *outboundConnectionRequest, result chan connectionResult) error {
 	requestID := request.request.RequestId()
-
-	g.stateMu.Lock()
-	if g.terminalErr != nil {
-		err := g.terminalErr
-		g.stateMu.Unlock()
+	c.pendingMu.Lock()
+	if c.ctx.Err() != nil {
+		c.pendingMu.Unlock()
 		request.recycle()
-		return 0, err
+		return ErrClientClosed
 	}
 	if result != nil {
-		g.pending[requestID] = result
+		c.pending[requestID] = result
 	}
 	select {
-	case g.sendQueue <- request:
-		g.stateMu.Unlock()
-		return requestID, nil
+	case c.sendQueue <- request:
+		c.pendingMu.Unlock()
+		return nil
 	default:
-		delete(g.pending, requestID)
-		g.stateMu.Unlock()
+		delete(c.pending, requestID)
+		c.pendingMu.Unlock()
 		request.recycle()
-		return 0, errSendQueueFull
+		return errSendQueueFull
 	}
 }
 
-func (g *connectionGeneration) complete(requestID uint64, result connectionResult) {
-	g.stateMu.Lock()
-	pending := g.pending[requestID]
+func (c *Client) complete(requestID uint64, result connectionResult) {
+	c.pendingMu.Lock()
+	pending := c.pending[requestID]
 	if pending != nil {
-		delete(g.pending, requestID)
+		delete(c.pending, requestID)
 	}
-	g.stateMu.Unlock()
-	if pending == nil {
-		return
+	c.pendingMu.Unlock()
+	if pending != nil {
+		pending <- result
 	}
-	pending <- result
 }
 
-func (g *connectionGeneration) send() {
-	defer g.workers.Done()
+// runConnection owns exactly one reader and one writer. Both are joined before
+// the manager starts another session, so the persistent queue has one consumer.
+func (c *Client) runConnection(connection transport.LeaseConnection) error {
+	stop := make(chan struct{})
+	results := make(chan error, 2)
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		results <- c.send(connection, stop)
+	}()
+	go func() {
+		defer workers.Done()
+		results <- c.receive(connection)
+	}()
 
+	var cause error
+	select {
+	case cause = <-results:
+	case <-c.ctx.Done():
+		cause = ErrClientClosed
+	}
+	close(stop)
+	_ = connection.Close()
+	workers.Wait()
+	return cause
+}
+
+func (c *Client) send(connection transport.LeaseConnection, stop <-chan struct{}) error {
 	for {
 		var outbound *outboundConnectionRequest
 		select {
-		case <-g.done:
-			return
-		case outbound = <-g.sendQueue:
+		case <-stop:
+			return nil
+		case <-c.ctx.Done():
+			return ErrClientClosed
+		case outbound = <-c.sendQueue:
 		}
-
 		for {
-			if err := g.err(); err != nil {
+			select {
+			case <-stop:
 				outbound.recycle()
-				return
+				return nil
+			default:
 			}
-			err := g.connection.BufferClientRequest(&outbound.request)
+			err := connection.BufferClientRequest(&outbound.request)
 			outbound.recycle()
 			if err != nil {
-				g.terminate(fmt.Errorf("send: %w", err))
-				return
-			}
-
-			if err := g.err(); err != nil {
-				return
+				return fmt.Errorf("send: %w", err)
 			}
 			select {
-			case outbound = <-g.sendQueue:
+			case <-stop:
+				return nil
+			case <-c.ctx.Done():
+				return ErrClientClosed
+			case outbound = <-c.sendQueue:
 				continue
 			default:
 			}
-			if err := g.connection.FlushClientRequests(); err != nil {
-				g.terminate(fmt.Errorf("flush send batch: %w", err))
-				return
+			if err := connection.FlushClientRequests(); err != nil {
+				return fmt.Errorf("flush send batch: %w", err)
 			}
 			break
 		}
 	}
 }
 
-func (r *outboundConnectionRequest) recycle() {
-	r.request = redleasev1.ClientRequest{}
-	r.pool.Put(r)
-}
-
-func (g *connectionGeneration) receive() {
-	defer g.workers.Done()
+func (c *Client) receive(connection transport.LeaseConnection) error {
 	for {
-		response, err := g.connection.Recv()
+		response, err := connection.Recv()
 		if err != nil {
-			g.terminate(fmt.Errorf("receive: %w", err))
-			return
+			return fmt.Errorf("receive: %w", err)
 		}
-		g.complete(response.RequestID, connectionResult{response: response})
+		c.complete(response.RequestID, connectionResult{response: response})
 	}
 }
 
-func (g *connectionGeneration) terminate(cause error) {
-	g.terminateOnce.Do(func() {
-		transportErr := &connectionTransportError{cause: cause}
-
-		g.stateMu.Lock()
-		g.terminalErr = transportErr
-		pending := g.pending
-		g.pending = make(map[uint64]chan connectionResult)
-		g.stateMu.Unlock()
-
-		close(g.done)
-		g.cancel()
-		g.closeConnection()
-		g.discardQueuedRequests()
-		result := connectionResult{err: transportErr}
-		for _, call := range pending {
-			call <- result
-		}
-	})
-}
-
-func (g *connectionGeneration) discardQueuedRequests() {
+func (c *Client) discardQueuedRequests() {
 	for {
 		select {
-		case request := <-g.sendQueue:
+		case request := <-c.sendQueue:
 			request.recycle()
 		default:
 			return
@@ -309,23 +224,7 @@ func (g *connectionGeneration) discardQueuedRequests() {
 	}
 }
 
-func (g *connectionGeneration) closeConnection() {
-	g.connectionCloseOnce.Do(func() {
-		_ = g.connection.Close()
-	})
-}
-
-func (g *connectionGeneration) err() error {
-	g.stateMu.Lock()
-	defer g.stateMu.Unlock()
-	return g.terminalErr
-}
-
-func (g *connectionGeneration) Close() {
-	g.closeOnce.Do(func() {
-		g.terminate(errConnectionClosed)
-		g.workers.Wait()
-		close(g.closeDone)
-	})
-	<-g.closeDone
+func (r *outboundConnectionRequest) recycle() {
+	r.request = redleasev1.ClientRequest{}
+	r.pool.Put(r)
 }
