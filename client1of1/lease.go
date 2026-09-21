@@ -3,7 +3,6 @@ package client1of1
 import (
 	"context"
 	"errors"
-	"sync"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
@@ -23,7 +22,7 @@ var (
 	// ErrNotRenewed identifies a Renew which did not establish new validity.
 	// Previously confirmed validity is not revoked.
 	ErrNotRenewed = errors.New("RedLease 1/1 lease not renewed")
-	// ErrLeaseReleased is returned when Renew races with or follows Release.
+	// ErrLeaseReleased is returned when Renew follows Release.
 	ErrLeaseReleased = errors.New("RedLease lease released")
 )
 
@@ -54,19 +53,16 @@ const (
 	leaseReleased
 )
 
-// Lease is a locally confirmed lease on the configured lock-server.
+// Lease is a locally confirmed lease on the configured lock-server. Its public
+// methods must not be called concurrently on the same Lease.
 type Lease struct {
 	client   *Client
 	sequence uint64
 	key      uint64
 	now      time.Time
 
-	stateMu    sync.RWMutex
 	lifecycle  leaseLifecycle
 	validUntil time.Time
-
-	renewMu     sync.Mutex
-	releaseOnce sync.Once
 }
 
 // Acquire makes one attempt to establish a currently valid lease for the
@@ -134,14 +130,10 @@ func (l *Lease) acceptAcquireResponse(
 
 // RemainingTTLms returns the remaining local validity in milliseconds.
 func (l *Lease) RemainingTTLms() uint64 {
-	l.stateMu.RLock()
-	validUntil := l.validUntil
-	active := l.lifecycle == leaseActive
-	l.stateMu.RUnlock()
-	if !active {
+	if l.lifecycle != leaseActive {
 		return 0
 	}
-	remaining := time.Until(validUntil).Milliseconds()
+	remaining := time.Until(l.validUntil).Milliseconds()
 	if remaining <= 0 {
 		return 0
 	}
@@ -151,16 +143,10 @@ func (l *Lease) RemainingTTLms() uint64 {
 // Renew attempts to extend this lease on its lock-server. Failure leaves the
 // previously confirmed validUntil unchanged.
 func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
-	l.renewMu.Lock()
-	defer l.renewMu.Unlock()
-
-	l.stateMu.Lock()
 	if l.lifecycle != leaseActive {
-		l.stateMu.Unlock()
 		return &operationError{kind: ErrNotRenewed, cause: ErrLeaseReleased}
 	}
 	l.now = time.Now()
-	l.stateMu.Unlock()
 
 	renewed := false
 	future, err := l.client.submit(l.client.newRenewRequest(l.key, l.sequence, ttlMS))
@@ -196,11 +182,6 @@ func (l *Lease) acceptRenewResponse(
 		return false, nil
 	}
 
-	l.stateMu.Lock()
-	defer l.stateMu.Unlock()
-	if l.lifecycle != leaseActive {
-		return false, ErrLeaseReleased
-	}
 	if validUntil.After(l.validUntil) {
 		l.validUntil = validUntil
 	}
@@ -211,14 +192,12 @@ func (l *Lease) acceptRenewResponse(
 // best-effort Release to the server. It does not wait for a server response.
 // Repeated calls do nothing.
 func (l *Lease) Release() {
-	l.releaseOnce.Do(func() {
-		l.stateMu.Lock()
-		l.lifecycle = leaseReleased
-		l.validUntil = time.Time{}
-		l.stateMu.Unlock()
-
-		l.client.release(l.key, l.sequence)
-	})
+	if l.lifecycle == leaseReleased {
+		return
+	}
+	l.lifecycle = leaseReleased
+	l.validUntil = time.Time{}
+	l.client.release(l.key, l.sequence)
 }
 
 func (c *Client) release(key, sequence uint64) {

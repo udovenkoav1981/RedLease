@@ -1,6 +1,7 @@
 package client1of1
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -13,4 +14,28 @@ func TestCandidateValidityRejectsTTLAboveProtocolMaximum(t *testing.T) {
 	if !validUntil.Equal(start) {
 		t.Fatalf("validUntil = %v, want expired at %v", validUntil, start)
 	}
+}
+
+func TestReleaseIsIdempotent(t *testing.T) {
+	client := &Client{
+		ctx:       context.Background(),
+		sendQueue: make(chan *outboundConnectionRequest, 2),
+	}
+	lease := &Lease{
+		client:     client,
+		key:        42,
+		sequence:   1,
+		lifecycle:  leaseActive,
+		validUntil: time.Now().Add(time.Second),
+	}
+
+	lease.Release()
+	lease.Release()
+	if got := lease.RemainingTTLms(); got != 0 {
+		t.Fatalf("RemainingTTLms after Release = %d, want 0", got)
+	}
+	if got := len(client.sendQueue); got != 1 {
+		t.Fatalf("queued Release requests = %d, want 1", got)
+	}
+	(<-client.sendQueue).recycle()
 }
