@@ -1,6 +1,6 @@
-# redlease-tcp-load
+# redlease-dummy-client
 
-Минимальный генератор нагрузки для одного raw TCP-соединения. Он напрямую
+Минимальный генератор нагрузки для одного или нескольких raw TCP-соединений. Он напрямую
 отправляет непрерывные пары `Acquire`/`Release`, не используя пакеты `client`
 и `client1of1`.
 
@@ -15,13 +15,21 @@ TCP/server pipeline, а не бизнес-семантику lease.
 Сначала запустите `redlease-server`, затем:
 
 ```bash
-go run ./cmd/redlease-tcp-load \
+go run ./cmd/redlease-dummy-client \
   -target 127.0.0.1:50051 \
   -duration 10s \
   -warmup 1s \
+  -connections 1 \
   -keys 1024
 ```
 
 Клиент сам ждёт завершения restart quarantine. Результат содержит число
 завершённых пар `Acquire`/`Release` в секунду и число принятых response messages
-в секунду.
+в секунду. `-keys` задаёт число ключей **на одно соединение**; при
+`-connections=2`, `4` и т. д. диапазоны ключей каждого соединения не
+пересекаются. Это позволяет проверить, ограничивает ли сервер один TCP-stream
+или общий server pipeline.
+
+Чтобы проверить предел клиента на стороне простого server peer, используйте
+`redlease-dummy-server`. Он возвращает `OK` без хранения lease и не годится для
+защиты ресурсов.

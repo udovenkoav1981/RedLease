@@ -19,7 +19,10 @@ import (
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
-const bufferBytes = 64 * 1024
+const (
+	bufferBytes     = 64 * 1024
+	defaultMaxTTLMS = uint64(5000)
+)
 
 type responseTemplate struct {
 	frame []byte
@@ -36,31 +39,36 @@ type templates struct {
 func main() {
 	flags := flag.NewFlagSet("redlease-dummy-server", flag.ExitOnError)
 	listen := flags.String("listen", "127.0.0.1:50052", "TCP listen address")
-	maxTTL := flags.Uint64("max-ttl-ms", 5000, "advertised maximum lease TTL in milliseconds")
+	maxTTL := flags.Uint64("max-ttl-ms", defaultMaxTTLMS, "advertised maximum lease TTL in milliseconds")
 	_ = flags.Parse(os.Args[1:])
 	if *maxTTL == 0 {
 		_, _ = fmt.Fprintln(os.Stderr, "max-ttl-ms must be positive")
 		os.Exit(2)
 	}
-	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", *listen)
-	if err != nil {
+	if err := run(*listen, *maxTTL); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+}
+
+func run(listen string, maxTTL uint64) error {
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", listen)
+	if err != nil {
+		return err
 	}
 	defer func() { _ = listener.Close() }()
 	_, _ = fmt.Fprintf(os.Stderr, "stateless benchmark peer listening on %s; NOT a lock server\n", listener.Addr())
 	for {
 		connection, acceptErr := listener.Accept()
 		if acceptErr != nil {
-			_, _ = fmt.Fprintln(os.Stderr, acceptErr)
-			os.Exit(1)
+			return acceptErr
 		}
 		go func() {
 			defer func() { _ = connection.Close() }()
 			if tcp, ok := connection.(*net.TCPConn); ok {
 				_ = tcp.SetNoDelay(true)
 			}
-			_ = serveConnection(connection, *maxTTL)
+			_ = serveConnection(connection, maxTTL)
 		}()
 	}
 }
@@ -185,7 +193,8 @@ func buildTemplate(result redleasev1.ServerResult, maxTTL uint64) responseTempla
 	redleasev1.ServerResponseAddResult(builder, result)
 	switch result {
 	case redleasev1.ServerResultACQUIRE:
-		redleasev1.ServerResponseAddAcquire(builder, redleasev1.CreateAcquireResponse(builder, redleasev1.LeaseStatusOK, maxTTL))
+		redleasev1.ServerResponseAddAcquire(builder,
+			redleasev1.CreateAcquireResponse(builder, redleasev1.LeaseStatusOK, maxTTL))
 	case redleasev1.ServerResultRENEW:
 		redleasev1.ServerResponseAddRenew(builder, redleasev1.CreateRenewResponse(builder, redleasev1.LeaseStatusOK, maxTTL))
 	case redleasev1.ServerResultRELEASE:

@@ -53,6 +53,8 @@ func TestStatelessPeerRespondsToAllOperations(t *testing.T) {
 		case redleasev1.ClientOperationRELEASE:
 			redleasev1.ClientRequestAddRelease(builder, redleasev1.CreateReleaseRequest(builder, 42, 1, 1, uint64(index+1)))
 		case redleasev1.ClientOperationGET_TTL:
+		default:
+			t.Fatalf("unsupported test request operation %d", item.operation)
 		}
 		root := redleasev1.ClientRequestEnd(builder)
 		redleasev1.FinishSizePrefixedClientRequestBuffer(builder, root)

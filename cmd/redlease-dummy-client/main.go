@@ -1,4 +1,4 @@
-// Command redlease-tcp-load measures one raw RedLease TCP connection without
+// Command redlease-dummy-client measures raw RedLease TCP throughput without
 // using either public client library.
 package main
 
@@ -63,7 +63,7 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			return
 		}
-		_, _ = fmt.Fprintln(os.Stderr, "redlease-tcp-load:", err)
+		_, _ = fmt.Fprintln(os.Stderr, "redlease-dummy-client:", err)
 		os.Exit(1)
 	}
 }
@@ -157,7 +157,7 @@ func closeConnections(connections []*transport.Connection) {
 
 func parseOptions(args []string, output io.Writer) (options, error) {
 	config := options{}
-	flags := flag.NewFlagSet("redlease-tcp-load", flag.ContinueOnError)
+	flags := flag.NewFlagSet("redlease-dummy-client", flag.ContinueOnError)
 	flags.SetOutput(output)
 	flags.StringVar(&config.target, "target", defaultTarget, "address of an already running TCP lock-server")
 	flags.Uint64Var(&config.keyCount, "keys", defaultKeyCount, "number of resource keys used in round-robin order")
