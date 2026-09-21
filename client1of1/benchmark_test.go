@@ -43,7 +43,7 @@ func BenchmarkClient1Of1AcquireRelease(b *testing.B) {
 		target = defaultBenchmarkTarget
 	}
 
-	for _, workers := range []int{1, 2, 4, 8, 16, 32, 64, 128, 256} {
+	for _, workers := range []int{1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096} {
 		b.Run(fmt.Sprintf("workers=%d", workers), func(b *testing.B) {
 			client := newExternalBenchmarkClient(b, target)
 			firstKey := randomBenchmarkKey(b)
