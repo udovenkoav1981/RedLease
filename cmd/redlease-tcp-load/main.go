@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -29,7 +30,12 @@ const (
 	defaultDuration     = 10 * time.Second
 	defaultWarmup       = time.Second
 	defaultReadyTimeout = 10 * time.Second
+	defaultConnections  = 1
+	maxConnections      = 1024
 	maxTTLMS            = uint64(5000)
+	// Each queued pair contains two wire requests. This bounds the queue to
+	// the same 4096-request capacity as the regular client writer.
+	sendPairQueueCapacity = 2048
 )
 
 type options struct {
@@ -39,11 +45,17 @@ type options struct {
 	duration     time.Duration
 	warmup       time.Duration
 	readyTimeout time.Duration
+	connections  int
 }
 
 type responseCounters struct {
 	acquires atomic.Uint64
 	releases atomic.Uint64
+}
+
+type requestPair struct {
+	key      uint64
+	sequence uint64
 }
 
 func main() {
@@ -70,21 +82,31 @@ func run(args []string, output, flagOutput io.Writer) error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	connection, err := transport.Dial(ctx, config.target)
-	if err != nil {
-		cancel()
-		return fmt.Errorf("connect to measurement server: %w", err)
+	connections := make([]*transport.Connection, 0, config.connections)
+	for range config.connections {
+		connection, dialErr := transport.Dial(ctx, config.target)
+		if dialErr != nil {
+			cancel()
+			closeConnections(connections)
+			return fmt.Errorf("connect to measurement server: %w", dialErr)
+		}
+		connections = append(connections, connection)
 	}
 
 	var counters responseCounters
-	workerErrors := make(chan error, 2)
+	workerErrors := make(chan error, 3*config.connections)
 	var workers sync.WaitGroup
-	workers.Go(func() { workerErrors <- sendRequests(ctx, connection, &config, bootID) })
-	workers.Go(func() { workerErrors <- receiveResponses(connection, &counters) })
+	for index, connection := range connections {
+		sendQueue := make(chan requestPair, sendPairQueueCapacity)
+		keyOffset := uint64(index) * config.keyCount
+		workers.Go(func() { workerErrors <- produceRequests(ctx, sendQueue, &config, keyOffset) })
+		workers.Go(func() { workerErrors <- sendRequests(ctx, connection, sendQueue, bootID, config.ttlMS) })
+		workers.Go(func() { workerErrors <- receiveResponses(connection, &counters) })
+	}
 
 	if err := waitInterval(ctx, workerErrors, config.warmup); err != nil {
 		cancel()
-		_ = connection.Close()
+		closeConnections(connections)
 		workers.Wait()
 		return fmt.Errorf("warmup: %w", err)
 	}
@@ -93,7 +115,7 @@ func run(args []string, output, flagOutput io.Writer) error {
 	started := time.Now()
 	if err := waitInterval(ctx, workerErrors, config.duration); err != nil {
 		cancel()
-		_ = connection.Close()
+		closeConnections(connections)
 		workers.Wait()
 		return fmt.Errorf("measurement: %w", err)
 	}
@@ -102,17 +124,18 @@ func run(args []string, output, flagOutput io.Writer) error {
 	releases := counters.releases.Load() - initialReleases
 
 	cancel()
-	_ = connection.Close()
+	closeConnections(connections)
 	workers.Wait()
 
 	_, err = fmt.Fprintf(
 		output,
-		"target=%s elapsed=%s keys=%d ttl_ms=%d\n"+
+		"target=%s elapsed=%s connections=%d keys_per_connection=%d ttl_ms=%d\n"+
 			"acquire_ok=%d release_ok=%d\n"+
 			"acquire_release_pairs_per_second=%.0f\n"+
 			"response_messages_per_second=%.0f\n",
 		config.target,
 		elapsed.Round(time.Millisecond),
+		config.connections,
 		config.keyCount,
 		config.ttlMS,
 		acquires,
@@ -126,6 +149,12 @@ func run(args []string, output, flagOutput io.Writer) error {
 	return nil
 }
 
+func closeConnections(connections []*transport.Connection) {
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
+}
+
 func parseOptions(args []string, output io.Writer) (options, error) {
 	config := options{}
 	flags := flag.NewFlagSet("redlease-tcp-load", flag.ContinueOnError)
@@ -136,6 +165,7 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	flags.DurationVar(&config.duration, "duration", defaultDuration, "measurement duration")
 	flags.DurationVar(&config.warmup, "warmup", defaultWarmup, "warmup before measurement")
 	flags.DurationVar(&config.readyTimeout, "ready-timeout", defaultReadyTimeout, "maximum wait for ACTIVE server state")
+	flags.IntVar(&config.connections, "connections", defaultConnections, "number of independent TCP connections")
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -147,6 +177,10 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 		return options{}, errors.New("target must not be empty")
 	case config.keyCount == 0:
 		return options{}, errors.New("keys must be positive")
+	case config.connections < 1 || config.connections > maxConnections:
+		return options{}, fmt.Errorf("connections must be between 1 and %d", maxConnections)
+	case config.keyCount > math.MaxUint64/uint64(config.connections):
+		return options{}, errors.New("keys times connections exceeds uint64 key space")
 	case config.ttlMS == 0 || config.ttlMS > maxTTLMS:
 		return options{}, errors.New("ttl-ms must be between 1 and 5000")
 	case config.duration <= 0:
@@ -188,8 +222,11 @@ func waitForActive(parent context.Context, config *options, bootID uint32) error
 
 	for sequence := uint64(1); ; sequence++ {
 		requestID := sequence*2 - 1
-		if err := sendAcquire(connection, builder, requestID, 0, bootID, sequence, config.ttlMS); err != nil {
+		if err := bufferAcquire(connection, builder, requestID, 0, bootID, sequence, config.ttlMS); err != nil {
 			return fmt.Errorf("send readiness Acquire: %w", err)
+		}
+		if err := connection.FlushClientRequests(); err != nil {
+			return fmt.Errorf("flush readiness Acquire: %w", err)
 		}
 		response, err := connection.Recv()
 		if err != nil {
@@ -200,8 +237,11 @@ func waitForActive(parent context.Context, config *options, bootID uint32) error
 		}
 		switch response.Status {
 		case protocol.StatusOK:
-			if err := sendRelease(connection, builder, requestID+1, 0, bootID, sequence); err != nil {
+			if err := bufferRelease(connection, builder, requestID+1, 0, bootID, sequence); err != nil {
 				return fmt.Errorf("send readiness Release: %w", err)
+			}
+			if err := connection.FlushClientRequests(); err != nil {
+				return fmt.Errorf("flush readiness Release: %w", err)
 			}
 			release, err := connection.Recv()
 			if err != nil {
@@ -225,28 +265,61 @@ func waitForActive(parent context.Context, config *options, bootID uint32) error
 	}
 }
 
-func sendRequests(ctx context.Context, connection *transport.Connection, config *options, bootID uint32) error {
-	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
+func produceRequests(ctx context.Context, sendQueue chan<- requestPair, config *options, keyOffset uint64) error {
 	for sequence := uint64(1); ; sequence++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		pair := requestPair{key: keyOffset + (sequence-1)%config.keyCount + 1, sequence: sequence}
 		select {
+		case sendQueue <- pair:
 		case <-ctx.Done():
 			return ctx.Err()
-		default:
-		}
-
-		key := (sequence-1)%config.keyCount + 1
-		requestID := sequence*2 - 1
-		if err := sendAcquire(connection, builder, requestID, key, bootID, sequence, config.ttlMS); err != nil {
-			return fmt.Errorf("send Acquire: %w", err)
-		}
-		if err := sendRelease(connection, builder, requestID+1, key, bootID, sequence); err != nil {
-			return fmt.Errorf("send Release: %w", err)
 		}
 	}
 }
 
-func sendAcquire(
-	connection *transport.Connection,
+func sendRequests(
+	ctx context.Context,
+	connection transport.LeaseConnection,
+	sendQueue <-chan requestPair,
+	bootID uint32,
+	ttlMS uint64,
+) error {
+	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
+	for {
+		var pair requestPair
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case pair = <-sendQueue:
+		}
+		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			requestID := pair.sequence*2 - 1
+			if err := bufferAcquire(connection, builder, requestID, pair.key, bootID, pair.sequence, ttlMS); err != nil {
+				return fmt.Errorf("buffer Acquire: %w", err)
+			}
+			if err := bufferRelease(connection, builder, requestID+1, pair.key, bootID, pair.sequence); err != nil {
+				return fmt.Errorf("buffer Release: %w", err)
+			}
+			select {
+			case pair = <-sendQueue:
+				continue
+			default:
+			}
+			if err := connection.FlushClientRequests(); err != nil {
+				return fmt.Errorf("flush send batch: %w", err)
+			}
+			break
+		}
+	}
+}
+
+func bufferAcquire(
+	connection transport.LeaseConnection,
 	builder *flatbuffers.Builder,
 	requestID uint64,
 	key uint64,
@@ -266,11 +339,11 @@ func sendAcquire(
 		sequence,
 		ttlMS,
 	))
-	return sendBuiltRequest(connection, builder)
+	return bufferBuiltRequest(connection, builder)
 }
 
-func sendRelease(
-	connection *transport.Connection,
+func bufferRelease(
+	connection transport.LeaseConnection,
 	builder *flatbuffers.Builder,
 	requestID uint64,
 	key uint64,
@@ -288,20 +361,17 @@ func sendRelease(
 		bootID,
 		sequence,
 	))
-	return sendBuiltRequest(connection, builder)
+	return bufferBuiltRequest(connection, builder)
 }
 
-func sendBuiltRequest(
-	connection *transport.Connection,
+func bufferBuiltRequest(
+	connection transport.LeaseConnection,
 	builder *flatbuffers.Builder,
 ) error {
 	root := redleasev1.ClientRequestEnd(builder)
 	redleasev1.FinishSizePrefixedClientRequestBuffer(builder, root)
 	request := redleasev1.GetSizePrefixedRootAsClientRequest(builder.FinishedBytes(), 0)
-	if err := connection.BufferClientRequest(request); err != nil {
-		return err
-	}
-	return connection.FlushClientRequests()
+	return connection.BufferClientRequest(request)
 }
 
 func receiveResponses(connection *transport.Connection, counters *responseCounters) error {
