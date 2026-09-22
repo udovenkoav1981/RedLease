@@ -18,10 +18,7 @@ import (
 // Callers may retry the operation after a delay.
 var ErrSendQueueFull = errors.New("connection send queue full")
 
-const (
-	pendingShardCount = 16
-	sendQueueIdlePoll = 200 * time.Microsecond
-)
+const pendingShardCount = 16
 
 type connectionResult struct {
 	response protocol.Response
@@ -139,6 +136,11 @@ func (c *Client) enqueue(request *outboundConnectionRequest, result chan connect
 	}
 	if c.sendQueue.tryEnqueue(request) {
 		shard.mu.Unlock()
+		// A buffered wakeup survives the writer's transition from an empty ring to waiting.
+		select {
+		case c.sendReady <- struct{}{}:
+		default:
+		}
 		return nil
 	}
 	delete(shard.pending, requestID)
@@ -197,7 +199,11 @@ func (c *Client) send(connection transport.LeaseConnection, stop <-chan struct{}
 		}
 		outbound, ok := c.sendQueue.tryDequeue()
 		if !ok {
-			time.Sleep(sendQueueIdlePoll)
+			select {
+			case <-stop:
+				return nil
+			case <-c.sendReady:
+			}
 			continue
 		}
 		for {

@@ -20,6 +20,7 @@ func TestReleaseIsIdempotent(t *testing.T) {
 	client := &Client{
 		ctx:       context.Background(),
 		sendQueue: newRequestRing(),
+		sendReady: make(chan struct{}, 1),
 		pending:   newPendingShards(),
 	}
 	lease := &Lease{

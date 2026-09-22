@@ -35,6 +35,7 @@ type Client struct {
 	changed    chan struct{}
 
 	sendQueue  *requestRing
+	sendReady  chan struct{}
 	pending    [pendingShardCount]*pendingShard
 	futurePool sync.Pool
 
@@ -73,6 +74,7 @@ func New(config Config) (*Client, error) {
 		cancel:    cancel,
 		changed:   make(chan struct{}),
 		sendQueue: newRequestRing(),
+		sendReady: make(chan struct{}, 1),
 		pending:   newPendingShards(),
 	}
 	if config.ResponseTimeout != 0 {

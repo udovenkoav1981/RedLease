@@ -126,6 +126,7 @@ func startTestConnection(t *testing.T, connection *fakeLeaseConnection, timeout 
 		connection:      connection,
 		changed:         make(chan struct{}),
 		sendQueue:       newRequestRing(),
+		sendReady:       make(chan struct{}, 1),
 		pending:         newPendingShards(),
 	}
 	done := make(chan error, 1)
@@ -292,6 +293,40 @@ func TestConnectionFlushesAvailableRequestsAsOneBatch(t *testing.T) {
 	case <-connection.flushes:
 		t.Fatal("available requests were split into multiple flushes")
 	default:
+	}
+}
+
+func TestConnectionWakesForRequestAfterIdle(t *testing.T) {
+	connectionContext, cancelConnection := context.WithCancel(context.Background())
+	connection := &fakeLeaseConnection{
+		ctx:       connectionContext,
+		requests:  make(chan observedRequest, 2),
+		responses: make(chan protocol.Response),
+		flushes:   make(chan struct{}, 2),
+	}
+	connection.cancel = cancelConnection
+	client, _ := startTestConnection(t, connection, time.Second)
+
+	for key := uint64(1); key <= 2; key++ {
+		if key == 2 {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if err := client.submitNoResponse(client.newReleaseRequest(key, key)); err != nil {
+			t.Fatalf("submit request %d: %v", key, err)
+		}
+		select {
+		case request := <-connection.requests:
+			if request.Key != key {
+				t.Fatalf("request key = %d, want %d", request.Key, key)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("request %d was not sent", key)
+		}
+		select {
+		case <-connection.flushes:
+		case <-time.After(time.Second):
+			t.Fatalf("request %d was not flushed", key)
+		}
 	}
 }
 

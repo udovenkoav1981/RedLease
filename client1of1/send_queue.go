@@ -2,7 +2,7 @@ package client1of1
 
 import "sync/atomic"
 
-const sendQueueCapacity = 4096
+const sendQueueCapacity = 16 * 1024
 
 // requestRing is a bounded multi-producer, single-consumer FIFO. A producer
 // claims a position with tail, then publishes its request through the slot's
