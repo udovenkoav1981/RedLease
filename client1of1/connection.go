@@ -53,7 +53,6 @@ type connectionFuture struct {
 type outboundConnectionRequest struct {
 	request redleasev1.ClientRequest
 	builder *flatbuffers.Builder
-	pool    *sync.Pool
 }
 
 func (f *connectionFuture) await(ctx context.Context, timeout <-chan time.Time) (protocol.Response, error) {
@@ -128,7 +127,7 @@ func (c *Client) enqueue(request *outboundConnectionRequest, result chan connect
 	shard.mu.Lock()
 	if c.ctx.Err() != nil {
 		shard.mu.Unlock()
-		request.recycle()
+		c.recycleOutboundRequest(request)
 		return ErrClientClosed
 	}
 	if result != nil {
@@ -145,7 +144,7 @@ func (c *Client) enqueue(request *outboundConnectionRequest, result chan connect
 	}
 	delete(shard.pending, requestID)
 	shard.mu.Unlock()
-	request.recycle()
+	c.recycleOutboundRequest(request)
 	return ErrSendQueueFull
 }
 
@@ -209,12 +208,12 @@ func (c *Client) send(connection transport.LeaseConnection, stop <-chan struct{}
 		for {
 			select {
 			case <-stop:
-				outbound.recycle()
+				c.recycleOutboundRequest(outbound)
 				return nil
 			default:
 			}
 			err := connection.BufferClientRequest(&outbound.request)
-			outbound.recycle()
+			c.recycleOutboundRequest(outbound)
 			if err != nil {
 				return fmt.Errorf("send: %w", err)
 			}
@@ -246,11 +245,11 @@ func (c *Client) discardQueuedRequests() {
 		if !ok {
 			return
 		}
-		request.recycle()
+		c.recycleOutboundRequest(request)
 	}
 }
 
-func (r *outboundConnectionRequest) recycle() {
-	r.request = redleasev1.ClientRequest{}
-	r.pool.Put(r)
+func (c *Client) recycleOutboundRequest(request *outboundConnectionRequest) {
+	request.request = redleasev1.ClientRequest{}
+	c.requestPool.Put(request)
 }

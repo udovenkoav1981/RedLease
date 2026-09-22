@@ -44,5 +44,5 @@ func TestReleaseIsIdempotent(t *testing.T) {
 	if !ok {
 		t.Fatal("Release request was not queued")
 	}
-	queued.recycle()
+	client.recycleOutboundRequest(queued)
 }

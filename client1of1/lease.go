@@ -273,7 +273,6 @@ func (c *Client) newOutboundRequest() *outboundConnectionRequest {
 	}
 	return &outboundConnectionRequest{
 		builder: flatbuffers.NewBuilder(protocol.NewBuilderSize),
-		pool:    &c.requestPool,
 	}
 }
 
