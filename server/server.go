@@ -27,10 +27,9 @@ const (
 
 	safetyMargin = 100 * time.Millisecond
 
-	defaultShardCount               = 256
-	defaultShardQueueDepth          = 256
-	defaultMaxInFlightPerConnection = 256
-	expiredLeaseCleanupInterval     = time.Minute
+	defaultShardCount           = 256
+	defaultShardQueueDepth      = 256
+	expiredLeaseCleanupInterval = time.Minute
 )
 
 // ErrServerFailed identifies a fatal internal server error. The affected
@@ -54,9 +53,8 @@ type Config struct {
 	// in-memory lease state may have been lost.
 	SkipRestartQuarantine bool
 
-	ShardCount               uint32
-	ShardQueueDepth          uint32
-	MaxInFlightPerConnection uint32
+	ShardCount      uint32
+	ShardQueueDepth uint32
 }
 
 // Validate checks values explicitly supplied by the caller.
@@ -86,9 +84,6 @@ func resolveConfig(c Config) (Config, error) {
 	}
 	if c.ShardQueueDepth == 0 {
 		c.ShardQueueDepth = defaultShardQueueDepth
-	}
-	if c.MaxInFlightPerConnection == 0 {
-		c.MaxInFlightPerConnection = defaultMaxInFlightPerConnection
 	}
 	return c, nil
 }
@@ -182,7 +177,6 @@ func New(c Config) (*Server, error) {
 		slog.Uint64("max_keys", config.MaxKeys),
 		slog.Uint64("shard_count", uint64(config.ShardCount)),
 		slog.Uint64("shard_queue_depth", uint64(config.ShardQueueDepth)),
-		slog.Uint64("max_in_flight_per_connection", uint64(config.MaxInFlightPerConnection)),
 	}
 	if config.SkipRestartQuarantine {
 		startAttrs = append(startAttrs, slog.String("state", "ACTIVE"))

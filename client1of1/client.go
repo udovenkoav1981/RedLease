@@ -10,6 +10,7 @@ import (
 
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
 	"github.com/udovenkoav1981/RedLease/internal/leaseid"
+	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
@@ -34,7 +35,7 @@ type Client struct {
 	closed     bool
 	changed    chan struct{}
 
-	sendQueue  *requestRing
+	sendQueue  *mpscring.Ring[*outboundConnectionRequest]
 	sendReady  chan struct{}
 	pending    [pendingShardCount]*pendingShard
 	futurePool sync.Pool
@@ -73,7 +74,7 @@ func New(config Config) (*Client, error) {
 		ctx:       ctx,
 		cancel:    cancel,
 		changed:   make(chan struct{}),
-		sendQueue: newRequestRing(),
+		sendQueue: mpscring.New[*outboundConnectionRequest](),
 		sendReady: make(chan struct{}, 1),
 		pending:   newPendingShards(),
 	}

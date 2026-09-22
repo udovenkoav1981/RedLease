@@ -346,12 +346,11 @@ func (c *integrationCluster) startReplica(t *testing.T, index int) {
 	}
 
 	lockServer, err := redleaseserver.New(redleaseserver.Config{
-		MaxTTL:                   uint64(c.ttls[index] / time.Millisecond), //nolint:gosec // Test fixtures use positive TTLs.
-		MaxKeys:                  c.maxKeys,
-		Logger:                   slog.New(slog.DiscardHandler),
-		ShardCount:               4,
-		ShardQueueDepth:          64,
-		MaxInFlightPerConnection: 64,
+		MaxTTL:          uint64(c.ttls[index] / time.Millisecond), //nolint:gosec // Test fixtures use positive TTLs.
+		MaxKeys:         c.maxKeys,
+		Logger:          slog.New(slog.DiscardHandler),
+		ShardCount:      4,
+		ShardQueueDepth: 64,
 	})
 	if err != nil {
 		_ = listener.Close()

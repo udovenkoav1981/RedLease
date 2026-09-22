@@ -125,13 +125,12 @@ func newIntegrationServer(t *testing.T) *integrationServer {
 		t.Fatalf("listen: %v", err)
 	}
 	leaseServer, err := redleaseserver.New(redleaseserver.Config{
-		MaxTTL:                   5000,
-		MaxKeys:                  256,
-		Logger:                   slog.New(slog.DiscardHandler),
-		SkipRestartQuarantine:    true,
-		ShardCount:               8,
-		ShardQueueDepth:          64,
-		MaxInFlightPerConnection: 256,
+		MaxTTL:                5000,
+		MaxKeys:               256,
+		Logger:                slog.New(slog.DiscardHandler),
+		SkipRestartQuarantine: true,
+		ShardCount:            8,
+		ShardQueueDepth:       64,
 	})
 	if err != nil {
 		_ = listener.Close()

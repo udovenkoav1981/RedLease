@@ -5,6 +5,7 @@ import (
 	"net"
 	"testing"
 
+	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
@@ -96,9 +97,10 @@ func TestOutboundResponseIsCopiedBeforeRecycling(t *testing.T) {
 func TestDiscardResponsesReleasesSlots(t *testing.T) {
 	s := newTestServer(t, 1_000, 1)
 	session := &connectionSession{
-		server:    s,
-		responses: make(chan *outboundResponse, 2),
-		slots:     make(chan struct{}, 2),
+		server:        s,
+		responses:     mpscring.New[*outboundResponse](),
+		responsesDone: make(chan struct{}),
+		slots:         make(chan struct{}, 2),
 	}
 	for requestID := uint64(1); requestID <= 2; requestID++ {
 		outbound, err := s.newOutboundResponse(protocol.Response{
@@ -110,9 +112,11 @@ func TestDiscardResponsesReleasesSlots(t *testing.T) {
 			t.Fatalf("encode response: %v", err)
 		}
 		session.slots <- struct{}{}
-		session.responses <- outbound
+		if !session.responses.TryEnqueue(outbound) {
+			t.Fatal("enqueue response failed")
+		}
 	}
-	close(session.responses)
+	close(session.responsesDone)
 	session.discardResponses()
 	if got := len(session.slots); got != 0 {
 		t.Fatalf("reserved slots after discard = %d, want 0", got)

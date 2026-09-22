@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
@@ -125,7 +126,7 @@ func startTestConnection(t *testing.T, connection *fakeLeaseConnection, timeout 
 		cancel:          cancelClient,
 		connection:      connection,
 		changed:         make(chan struct{}),
-		sendQueue:       newRequestRing(),
+		sendQueue:       mpscring.New[*outboundConnectionRequest](),
 		sendReady:       make(chan struct{}, 1),
 		pending:         newPendingShards(),
 	}
@@ -390,7 +391,7 @@ func TestAcquireReturnsNotAcquiredWhenSendQueueIsFull(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("writer did not start")
 	}
-	for request := range uint64(sendQueueCapacity) {
+	for request := range uint64(mpscring.Capacity) {
 		if err := client.submitNoResponse(client.newReleaseRequest(request+2, request+2)); err != nil {
 			t.Fatalf("fill send queue at request %d: %v", request, err)
 		}
@@ -500,7 +501,7 @@ func TestReconnectKeepsQueuedRequestAndPendingResponses(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("old reader or writer did not finish")
 	}
-	if got := client.sendQueue.len(); got != 1 {
+	if got := client.sendQueue.Len(); got != 1 {
 		t.Fatalf("queue after disconnect = %d, want 1", got)
 	}
 	pendingCount := testPendingCount(client)
@@ -586,7 +587,7 @@ func TestClientCloseWakesPendingAndDiscardsQueue(t *testing.T) {
 			t.Fatalf("pending result after Close = %v, want ErrClientClosed", err)
 		}
 	}
-	if got := client.sendQueue.len(); got != 0 {
+	if got := client.sendQueue.Len(); got != 0 {
 		t.Fatalf("queue after Close = %d, want 0", got)
 	}
 }

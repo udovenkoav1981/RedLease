@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
@@ -19,7 +20,7 @@ func TestCandidateValidityRejectsTTLAboveProtocolMaximum(t *testing.T) {
 func TestReleaseIsIdempotent(t *testing.T) {
 	client := &Client{
 		ctx:       context.Background(),
-		sendQueue: newRequestRing(),
+		sendQueue: mpscring.New[*outboundConnectionRequest](),
 		sendReady: make(chan struct{}, 1),
 		pending:   newPendingShards(),
 	}
@@ -36,10 +37,10 @@ func TestReleaseIsIdempotent(t *testing.T) {
 	if got := lease.RemainingTTLms(); got != 0 {
 		t.Fatalf("RemainingTTLms after Release = %d, want 0", got)
 	}
-	if got := client.sendQueue.len(); got != 1 {
+	if got := client.sendQueue.Len(); got != 1 {
 		t.Fatalf("queued Release requests = %d, want 1", got)
 	}
-	queued, ok := client.sendQueue.tryDequeue()
+	queued, ok := client.sendQueue.TryDequeue()
 	if !ok {
 		t.Fatal("Release request was not queued")
 	}

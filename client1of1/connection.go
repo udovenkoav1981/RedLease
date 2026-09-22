@@ -134,7 +134,7 @@ func (c *Client) enqueue(request *outboundConnectionRequest, result chan connect
 	if result != nil {
 		shard.pending[requestID] = result
 	}
-	if c.sendQueue.tryEnqueue(request) {
+	if c.sendQueue.TryEnqueue(request) {
 		shard.mu.Unlock()
 		// A buffered wakeup survives the writer's transition from an empty ring to waiting.
 		select {
@@ -197,7 +197,7 @@ func (c *Client) send(connection transport.LeaseConnection, stop <-chan struct{}
 			return nil
 		default:
 		}
-		outbound, ok := c.sendQueue.tryDequeue()
+		outbound, ok := c.sendQueue.TryDequeue()
 		if !ok {
 			select {
 			case <-stop:
@@ -218,7 +218,7 @@ func (c *Client) send(connection transport.LeaseConnection, stop <-chan struct{}
 			if err != nil {
 				return fmt.Errorf("send: %w", err)
 			}
-			outbound, ok = c.sendQueue.tryDequeue()
+			outbound, ok = c.sendQueue.TryDequeue()
 			if ok {
 				continue
 			}
@@ -242,7 +242,7 @@ func (c *Client) receive(connection transport.LeaseConnection) error {
 
 func (c *Client) discardQueuedRequests() {
 	for {
-		request, ok := c.sendQueue.tryDequeue()
+		request, ok := c.sendQueue.TryDequeue()
 		if !ok {
 			return
 		}

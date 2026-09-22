@@ -592,8 +592,15 @@ owned request. Server разбирает generated FlatBuffers view и до чт
 можно безопасно передать в shard queue независимо от receive buffer.
 
 После применения операции server сразу собирает generated FlatBuffers
-`ServerResponse` на builder из общего pool; в `session.responses` передаётся
-готовый frame, а не промежуточная структура для последующего кодирования.
+`ServerResponse` на builder из общего pool; готовый frame помещается в
+connection-scoped MPSC ring, а не промежуточная структура для последующего
+кодирования. Ring и лимит in-flight операций каждого соединения имеют
+фиксированную ёмкость 4096; зарезервированный slot гарантирует место для
+response. Отдельное уведомление будит writer, а сигнал завершения закрывается
+после всех pending jobs.
+Send queue `client1of1` и response ring server используют одну generic
+реализацию fixed-capacity MPSC FIFO из `internal/mpscring`; у каждой очереди
+несколько producers и ровно один consumer.
 Server response writer блокируется до первого response, копирует его и остальные уже доступные responses в
 connection write buffer, выполняет промежуточные `Flush()` только при заполнении
 64 KiB и финальный `Flush()` перед возвратом к блокирующему ожиданию. Connection

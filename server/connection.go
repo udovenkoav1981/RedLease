@@ -8,6 +8,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
@@ -23,9 +24,11 @@ type connectionSession struct {
 	conn   net.Conn
 	ctx    context.Context //nolint:containedctx // Session owns this connection-scoped context.
 
-	responses chan *outboundResponse
-	slots     chan struct{}
-	recvDone  chan error
+	responses      *mpscring.Ring[*outboundResponse]
+	responsesReady chan struct{}
+	responsesDone  chan struct{}
+	slots          chan struct{}
+	recvDone       chan error
 }
 
 // Serve accepts persistent RedLease TCP connections on listener. Server owns
@@ -135,12 +138,14 @@ func (s *Server) serveConnection(conn net.Conn) (result error) {
 
 	ctx, cancel := context.WithCancel(s.ctx)
 	session := &connectionSession{
-		server:    s,
-		conn:      conn,
-		ctx:       ctx,
-		responses: make(chan *outboundResponse, s.config.MaxInFlightPerConnection),
-		slots:     make(chan struct{}, s.config.MaxInFlightPerConnection),
-		recvDone:  make(chan error, 1),
+		server:         s,
+		conn:           conn,
+		ctx:            ctx,
+		responses:      mpscring.New[*outboundResponse](),
+		responsesReady: make(chan struct{}, 1),
+		responsesDone:  make(chan struct{}),
+		slots:          make(chan struct{}, mpscring.Capacity),
+		recvDone:       make(chan error, 1),
 	}
 	defer func() {
 		cancel()
@@ -155,43 +160,43 @@ func (s *Server) serveConnection(conn net.Conn) (result error) {
 func (s *connectionSession) writeResponses(writer *transport.FrameWriter) error {
 	recvDone := s.recvDone
 
-connectionLoop:
 	for {
-		select {
-		case response, ok := <-s.responses:
-			if !ok {
-				return s.server.unavailableErrorUnlessClosed()
-			}
-
-			for {
-				if err := s.bufferResponse(writer, response); err != nil {
+		response, ok := s.responses.TryDequeue()
+		if !ok {
+			select {
+			case <-s.responsesReady:
+				continue
+			case <-s.responsesDone:
+				response, ok = s.responses.TryDequeue()
+				if !ok {
+					return s.server.unavailableErrorUnlessClosed()
+				}
+			case err := <-recvDone:
+				if err != nil && !errors.Is(err, io.EOF) {
 					return err
 				}
-				select {
-				case response, ok = <-s.responses:
-					if ok {
-						continue
-					}
-					if err := writer.Flush(); err != nil && s.server.ctx.Err() == nil {
-						return fmt.Errorf("flush response batch: %w", err)
-					}
-					return s.server.unavailableErrorUnlessClosed()
-				default:
-					if err := writer.Flush(); err != nil {
-						return fmt.Errorf("flush response batch: %w", err)
-					}
-					continue connectionLoop
-				}
+				recvDone = nil
+				continue
+			case <-s.ctx.Done():
+				return s.server.unavailableErrorUnlessClosed()
 			}
+		}
 
-		case err := <-recvDone:
-			if err != nil && !errors.Is(err, io.EOF) {
+		for {
+			if err := s.bufferResponse(writer, response); err != nil {
 				return err
 			}
-			recvDone = nil
-
-		case <-s.ctx.Done():
-			return s.server.unavailableErrorUnlessClosed()
+			response, ok = s.responses.TryDequeue()
+			if ok {
+				continue
+			}
+			if err := writer.Flush(); err != nil {
+				if s.server.ctx.Err() == nil {
+					return fmt.Errorf("flush response batch: %w", err)
+				}
+				return s.server.unavailableErrorUnlessClosed()
+			}
+			break
 		}
 	}
 }
@@ -212,7 +217,12 @@ func (s *connectionSession) bufferResponse(
 }
 
 func (s *connectionSession) discardResponses() {
-	for response := range s.responses {
+	<-s.responsesDone
+	for {
+		response, ok := s.responses.TryDequeue()
+		if !ok {
+			return
+		}
 		s.server.recycleOutboundResponse(response)
 		s.releaseSlot()
 	}
@@ -237,11 +247,11 @@ func (s *connectionSession) receive() {
 		go func() {
 			defer func() {
 				if recovered := recover(); recovered != nil {
-					s.server.failRecoveredPanic("closing connection responses", recovered)
+					s.server.failRecoveredPanic("finishing connection responses", recovered)
 				}
 			}()
 			pending.Wait()
-			close(s.responses)
+			close(s.responsesDone)
 		}()
 	}()
 
@@ -277,11 +287,15 @@ func (s *connectionSession) receive() {
 				s.server.fail(fmt.Errorf("encode response: %w", err))
 				return
 			}
-			select {
-			case s.responses <- outbound:
-			case <-s.ctx.Done():
+			if !s.responses.TryEnqueue(outbound) {
 				s.server.recycleOutboundResponse(outbound)
 				s.releaseSlot()
+				s.server.fail(errors.New("connection response queue full despite reserved slot"))
+				return
+			}
+			select {
+			case s.responsesReady <- struct{}{}:
+			default:
 			}
 		}
 		if direct {

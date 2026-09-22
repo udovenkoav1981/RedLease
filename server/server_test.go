@@ -16,6 +16,7 @@ import (
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
+	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
@@ -29,11 +30,10 @@ var (
 func newTestServer(t *testing.T, maxTTL uint64, shardCount uint32) *Server {
 	t.Helper()
 	s, err := New(Config{
-		MaxTTL:                   maxTTL,
-		Logger:                   testLogger,
-		ShardCount:               shardCount,
-		ShardQueueDepth:          8,
-		MaxInFlightPerConnection: 8,
+		MaxTTL:          maxTTL,
+		Logger:          testLogger,
+		ShardCount:      shardCount,
+		ShardQueueDepth: 8,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -195,12 +195,11 @@ func TestMetricsState(t *testing.T) {
 
 func TestSkipRestartQuarantineStartsActiveWithoutTimer(t *testing.T) {
 	s, err := New(Config{
-		MaxTTL:                   2_000,
-		Logger:                   testLogger,
-		SkipRestartQuarantine:    true,
-		ShardCount:               1,
-		ShardQueueDepth:          8,
-		MaxInFlightPerConnection: 8,
+		MaxTTL:                2_000,
+		Logger:                testLogger,
+		SkipRestartQuarantine: true,
+		ShardCount:            1,
+		ShardQueueDepth:       8,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -937,14 +936,15 @@ func TestConnectionResponseWriterFlushesAvailableResponsesAsOneBatch(t *testing.
 		_ = clientConn.Close()
 	})
 	countingConn := &writeCountingConn{Conn: serverConn}
-	ctx, cancel := context.WithCancel(context.Background())
 	session := &connectionSession{
-		server:    s,
-		conn:      countingConn,
-		ctx:       ctx,
-		responses: make(chan *outboundResponse, 2),
-		slots:     make(chan struct{}, 2),
-		recvDone:  make(chan error),
+		server:         s,
+		conn:           countingConn,
+		ctx:            t.Context(),
+		responses:      mpscring.New[*outboundResponse](),
+		responsesReady: make(chan struct{}, 1),
+		responsesDone:  make(chan struct{}),
+		slots:          make(chan struct{}, 2),
+		recvDone:       make(chan error),
 	}
 	session.slots <- struct{}{}
 	session.slots <- struct{}{}
@@ -956,8 +956,10 @@ func TestConnectionResponseWriterFlushesAvailableResponsesAsOneBatch(t *testing.
 	if err != nil {
 		t.Fatalf("encode Release response: %v", err)
 	}
-	session.responses <- first
-	session.responses <- second
+	if !session.responses.TryEnqueue(first) || !session.responses.TryEnqueue(second) {
+		t.Fatal("enqueue response failed")
+	}
+	session.responsesReady <- struct{}{}
 
 	done := make(chan error, 1)
 	go func() {
@@ -973,7 +975,7 @@ func TestConnectionResponseWriterFlushesAvailableResponsesAsOneBatch(t *testing.
 			t.Fatalf("response request ID = %d, want %d", response.RequestID, requestID)
 		}
 	}
-	cancel()
+	close(session.responsesDone)
 	select {
 	case err := <-done:
 		if err != nil {
