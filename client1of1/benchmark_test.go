@@ -23,6 +23,7 @@ const (
 	benchmarkTTLMS             = uint64(1000)
 	benchmarkResponseTimeoutMS = uint32(5000)
 	benchmarkReadyTimeout      = 10 * time.Second
+	benchmarkQueueRetryDelay   = 500 * time.Microsecond
 	latencySubdivisions        = 4
 	latencyBuckets             = 128
 )
@@ -30,9 +31,10 @@ const (
 type benchmarkLatencyHistogram [latencyBuckets]uint64
 
 type benchmarkWorkerStats struct {
-	count     uint64
-	total     time.Duration
-	latencies benchmarkLatencyHistogram
+	count        uint64
+	queueRetries uint64
+	total        time.Duration
+	latencies    benchmarkLatencyHistogram
 }
 
 // BenchmarkClient1Of1AcquireRelease uses one real TCP connection to an
@@ -127,19 +129,27 @@ func runClientWorkers(b *testing.B, client *redleaseclient.Client, keys []uint64
 			ready.Done()
 			<-start
 			for range operationCount {
-				if failed.Load() {
-					return
-				}
 				started := time.Now()
-				lease, err := client.Acquire(context.Background(), key, benchmarkTTLMS)
-				if err != nil {
-					if failed.CompareAndSwap(false, true) {
-						failure <- fmt.Errorf("worker %d Acquire: %w", worker, err)
+				for {
+					if failed.Load() {
+						return
 					}
-					return
+					lease, err := client.Acquire(context.Background(), key, benchmarkTTLMS)
+					if errors.Is(err, redleaseclient.ErrSendQueueFull) {
+						stats.queueRetries++
+						time.Sleep(benchmarkQueueRetryDelay)
+						continue
+					}
+					if err != nil {
+						if failed.CompareAndSwap(false, true) {
+							failure <- fmt.Errorf("worker %d Acquire: %w", worker, err)
+						}
+						return
+					}
+					lease.Release()
+					stats.observe(time.Since(started))
+					break
 				}
-				lease.Release()
-				stats.observe(time.Since(started))
 			}
 		}()
 	}
@@ -158,6 +168,7 @@ func runClientWorkers(b *testing.B, client *redleaseclient.Client, keys []uint64
 		combined.merge(&workerStats[index])
 	}
 	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "acquire-release-pairs/s")
+	b.ReportMetric(float64(combined.queueRetries)/float64(b.N), "queue-full-retries/op")
 	b.ReportMetric(float64(combined.total)/float64(combined.count)/float64(time.Millisecond), "avg-latency-ms")
 	b.ReportMetric(float64(combined.percentile(50))/float64(time.Millisecond), "p50-latency-ms")
 	b.ReportMetric(float64(combined.percentile(95))/float64(time.Millisecond), "p95-latency-ms")
@@ -177,6 +188,7 @@ func (s *benchmarkWorkerStats) observe(elapsed time.Duration) {
 
 func (s *benchmarkWorkerStats) merge(other *benchmarkWorkerStats) {
 	s.count += other.count
+	s.queueRetries += other.queueRetries
 	s.total += other.total
 	for index, count := range other.latencies {
 		s.latencies[index] += count
@@ -209,9 +221,16 @@ func drainBenchmarkReleases(b *testing.B, client *redleaseclient.Client, keys []
 		drains.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), benchmarkReadyTimeout)
 			defer cancel()
-			lease, err := client.Acquire(ctx, key, 0)
-			if lease != nil || !errors.Is(err, redleaseclient.ErrNotAcquired) || ctx.Err() != nil {
-				errorsSeen <- fmt.Errorf("zero-TTL barrier for key %d returned lease=%v, error=%w", key, lease != nil, err)
+			for {
+				lease, err := client.Acquire(ctx, key, 0)
+				if errors.Is(err, redleaseclient.ErrSendQueueFull) && ctx.Err() == nil {
+					time.Sleep(benchmarkQueueRetryDelay)
+					continue
+				}
+				if lease != nil || !errors.Is(err, redleaseclient.ErrNotAcquired) || ctx.Err() != nil {
+					errorsSeen <- fmt.Errorf("zero-TTL barrier for key %d returned lease=%v, error=%w", key, lease != nil, err)
+				}
+				return
 			}
 		})
 	}

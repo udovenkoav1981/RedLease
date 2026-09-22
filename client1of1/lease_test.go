@@ -19,7 +19,8 @@ func TestCandidateValidityRejectsTTLAboveProtocolMaximum(t *testing.T) {
 func TestReleaseIsIdempotent(t *testing.T) {
 	client := &Client{
 		ctx:       context.Background(),
-		sendQueue: make(chan *outboundConnectionRequest, 2),
+		sendQueue: newRequestRing(),
+		pending:   newPendingShards(),
 	}
 	lease := &Lease{
 		client:     client,
@@ -34,8 +35,12 @@ func TestReleaseIsIdempotent(t *testing.T) {
 	if got := lease.RemainingTTLms(); got != 0 {
 		t.Fatalf("RemainingTTLms after Release = %d, want 0", got)
 	}
-	if got := len(client.sendQueue); got != 1 {
+	if got := client.sendQueue.len(); got != 1 {
 		t.Fatalf("queued Release requests = %d, want 1", got)
 	}
-	(<-client.sendQueue).recycle()
+	queued, ok := client.sendQueue.tryDequeue()
+	if !ok {
+		t.Fatal("Release request was not queued")
+	}
+	queued.recycle()
 }

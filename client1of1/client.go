@@ -34,9 +34,8 @@ type Client struct {
 	closed     bool
 	changed    chan struct{}
 
-	sendQueue  chan *outboundConnectionRequest
-	pendingMu  sync.Mutex
-	pending    map[uint64]chan connectionResult
+	sendQueue  *requestRing
+	pending    [pendingShardCount]*pendingShard
 	futurePool sync.Pool
 
 	manager sync.WaitGroup
@@ -73,8 +72,8 @@ func New(config Config) (*Client, error) {
 		ctx:       ctx,
 		cancel:    cancel,
 		changed:   make(chan struct{}),
-		sendQueue: make(chan *outboundConnectionRequest, sendQueueCapacity),
-		pending:   make(map[uint64]chan connectionResult),
+		sendQueue: newRequestRing(),
+		pending:   newPendingShards(),
 	}
 	if config.ResponseTimeout != 0 {
 		client.responseTimeout = time.Duration(config.ResponseTimeout) * time.Millisecond
@@ -131,12 +130,14 @@ func (c *Client) Close() error {
 		c.notifyStateChangeLocked()
 		c.stateMu.Unlock()
 
-		c.pendingMu.Lock()
-		pending := c.pending
-		c.pending = make(map[uint64]chan connectionResult)
-		c.pendingMu.Unlock()
-		for _, result := range pending {
-			result <- connectionResult{err: ErrClientClosed}
+		for _, shard := range &c.pending {
+			shard.mu.Lock()
+			pending := shard.pending
+			shard.pending = nil
+			shard.mu.Unlock()
+			for _, result := range pending {
+				result <- connectionResult{err: ErrClientClosed}
+			}
 		}
 		if connection != nil {
 			_ = connection.Close()

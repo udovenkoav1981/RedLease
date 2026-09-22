@@ -125,8 +125,8 @@ func startTestConnection(t *testing.T, connection *fakeLeaseConnection, timeout 
 		cancel:          cancelClient,
 		connection:      connection,
 		changed:         make(chan struct{}),
-		sendQueue:       make(chan *outboundConnectionRequest, sendQueueCapacity),
-		pending:         make(map[uint64]chan connectionResult),
+		sendQueue:       newRequestRing(),
+		pending:         newPendingShards(),
 	}
 	done := make(chan error, 1)
 	client.manager.Go(func() {
@@ -142,6 +142,44 @@ func startTestConnection(t *testing.T, connection *fakeLeaseConnection, timeout 
 		}
 	})
 	return client, done
+}
+
+func testPendingContains(client *Client, requestID uint64) bool {
+	shard := client.pending[pendingShardIndex(requestID)]
+	shard.mu.Lock()
+	_, exists := shard.pending[requestID]
+	shard.mu.Unlock()
+	return exists
+}
+
+func testPendingCount(client *Client) int {
+	count := 0
+	for _, shard := range &client.pending {
+		shard.mu.Lock()
+		count += len(shard.pending)
+		shard.mu.Unlock()
+	}
+	return count
+}
+
+func TestPendingShardIndex(t *testing.T) {
+	for _, test := range []struct {
+		requestID uint64
+		want      uint8
+	}{
+		{requestID: 0, want: 0},
+		{requestID: 1, want: 1},
+		{requestID: 15, want: 15},
+		{requestID: 16, want: 0},
+		{requestID: 255, want: 15},
+		{requestID: 256, want: 0},
+		{requestID: 257, want: 1},
+		{requestID: ^uint64(0), want: 15},
+	} {
+		if got := pendingShardIndex(test.requestID); got != test.want {
+			t.Errorf("pendingShardIndex(%d) = %d, want %d", test.requestID, got, test.want)
+		}
+	}
 }
 
 func TestConnectionMultiplexesOutOfOrderResponses(t *testing.T) {
@@ -271,15 +309,13 @@ func TestConnectionFutureResponseTimeoutUnblocksAwait(t *testing.T) {
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
+	requestID := future.requestID
 	firstRequest := <-connection.requests
 	if _, err := client.awaitResponse(context.Background(), future); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("await error = %v, want context.DeadlineExceeded", err)
 	}
 
-	client.pendingMu.Lock()
-	_, pending := client.pending[future.requestID]
-	client.pendingMu.Unlock()
-	if pending {
+	if testPendingContains(client, requestID) {
 		t.Fatal("timed-out request remains pending")
 	}
 
@@ -332,8 +368,8 @@ func TestAcquireReturnsNotAcquiredWhenSendQueueIsFull(t *testing.T) {
 	if !errors.Is(err, ErrNotAcquired) {
 		t.Fatalf("Acquire error = %v, want ErrNotAcquired", err)
 	}
-	if !errors.Is(err, errSendQueueFull) {
-		t.Fatalf("Acquire cause = %v, want errSendQueueFull", err)
+	if !errors.Is(err, ErrSendQueueFull) {
+		t.Fatalf("Acquire cause = %v, want ErrSendQueueFull", err)
 	}
 	select {
 	case <-done:
@@ -388,10 +424,7 @@ func TestFailedAcquireQueuesCleanupRelease(t *testing.T) {
 			t.Fatal("cleanup Release used a different lease ID")
 		}
 
-		client.pendingMu.Lock()
-		_, waitsForResponse := client.pending[releaseRequest.RequestID]
-		client.pendingMu.Unlock()
-		if waitsForResponse {
+		if testPendingContains(client, releaseRequest.RequestID) {
 			t.Fatal("cleanup Release waits for a server response")
 		}
 	case <-time.After(time.Second):
@@ -432,12 +465,10 @@ func TestReconnectKeepsQueuedRequestAndPendingResponses(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("old reader or writer did not finish")
 	}
-	if got := len(client.sendQueue); got != 1 {
+	if got := client.sendQueue.len(); got != 1 {
 		t.Fatalf("queue after disconnect = %d, want 1", got)
 	}
-	client.pendingMu.Lock()
-	pendingCount := len(client.pending)
-	client.pendingMu.Unlock()
+	pendingCount := testPendingCount(client)
 	if pendingCount != 2 {
 		t.Fatalf("pending after disconnect = %d, want 2", pendingCount)
 	}
@@ -520,7 +551,7 @@ func TestClientCloseWakesPendingAndDiscardsQueue(t *testing.T) {
 			t.Fatalf("pending result after Close = %v, want ErrClientClosed", err)
 		}
 	}
-	if got := len(client.sendQueue); got != 0 {
+	if got := client.sendQueue.len(); got != 0 {
 		t.Fatalf("queue after Close = %d, want 0", got)
 	}
 }

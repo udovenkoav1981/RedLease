@@ -14,13 +14,37 @@ import (
 	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
-var errSendQueueFull = errors.New("connection send queue full")
+// ErrSendQueueFull means a request could not be queued for transmission.
+// Callers may retry the operation after a delay.
+var ErrSendQueueFull = errors.New("connection send queue full")
 
-const sendQueueCapacity = 4096
+const (
+	pendingShardCount = 16
+	sendQueueIdlePoll = 200 * time.Microsecond
+)
 
 type connectionResult struct {
 	response protocol.Response
 	err      error
+}
+
+type pendingShard struct {
+	mu      sync.Mutex
+	pending map[uint64]chan connectionResult
+}
+
+func newPendingShards() [pendingShardCount]*pendingShard {
+	var shards [pendingShardCount]*pendingShard
+	for index := range shards {
+		shards[index] = &pendingShard{pending: make(map[uint64]chan connectionResult)}
+	}
+	return shards
+}
+
+// Request IDs grow sequentially, so their low bits spread neighboring
+// requests evenly across the configured shards without hashing.
+func pendingShardIndex(requestID uint64) uint8 {
+	return uint8(requestID & (pendingShardCount - 1)) //nolint:gosec // The mask bounds the index.
 }
 
 type connectionFuture struct {
@@ -103,34 +127,34 @@ func (c *Client) submitNoResponse(request *outboundConnectionRequest) error {
 
 func (c *Client) enqueue(request *outboundConnectionRequest, result chan connectionResult) error {
 	requestID := request.request.RequestId()
-	c.pendingMu.Lock()
+	shard := c.pending[pendingShardIndex(requestID)]
+	shard.mu.Lock()
 	if c.ctx.Err() != nil {
-		c.pendingMu.Unlock()
+		shard.mu.Unlock()
 		request.recycle()
 		return ErrClientClosed
 	}
 	if result != nil {
-		c.pending[requestID] = result
+		shard.pending[requestID] = result
 	}
-	select {
-	case c.sendQueue <- request:
-		c.pendingMu.Unlock()
+	if c.sendQueue.tryEnqueue(request) {
+		shard.mu.Unlock()
 		return nil
-	default:
-		delete(c.pending, requestID)
-		c.pendingMu.Unlock()
-		request.recycle()
-		return errSendQueueFull
 	}
+	delete(shard.pending, requestID)
+	shard.mu.Unlock()
+	request.recycle()
+	return ErrSendQueueFull
 }
 
 func (c *Client) complete(requestID uint64, result connectionResult) {
-	c.pendingMu.Lock()
-	pending := c.pending[requestID]
+	shard := c.pending[pendingShardIndex(requestID)]
+	shard.mu.Lock()
+	pending := shard.pending[requestID]
 	if pending != nil {
-		delete(c.pending, requestID)
+		delete(shard.pending, requestID)
 	}
-	c.pendingMu.Unlock()
+	shard.mu.Unlock()
 	if pending != nil {
 		pending <- result
 	}
@@ -166,13 +190,15 @@ func (c *Client) runConnection(connection transport.LeaseConnection) error {
 
 func (c *Client) send(connection transport.LeaseConnection, stop <-chan struct{}) error {
 	for {
-		var outbound *outboundConnectionRequest
 		select {
 		case <-stop:
 			return nil
-		case <-c.ctx.Done():
-			return ErrClientClosed
-		case outbound = <-c.sendQueue:
+		default:
+		}
+		outbound, ok := c.sendQueue.tryDequeue()
+		if !ok {
+			time.Sleep(sendQueueIdlePoll)
+			continue
 		}
 		for {
 			select {
@@ -186,14 +212,9 @@ func (c *Client) send(connection transport.LeaseConnection, stop <-chan struct{}
 			if err != nil {
 				return fmt.Errorf("send: %w", err)
 			}
-			select {
-			case <-stop:
-				return nil
-			case <-c.ctx.Done():
-				return ErrClientClosed
-			case outbound = <-c.sendQueue:
+			outbound, ok = c.sendQueue.tryDequeue()
+			if ok {
 				continue
-			default:
 			}
 			if err := connection.FlushClientRequests(); err != nil {
 				return fmt.Errorf("flush send batch: %w", err)
@@ -215,12 +236,11 @@ func (c *Client) receive(connection transport.LeaseConnection) error {
 
 func (c *Client) discardQueuedRequests() {
 	for {
-		select {
-		case request := <-c.sendQueue:
-			request.recycle()
-		default:
+		request, ok := c.sendQueue.tryDequeue()
+		if !ok {
 			return
 		}
+		request.recycle()
 	}
 }
 
