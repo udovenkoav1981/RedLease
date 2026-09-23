@@ -55,7 +55,7 @@ func TestClientConnectionFlushesBufferedRequestsWithOneWrite(t *testing.T) {
 		root := redleasev1.ClientRequestEnd(builder)
 		redleasev1.FinishSizePrefixedClientRequestBuffer(builder, root)
 		request := redleasev1.GetSizePrefixedRootAsClientRequest(builder.FinishedBytes(), 0)
-		if err := connection.BufferClientRequest(request); err != nil {
+		if err := connection.Writer.BufferFrame(request.Table().Bytes); err != nil {
 			t.Fatalf("buffer request %d: %v", requestID, err)
 		}
 	}
@@ -65,7 +65,7 @@ func TestClientConnectionFlushesBufferedRequestsWithOneWrite(t *testing.T) {
 	if network.writeDeadlines != 0 {
 		t.Fatalf("write deadlines before flush = %d, want 0", network.writeDeadlines)
 	}
-	if err := connection.FlushClientRequests(); err != nil {
+	if err := connection.Writer.Flush(); err != nil {
 		t.Fatalf("flush requests: %v", err)
 	}
 	if network.writes != 1 {

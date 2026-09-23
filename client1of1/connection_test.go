@@ -2,15 +2,20 @@ package client1of1
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"testing"
 	"time"
+
+	flatbuffers "github.com/google/flatbuffers/go"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
+	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
 type observedRequest struct {
@@ -24,32 +29,87 @@ type observedRequest struct {
 }
 
 type fakeLeaseConnection struct {
-	ctx       context.Context //nolint:containedctx // Test connection owns this context.
-	cancel    context.CancelFunc
-	requests  chan observedRequest
-	responses chan protocol.Response
-	sendStart chan struct{}
-	flushes   chan struct{}
+	connection *transport.ClientConnection
+	readBuffer []byte
+	ctx        context.Context //nolint:containedctx // Test connection owns this context.
+	cancel     context.CancelFunc
+	requests   chan observedRequest
+	responses  chan protocol.Response
+	sendStart  chan struct{}
+	flushes    chan struct{}
 }
 
-func (c *fakeLeaseConnection) BufferClientRequest(request *redleasev1.ClientRequest) error {
-	decoded, err := observeClientRequest(request)
-	if err != nil {
-		return err
+func (c *fakeLeaseConnection) transportConnection() *transport.ClientConnection {
+	if c.connection == nil {
+		c.connection = transport.NewClientConnection(c)
 	}
+	return c.connection
+}
+
+func (c *fakeLeaseConnection) Write(batch []byte) (int, error) {
 	if c.sendStart != nil {
 		select {
 		case c.sendStart <- struct{}{}:
 		default:
 		}
 	}
-	select {
-	case c.requests <- decoded:
-		return nil
-	case <-c.ctx.Done():
-		return c.ctx.Err()
+	if c.flushes != nil {
+		c.flushes <- struct{}{}
 	}
+	for offset := 0; offset < len(batch); {
+		if len(batch)-offset < flatbuffers.SizeUint32 {
+			return 0, io.ErrUnexpectedEOF
+		}
+		frameSize := flatbuffers.SizeUint32 + int(binary.LittleEndian.Uint32(batch[offset:]))
+		if frameSize > len(batch)-offset {
+			return 0, io.ErrUnexpectedEOF
+		}
+		request := redleasev1.GetSizePrefixedRootAsClientRequest(batch[offset:offset+frameSize], 0)
+		decoded, err := observeClientRequest(request)
+		if err != nil {
+			return 0, err
+		}
+		select {
+		case c.requests <- decoded:
+		case <-c.ctx.Done():
+			return 0, c.ctx.Err()
+		}
+		offset += frameSize
+	}
+	return len(batch), nil
 }
+
+func (c *fakeLeaseConnection) Read(buffer []byte) (int, error) {
+	if len(c.readBuffer) == 0 {
+		select {
+		case response := <-c.responses:
+			c.readBuffer = encodeTestResponse(response)
+		case <-c.ctx.Done():
+			return 0, io.EOF
+		}
+	}
+	n := copy(buffer, c.readBuffer)
+	c.readBuffer = c.readBuffer[n:]
+	return n, nil
+}
+
+func (c *fakeLeaseConnection) Close() error {
+	if c.cancel != nil {
+		c.cancel()
+	}
+	return nil
+}
+
+func (*fakeLeaseConnection) LocalAddr() net.Addr              { return testAddr("local") }
+func (*fakeLeaseConnection) RemoteAddr() net.Addr             { return testAddr("remote") }
+func (*fakeLeaseConnection) SetDeadline(time.Time) error      { return nil }
+func (*fakeLeaseConnection) SetReadDeadline(time.Time) error  { return nil }
+func (*fakeLeaseConnection) SetWriteDeadline(time.Time) error { return nil }
+
+type testAddr string
+
+func (a testAddr) Network() string { return "test" }
+func (a testAddr) String() string  { return string(a) }
 
 func observeClientRequest(request *redleasev1.ClientRequest) (observedRequest, error) {
 	observed := observedRequest{
@@ -93,25 +153,23 @@ func observeClientRequest(request *redleasev1.ClientRequest) (observedRequest, e
 	return observed, nil
 }
 
-func (c *fakeLeaseConnection) FlushClientRequests() error {
-	if c.flushes != nil {
-		c.flushes <- struct{}{}
+func encodeTestResponse(response protocol.Response) []byte {
+	builder := flatbuffers.NewBuilder(transport.InitialBufferSize)
+	redleasev1.ServerResponseStart(builder)
+	redleasev1.ServerResponseAddRequestId(builder, response.RequestID)
+	switch response.Operation {
+	case redleasev1.ClientOperationACQUIRE:
+		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultACQUIRE)
+		redleasev1.ServerResponseAddAcquire(builder, redleasev1.CreateAcquireResponse(builder, response.Status, response.TTLMS))
+	case redleasev1.ClientOperationRELEASE:
+		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultRELEASE)
+		redleasev1.ServerResponseAddRelease(builder, redleasev1.CreateReleaseResponse(builder, response.Status))
+	default:
+		panic("unsupported test response operation")
 	}
-	return nil
-}
-
-func (c *fakeLeaseConnection) Recv() (protocol.Response, error) {
-	select {
-	case response := <-c.responses:
-		return response, nil
-	case <-c.ctx.Done():
-		return protocol.Response{}, io.EOF
-	}
-}
-
-func (c *fakeLeaseConnection) Close() error {
-	c.cancel()
-	return nil
+	root := redleasev1.ServerResponseEnd(builder)
+	redleasev1.FinishSizePrefixedServerResponseBuffer(builder, root)
+	return builder.FinishedBytes()
 }
 
 func startTestConnection(t *testing.T, connection *fakeLeaseConnection, timeout time.Duration) (*Client, <-chan error) {
@@ -124,14 +182,14 @@ func startTestConnection(t *testing.T, connection *fakeLeaseConnection, timeout 
 		logger:          slog.New(slog.DiscardHandler),
 		ctx:             clientContext,
 		cancel:          cancelClient,
-		connection:      connection,
+		connection:      connection.transportConnection(),
 		changed:         make(chan struct{}),
 		sendQueue:       mpscring.NewNotifying[*outboundConnectionRequest](),
 		pending:         newPendingShards(),
 	}
 	done := make(chan error, 1)
 	client.manager.Go(func() {
-		done <- client.runConnection(connection)
+		done <- client.runConnection(connection.transportConnection())
 		close(done)
 	})
 	t.Cleanup(func() {
@@ -251,28 +309,39 @@ func TestConnectionFlushesAvailableRequestsAsOneBatch(t *testing.T) {
 	connectionContext, cancelConnection := context.WithCancel(context.Background())
 	connection := &fakeLeaseConnection{
 		ctx:       connectionContext,
-		requests:  make(chan observedRequest),
+		cancel:    cancelConnection,
+		requests:  make(chan observedRequest, 3),
 		responses: make(chan protocol.Response),
-		sendStart: make(chan struct{}, 1),
 		flushes:   make(chan struct{}, 1),
 	}
-	connection.cancel = cancelConnection
-	client, _ := startTestConnection(t, connection, time.Second)
-
-	if err := client.submitNoResponse(client.newReleaseRequest(1, 1)); err != nil {
-		t.Fatalf("submit first request: %v", err)
+	clientContext, cancelClient := context.WithCancel(context.Background())
+	client := &Client{
+		clientID:        7,
+		bootID:          1,
+		responseTimeout: time.Second,
+		logger:          slog.New(slog.DiscardHandler),
+		ctx:             clientContext,
+		cancel:          cancelClient,
+		connection:      connection.transportConnection(),
+		changed:         make(chan struct{}),
+		sendQueue:       mpscring.NewNotifying[*outboundConnectionRequest](),
+		pending:         newPendingShards(),
 	}
-	select {
-	case <-connection.sendStart:
-	case <-time.After(time.Second):
-		t.Fatal("writer did not start")
+	for key := uint64(1); key <= 3; key++ {
+		if err := client.submitNoResponse(client.newReleaseRequest(key, key)); err != nil {
+			t.Fatalf("submit request %d: %v", key, err)
+		}
 	}
-	if err := client.submitNoResponse(client.newReleaseRequest(2, 2)); err != nil {
-		t.Fatalf("submit second request: %v", err)
-	}
-	if err := client.submitNoResponse(client.newReleaseRequest(3, 3)); err != nil {
-		t.Fatalf("submit third request: %v", err)
-	}
+	done := make(chan error, 1)
+	client.manager.Go(func() { done <- client.runConnection(connection.transportConnection()) })
+	t.Cleanup(func() {
+		_ = client.Close()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("connection workers did not stop")
+		}
+	})
 
 	for wantKey := uint64(1); wantKey <= 3; wantKey++ {
 		select {
@@ -518,11 +587,11 @@ func TestReconnectKeepsQueuedRequestAndPendingResponses(t *testing.T) {
 		requests: make(chan observedRequest, 2), responses: make(chan protocol.Response, 2),
 	}
 	client.stateMu.Lock()
-	client.connection = second
+	client.connection = second.transportConnection()
 	client.stateMu.Unlock()
 	secondDone := make(chan struct{})
 	client.manager.Go(func() {
-		_ = client.runConnection(second)
+		_ = client.runConnection(second.transportConnection())
 		close(secondDone)
 	})
 	request := <-second.requests

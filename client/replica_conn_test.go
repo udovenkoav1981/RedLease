@@ -225,14 +225,15 @@ func newScriptedStreamFactory() *scriptedStreamFactory {
 	return &scriptedStreamFactory{results: make(chan streamFactoryResult, 16)}
 }
 
-func (f *scriptedStreamFactory) open(ctx context.Context) (transport.LeaseConnection, error) {
+func (f *scriptedStreamFactory) open(ctx context.Context) (*transport.ClientConnection, error) {
 	f.openCalls.Add(1)
 	select {
 	case result := <-f.results:
-		if result.stream != nil {
-			result.stream.ctx = ctx
+		if result.stream == nil {
+			return nil, result.err
 		}
-		return result.stream, result.err
+		result.stream.ctx = ctx
+		return transport.NewClientConnection(result.stream), result.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -327,9 +328,4 @@ func assertReplicaUnavailableCause(t *testing.T, err, cause error) {
 	}
 }
 
-// Assert that the test-only stream still satisfies the production factory
-// result type after concurrent lifecycle tests evolve.
-var (
-	_ transport.LeaseConnection = (*fakeLeaseClientStream)(nil)
-	_ connectionFactory         = (*scriptedStreamFactory)(nil)
-)
+var _ connectionFactory = (*scriptedStreamFactory)(nil)

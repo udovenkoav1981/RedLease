@@ -166,7 +166,7 @@ func (r *outboundConnectionRequest) currentState() outboundRequestState {
 }
 
 type connectionGeneration struct {
-	connection transport.LeaseConnection
+	connection *transport.ClientConnection
 	cancel     context.CancelFunc
 
 	sendQueue chan *outboundConnectionRequest
@@ -183,7 +183,7 @@ type connectionGeneration struct {
 }
 
 func newConnectionGeneration(
-	connection transport.LeaseConnection,
+	connection *transport.ClientConnection,
 	cancel context.CancelFunc,
 ) *connectionGeneration {
 	generation := &connectionGeneration{
@@ -339,7 +339,7 @@ func (g *connectionGeneration) sendLoop() {
 				}
 				batch = append(batch, outbound)
 
-				err := g.connection.BufferClientRequest(&outbound.request)
+				err := g.connection.Writer.BufferFrame(outbound.request.Table().Bytes)
 				outbound.releaseRequest()
 				if err != nil {
 					finishSendBatch(batch)
@@ -358,7 +358,7 @@ func (g *connectionGeneration) sendLoop() {
 			if len(batch) == 0 {
 				break
 			}
-			if err := g.connection.FlushClientRequests(); err != nil {
+			if err := g.connection.Writer.Flush(); err != nil {
 				finishSendBatch(batch)
 				g.terminate(fmt.Errorf("flush send batch: %w", err))
 				return
@@ -394,7 +394,12 @@ func (g *connectionGeneration) recvLoop() {
 	defer g.workers.Done()
 
 	for {
-		response, err := g.connection.Recv()
+		frame, err := g.connection.Reader.ReadFrame()
+		if err != nil {
+			g.terminate(fmt.Errorf("receive: %w", err))
+			return
+		}
+		response, err := transport.DecodeResponse(frame)
 		if err != nil {
 			g.terminate(fmt.Errorf("receive: %w", err))
 			return
@@ -426,7 +431,7 @@ func (g *connectionGeneration) terminate(cause error) {
 
 func (g *connectionGeneration) closeConnection() {
 	g.closeOnce.Do(func() {
-		g.closeConnectionErr = g.connection.Close()
+		g.closeConnectionErr = g.connection.Conn.Close()
 	})
 }
 

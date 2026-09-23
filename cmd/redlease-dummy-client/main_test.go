@@ -2,16 +2,20 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"math"
+	"net"
 	"slices"
 	"strconv"
 	"testing"
 	"time"
 
+	flatbuffers "github.com/google/flatbuffers/go"
+
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
-	"github.com/udovenkoav1981/RedLease/internal/protocol"
+	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
 type observedRequest struct {
@@ -75,42 +79,59 @@ type batchTestConnection struct {
 	flushed  chan struct{}
 }
 
-func (c *batchTestConnection) BufferClientRequest(request *redleasev1.ClientRequest) error {
-	observed := observedRequest{id: request.RequestId(), operation: request.Operation()}
-	switch request.Operation() {
-	case redleasev1.ClientOperationACQUIRE:
-		var acquire redleasev1.AcquireRequest
-		if request.Acquire(&acquire) == nil {
-			return errors.New("Acquire payload missing")
+func (c *batchTestConnection) Write(batch []byte) (int, error) {
+	for offset := 0; offset < len(batch); {
+		if len(batch)-offset < flatbuffers.SizeUint32 {
+			return 0, io.ErrUnexpectedEOF
 		}
-		observed.key, observed.sequence = acquire.Key(), acquire.LeaseSeq()
-	case redleasev1.ClientOperationRELEASE:
-		var release redleasev1.ReleaseRequest
-		if request.Release(&release) == nil {
-			return errors.New("Release payload missing")
+		frameSize := flatbuffers.SizeUint32 + int(binary.LittleEndian.Uint32(batch[offset:]))
+		if frameSize > len(batch)-offset {
+			return 0, io.ErrUnexpectedEOF
 		}
-		observed.key, observed.sequence = release.Key(), release.LeaseSeq()
-	default:
-		return errors.New("unexpected request operation")
+		request := redleasev1.GetSizePrefixedRootAsClientRequest(batch[offset:offset+frameSize], 0)
+		observed := observedRequest{id: request.RequestId(), operation: request.Operation()}
+		switch request.Operation() {
+		case redleasev1.ClientOperationACQUIRE:
+			var acquire redleasev1.AcquireRequest
+			if request.Acquire(&acquire) == nil {
+				return 0, errors.New("Acquire payload missing")
+			}
+			observed.key, observed.sequence = acquire.Key(), acquire.LeaseSeq()
+		case redleasev1.ClientOperationRELEASE:
+			var release redleasev1.ReleaseRequest
+			if request.Release(&release) == nil {
+				return 0, errors.New("Release payload missing")
+			}
+			observed.key, observed.sequence = release.Key(), release.LeaseSeq()
+		default:
+			return 0, errors.New("unexpected request operation")
+		}
+		c.requests = append(c.requests, observed)
+		offset += frameSize
 	}
-	c.requests = append(c.requests, observed)
-	return nil
-}
-
-func (c *batchTestConnection) FlushClientRequests() error {
 	c.flushes++
 	select {
 	case c.flushed <- struct{}{}:
 	default:
 	}
-	return nil
+	return len(batch), nil
 }
 
-func (*batchTestConnection) Recv() (protocol.Response, error) {
-	return protocol.Response{}, errors.New("Recv not used by writer test")
+func (*batchTestConnection) Read([]byte) (int, error) {
+	return 0, errors.New("Read not used by writer test")
 }
 
-func (*batchTestConnection) Close() error { return nil }
+func (*batchTestConnection) Close() error                     { return nil }
+func (*batchTestConnection) LocalAddr() net.Addr              { return batchTestAddr("local") }
+func (*batchTestConnection) RemoteAddr() net.Addr             { return batchTestAddr("remote") }
+func (*batchTestConnection) SetDeadline(time.Time) error      { return nil }
+func (*batchTestConnection) SetReadDeadline(time.Time) error  { return nil }
+func (*batchTestConnection) SetWriteDeadline(time.Time) error { return nil }
+
+type batchTestAddr string
+
+func (a batchTestAddr) Network() string { return "test" }
+func (a batchTestAddr) String() string  { return string(a) }
 
 func TestSendRequestsFlushesAvailablePairsAsOneBatch(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -120,7 +141,7 @@ func TestSendRequestsFlushesAvailablePairsAsOneBatch(t *testing.T) {
 	sendQueue <- requestPair{key: 11, sequence: 1}
 	sendQueue <- requestPair{key: 22, sequence: 2}
 	done := make(chan error, 1)
-	go func() { done <- sendRequests(ctx, connection, sendQueue, 42, 1000) }()
+	go func() { done <- sendRequests(ctx, transport.NewClientConnection(connection), sendQueue, 42, 1000) }()
 
 	select {
 	case <-connection.flushed:

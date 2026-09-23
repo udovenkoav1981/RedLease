@@ -150,7 +150,7 @@ func run(args []string, output, flagOutput io.Writer) error {
 
 func closeConnections(connections []*transport.ClientConnection) {
 	for _, connection := range connections {
-		_ = connection.Close()
+		_ = connection.Conn.Close()
 	}
 }
 
@@ -212,10 +212,10 @@ func waitForActive(parent context.Context, config *options, bootID uint32) error
 	if err != nil {
 		return fmt.Errorf("connect for readiness check: %w", err)
 	}
-	defer func() { _ = connection.Close() }()
+	defer func() { _ = connection.Conn.Close() }()
 	go func() {
 		<-ctx.Done()
-		_ = connection.Close()
+		_ = connection.Conn.Close()
 	}()
 	builder := flatbuffers.NewBuilder(transport.InitialBufferSize)
 
@@ -224,10 +224,14 @@ func waitForActive(parent context.Context, config *options, bootID uint32) error
 		if err := bufferAcquire(connection, builder, requestID, 0, bootID, sequence, config.ttlMS); err != nil {
 			return fmt.Errorf("send readiness Acquire: %w", err)
 		}
-		if err := connection.FlushClientRequests(); err != nil {
+		if err := connection.Writer.Flush(); err != nil {
 			return fmt.Errorf("flush readiness Acquire: %w", err)
 		}
-		response, err := connection.Recv()
+		frame, err := connection.Reader.ReadFrame()
+		if err != nil {
+			return fmt.Errorf("receive readiness Acquire: %w", err)
+		}
+		response, err := transport.DecodeResponse(frame)
 		if err != nil {
 			return fmt.Errorf("receive readiness Acquire: %w", err)
 		}
@@ -239,10 +243,14 @@ func waitForActive(parent context.Context, config *options, bootID uint32) error
 			if err := bufferRelease(connection, builder, requestID+1, 0, bootID, sequence); err != nil {
 				return fmt.Errorf("send readiness Release: %w", err)
 			}
-			if err := connection.FlushClientRequests(); err != nil {
+			if err := connection.Writer.Flush(); err != nil {
 				return fmt.Errorf("flush readiness Release: %w", err)
 			}
-			release, err := connection.Recv()
+			frame, err = connection.Reader.ReadFrame()
+			if err != nil {
+				return fmt.Errorf("receive readiness Release: %w", err)
+			}
+			release, err := transport.DecodeResponse(frame)
 			if err != nil {
 				return fmt.Errorf("receive readiness Release: %w", err)
 			}
@@ -280,7 +288,7 @@ func produceRequests(ctx context.Context, sendQueue chan<- requestPair, config *
 
 func sendRequests(
 	ctx context.Context,
-	connection transport.LeaseConnection,
+	connection *transport.ClientConnection,
 	sendQueue <-chan requestPair,
 	bootID uint32,
 	ttlMS uint64,
@@ -309,7 +317,7 @@ func sendRequests(
 				continue
 			default:
 			}
-			if err := connection.FlushClientRequests(); err != nil {
+			if err := connection.Writer.Flush(); err != nil {
 				return fmt.Errorf("flush send batch: %w", err)
 			}
 			break
@@ -318,7 +326,7 @@ func sendRequests(
 }
 
 func bufferAcquire(
-	connection transport.LeaseConnection,
+	connection *transport.ClientConnection,
 	builder *flatbuffers.Builder,
 	requestID uint64,
 	key uint64,
@@ -342,7 +350,7 @@ func bufferAcquire(
 }
 
 func bufferRelease(
-	connection transport.LeaseConnection,
+	connection *transport.ClientConnection,
 	builder *flatbuffers.Builder,
 	requestID uint64,
 	key uint64,
@@ -364,18 +372,21 @@ func bufferRelease(
 }
 
 func bufferBuiltRequest(
-	connection transport.LeaseConnection,
+	connection *transport.ClientConnection,
 	builder *flatbuffers.Builder,
 ) error {
 	root := redleasev1.ClientRequestEnd(builder)
 	redleasev1.FinishSizePrefixedClientRequestBuffer(builder, root)
-	request := redleasev1.GetSizePrefixedRootAsClientRequest(builder.FinishedBytes(), 0)
-	return connection.BufferClientRequest(request)
+	return connection.Writer.BufferFrame(builder.FinishedBytes())
 }
 
 func receiveResponses(connection *transport.ClientConnection, counters *responseCounters) error {
 	for {
-		response, err := connection.Recv()
+		frame, err := connection.Reader.ReadFrame()
+		if err != nil {
+			return fmt.Errorf("receive response: %w", err)
+		}
+		response, err := transport.DecodeResponse(frame)
 		if err != nil {
 			return fmt.Errorf("receive response: %w", err)
 		}

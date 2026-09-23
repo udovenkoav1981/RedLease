@@ -158,7 +158,7 @@ func (c *Client) complete(requestID uint64, result connectionResult) {
 
 // runConnection owns exactly one reader and one writer. Both are joined before
 // the manager starts another session, so the persistent queue has one consumer.
-func (c *Client) runConnection(connection transport.LeaseConnection) error {
+func (c *Client) runConnection(connection *transport.ClientConnection) error {
 	stop := make(chan struct{})
 	results := make(chan error, 2)
 	var workers sync.WaitGroup
@@ -179,12 +179,12 @@ func (c *Client) runConnection(connection transport.LeaseConnection) error {
 		cause = ErrClientClosed
 	}
 	close(stop)
-	_ = connection.Close()
+	_ = connection.Conn.Close()
 	workers.Wait()
 	return cause
 }
 
-func (c *Client) send(connection transport.LeaseConnection, stop <-chan struct{}) error {
+func (c *Client) send(connection *transport.ClientConnection, stop <-chan struct{}) error {
 	for {
 		select {
 		case <-stop:
@@ -207,7 +207,7 @@ func (c *Client) send(connection transport.LeaseConnection, stop <-chan struct{}
 				return nil
 			default:
 			}
-			err := connection.BufferClientRequest(&outbound.request)
+			err := connection.Writer.BufferFrame(outbound.request.Table().Bytes)
 			c.recycleOutboundRequest(outbound)
 			if err != nil {
 				return fmt.Errorf("send: %w", err)
@@ -216,7 +216,7 @@ func (c *Client) send(connection transport.LeaseConnection, stop <-chan struct{}
 			if ok {
 				continue
 			}
-			if err := connection.FlushClientRequests(); err != nil {
+			if err := connection.Writer.Flush(); err != nil {
 				return fmt.Errorf("flush send batch: %w", err)
 			}
 			break
@@ -224,9 +224,13 @@ func (c *Client) send(connection transport.LeaseConnection, stop <-chan struct{}
 	}
 }
 
-func (c *Client) receive(connection transport.LeaseConnection) error {
+func (c *Client) receive(connection *transport.ClientConnection) error {
 	for {
-		response, err := connection.Recv()
+		frame, err := connection.Reader.ReadFrame()
+		if err != nil {
+			return fmt.Errorf("receive: %w", err)
+		}
+		response, err := transport.DecodeResponse(frame)
 		if err != nil {
 			return fmt.Errorf("receive: %w", err)
 		}

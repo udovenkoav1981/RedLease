@@ -21,7 +21,7 @@ func TestStatelessPeerRespondsToAllOperations(t *testing.T) {
 	}()
 	connection := transport.NewClientConnection(clientSide)
 	defer func() {
-		_ = connection.Close()
+		_ = connection.Conn.Close()
 		if err := <-done; err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {
 			t.Errorf("server connection: %v", err)
 		}
@@ -58,15 +58,19 @@ func TestStatelessPeerRespondsToAllOperations(t *testing.T) {
 		root := redleasev1.ClientRequestEnd(builder)
 		redleasev1.FinishSizePrefixedClientRequestBuffer(builder, root)
 		request := redleasev1.GetSizePrefixedRootAsClientRequest(builder.FinishedBytes(), 0)
-		if err := connection.BufferClientRequest(request); err != nil {
+		if err := connection.Writer.BufferFrame(request.Table().Bytes); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := connection.FlushClientRequests(); err != nil {
+	if err := connection.Writer.Flush(); err != nil {
 		t.Fatal(err)
 	}
 	for index, item := range requests {
-		response, err := connection.Recv()
+		frame, err := connection.Reader.ReadFrame()
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := transport.DecodeResponse(frame)
 		if err != nil {
 			t.Fatal(err)
 		}

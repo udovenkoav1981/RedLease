@@ -30,7 +30,7 @@ func (e *replicaUnavailableError) Unwrap() error {
 }
 
 type connectionFactory interface {
-	open(ctx context.Context) (transport.LeaseConnection, error)
+	open(ctx context.Context) (*transport.ClientConnection, error)
 	close() error
 }
 
@@ -42,7 +42,7 @@ func newTCPConnectionFactory(target string) *tcpConnectionFactory {
 	return &tcpConnectionFactory{target: target}
 }
 
-func (f *tcpConnectionFactory) open(ctx context.Context) (transport.LeaseConnection, error) {
+func (f *tcpConnectionFactory) open(ctx context.Context) (*transport.ClientConnection, error) {
 	return transport.Dial(ctx, f.target)
 }
 

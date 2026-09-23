@@ -811,9 +811,13 @@ func TestConnectionRejectsRequestDuringQuarantine(t *testing.T) {
 	if err := sendClientRequest(connection, acquireRequest(1, 1, 1)); err != nil {
 		t.Fatalf("send Acquire: %v", err)
 	}
-	response, err := connection.Recv()
+	frame, err := connection.Reader.ReadFrame()
 	if err != nil {
-		t.Fatalf("receive Acquire: %v", err)
+		t.Fatalf("read Acquire response: %v", err)
+	}
+	response, err := transport.DecodeResponse(frame)
+	if err != nil {
+		t.Fatalf("decode Acquire response: %v", err)
 	}
 	if response.Status != redleasev1.LeaseStatusNOT_READY {
 		t.Fatalf("Acquire received during quarantine = %s, want NOT_READY", response.Status)
@@ -862,13 +866,21 @@ func TestConnectionPreservesSameKeyFIFO(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	unblockShard()
-	firstResponse, err := connection.Recv()
+	firstFrame, err := connection.Reader.ReadFrame()
 	if err != nil {
-		t.Fatalf("receive first response: %v", err)
+		t.Fatalf("read first response: %v", err)
 	}
-	secondResponse, err := connection.Recv()
+	firstResponse, err := transport.DecodeResponse(firstFrame)
 	if err != nil {
-		t.Fatalf("receive second response: %v", err)
+		t.Fatalf("decode first response: %v", err)
+	}
+	secondFrame, err := connection.Reader.ReadFrame()
+	if err != nil {
+		t.Fatalf("read second response: %v", err)
+	}
+	secondResponse, err := transport.DecodeResponse(secondFrame)
+	if err != nil {
+		t.Fatalf("decode second response: %v", err)
 	}
 	if firstResponse.RequestID != 1 || firstResponse.Status != redleasev1.LeaseStatusOK {
 		t.Fatalf("first response = (%d, %s), want (1, OK)", firstResponse.RequestID, firstResponse.Status)
@@ -897,17 +909,25 @@ func TestConnectionCanReplyOutOfOrderAcrossShards(t *testing.T) {
 		t.Fatalf("send second Acquire: %v", err)
 	}
 
-	response, err := connection.Recv()
+	frame, err := connection.Reader.ReadFrame()
 	if err != nil {
-		t.Fatalf("receive second-shard response: %v", err)
+		t.Fatalf("read second-shard response: %v", err)
+	}
+	response, err := transport.DecodeResponse(frame)
+	if err != nil {
+		t.Fatalf("decode second-shard response: %v", err)
 	}
 	if response.RequestID != 2 {
 		t.Fatalf("first response request_id = %d, want 2", response.RequestID)
 	}
 	unblockFirstShard()
-	response, err = connection.Recv()
+	frame, err = connection.Reader.ReadFrame()
 	if err != nil {
-		t.Fatalf("receive first-shard response: %v", err)
+		t.Fatalf("read first-shard response: %v", err)
+	}
+	response, err = transport.DecodeResponse(frame)
+	if err != nil {
+		t.Fatalf("decode first-shard response: %v", err)
 	}
 	if response.RequestID != 1 {
 		t.Fatalf("second response request_id = %d, want 1", response.RequestID)
@@ -965,9 +985,13 @@ func TestConnectionResponseWriterFlushesAvailableResponsesAsOneBatch(t *testing.
 	}()
 	client := transport.NewClientConnection(clientConn)
 	for requestID := uint64(1); requestID <= 2; requestID++ {
-		response, err := client.Recv()
+		frame, err := client.Reader.ReadFrame()
 		if err != nil {
-			t.Fatalf("receive response %d: %v", requestID, err)
+			t.Fatalf("read response %d: %v", requestID, err)
+		}
+		response, err := transport.DecodeResponse(frame)
+		if err != nil {
+			t.Fatalf("decode response %d: %v", requestID, err)
 		}
 		if response.RequestID != requestID {
 			t.Fatalf("response request ID = %d, want %d", response.RequestID, requestID)
@@ -1037,7 +1061,7 @@ func newTestConnection(t *testing.T, s *Server) (*transport.ClientConnection, <-
 
 func closeTestConnection(t *testing.T, connection *transport.ClientConnection, errDone <-chan error) {
 	t.Helper()
-	if err := connection.Close(); err != nil {
+	if err := connection.Conn.Close(); err != nil {
 		t.Fatalf("close test connection: %v", err)
 	}
 	select {
@@ -1054,10 +1078,10 @@ func sendClientRequest(
 	connection *transport.ClientConnection,
 	request *redleasev1.ClientRequest,
 ) error {
-	if err := connection.BufferClientRequest(request); err != nil {
+	if err := connection.Writer.BufferFrame(request.Table().Bytes); err != nil {
 		return err
 	}
-	return connection.FlushClientRequests()
+	return connection.Writer.Flush()
 }
 
 func acquireRequest(requestID, key, sequence uint64) *redleasev1.ClientRequest {

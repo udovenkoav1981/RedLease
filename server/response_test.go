@@ -82,9 +82,13 @@ func TestOutboundResponseIsCopiedBeforeRecycling(t *testing.T) {
 		{RequestID: 10, Operation: redleasev1.ClientOperationACQUIRE, Status: redleasev1.LeaseStatusOK, TTLMS: 500},
 		{RequestID: 11, Operation: redleasev1.ClientOperationRELEASE, Status: redleasev1.LeaseStatusOK},
 	} {
-		got, err := connection.Recv()
+		frame, err := connection.Reader.ReadFrame()
 		if err != nil {
-			t.Fatalf("receive response: %v", err)
+			t.Fatalf("read response frame: %v", err)
+		}
+		got, err := transport.DecodeResponse(frame)
+		if err != nil {
+			t.Fatalf("decode response: %v", err)
 		}
 		if got != want {
 			t.Fatalf("response = %+v, want %+v", got, want)

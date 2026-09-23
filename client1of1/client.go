@@ -31,7 +31,7 @@ type Client struct {
 	cancel context.CancelFunc
 
 	stateMu    sync.Mutex
-	connection transport.LeaseConnection
+	connection *transport.ClientConnection
 	closed     bool
 	changed    chan struct{}
 
@@ -141,7 +141,7 @@ func (c *Client) Close() error {
 			}
 		}
 		if connection != nil {
-			_ = connection.Close()
+			_ = connection.Conn.Close()
 		}
 		c.manager.Wait()
 		c.discardQueuedRequests()
@@ -184,7 +184,7 @@ func (c *Client) manageConnection() {
 		}
 
 		if !c.publish(connection) {
-			_ = connection.Close()
+			_ = connection.Conn.Close()
 			return
 		}
 		c.logger.Info(
@@ -212,7 +212,7 @@ func (c *Client) manageConnection() {
 	}
 }
 
-func (c *Client) publish(connection transport.LeaseConnection) bool {
+func (c *Client) publish(connection *transport.ClientConnection) bool {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	if c.closed || c.ctx.Err() != nil {
@@ -223,7 +223,7 @@ func (c *Client) publish(connection transport.LeaseConnection) bool {
 	return true
 }
 
-func (c *Client) clear(connection transport.LeaseConnection) {
+func (c *Client) clear(connection *transport.ClientConnection) {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	if c.connection != connection {

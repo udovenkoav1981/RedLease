@@ -2,14 +2,20 @@ package client
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
+	"io"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	flatbuffers "github.com/google/flatbuffers/go"
+
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
+	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
 func TestStreamGenerationCorrelatesOutOfOrderResponses(t *testing.T) {
@@ -99,7 +105,7 @@ func TestStreamSubmitReturnsAfterWriterAcceptanceBeforeSendCompletes(t *testing.
 	submission := startStreamSubmit(generation, context.Background(), acquireStreamRequest(1))
 	stream.waitForSendAttempt(t)
 
-	// fake BufferClientRequest cannot complete until the test receives from
+	// fake BufferFrame cannot complete until the test receives from
 	// stream.sent.
 	// Submission must nevertheless complete because the single writer has
 	// already accepted the request into FIFO order.
@@ -384,7 +390,8 @@ func observeClientRequest(request *redleasev1.ClientRequest) (observedRequest, e
 }
 
 type fakeLeaseClientStream struct {
-	ctx context.Context //nolint:containedctx // Test stream owns this context.
+	readBuffer []byte
+	ctx        context.Context //nolint:containedctx // Test stream owns this context.
 
 	sent        chan observedRequest
 	receive     chan fakeReceive
@@ -399,45 +406,95 @@ type fakeLeaseClientStream struct {
 	sendAttemptOnce sync.Once
 }
 
-func (s *fakeLeaseClientStream) BufferClientRequest(request *redleasev1.ClientRequest) error {
+func (s *fakeLeaseClientStream) Write(batch []byte) (int, error) {
 	s.sendAttemptOnce.Do(func() { close(s.sendAttempt) })
 	if s.sendErr != nil {
-		return s.sendErr
+		return 0, s.sendErr
 	}
-	decoded, err := observeClientRequest(request)
-	if err != nil {
-		return err
+	for offset := 0; offset < len(batch); {
+		if len(batch)-offset < flatbuffers.SizeUint32 {
+			return 0, io.ErrUnexpectedEOF
+		}
+		frameSize := flatbuffers.SizeUint32 + int(binary.LittleEndian.Uint32(batch[offset:]))
+		if frameSize > len(batch)-offset {
+			return 0, io.ErrUnexpectedEOF
+		}
+		request := redleasev1.GetSizePrefixedRootAsClientRequest(batch[offset:offset+frameSize], 0)
+		decoded, err := observeClientRequest(request)
+		if err != nil {
+			return 0, err
+		}
+		select {
+		case s.sent <- decoded:
+		case <-s.closed:
+			return 0, errConnectionClosed
+		case <-s.ctx.Done():
+			return 0, s.ctx.Err()
+		}
+		offset += frameSize
 	}
-
-	select {
-	case s.sent <- decoded:
-		return nil
-	case <-s.closed:
-		return errConnectionClosed
-	case <-s.ctx.Done():
-		return s.ctx.Err()
-	}
+	return len(batch), nil
 }
 
-func (s *fakeLeaseClientStream) FlushClientRequests() error {
-	return nil
-}
-
-func (s *fakeLeaseClientStream) Recv() (protocol.Response, error) {
-	select {
-	case result := <-s.receive:
-		return result.response, result.err
-	case <-s.closed:
-		return protocol.Response{}, errConnectionClosed
-	case <-s.ctx.Done():
-		return protocol.Response{}, s.ctx.Err()
+func (s *fakeLeaseClientStream) Read(buffer []byte) (int, error) {
+	if len(s.readBuffer) == 0 {
+		select {
+		case result := <-s.receive:
+			if result.err != nil {
+				return 0, result.err
+			}
+			s.readBuffer = encodeFakeResponse(result.response)
+		case <-s.closed:
+			return 0, errConnectionClosed
+		case <-s.ctx.Done():
+			return 0, s.ctx.Err()
+		}
 	}
+	n := copy(buffer, s.readBuffer)
+	s.readBuffer = s.readBuffer[n:]
+	return n, nil
 }
 
 func (s *fakeLeaseClientStream) Close() error {
 	s.closeCalls.Add(1)
 	s.closeOnce.Do(func() { close(s.closed) })
 	return s.closeErr
+}
+
+func (*fakeLeaseClientStream) LocalAddr() net.Addr              { return fakeAddr("local") }
+func (*fakeLeaseClientStream) RemoteAddr() net.Addr             { return fakeAddr("remote") }
+func (*fakeLeaseClientStream) SetDeadline(time.Time) error      { return nil }
+func (*fakeLeaseClientStream) SetReadDeadline(time.Time) error  { return nil }
+func (*fakeLeaseClientStream) SetWriteDeadline(time.Time) error { return nil }
+
+type fakeAddr string
+
+func (a fakeAddr) Network() string { return "test" }
+func (a fakeAddr) String() string  { return string(a) }
+
+func encodeFakeResponse(response protocol.Response) []byte {
+	builder := flatbuffers.NewBuilder(transport.InitialBufferSize)
+	redleasev1.ServerResponseStart(builder)
+	redleasev1.ServerResponseAddRequestId(builder, response.RequestID)
+	switch response.Operation {
+	case redleasev1.ClientOperationACQUIRE:
+		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultACQUIRE)
+		redleasev1.ServerResponseAddAcquire(builder, redleasev1.CreateAcquireResponse(builder, response.Status, response.TTLMS))
+	case redleasev1.ClientOperationRENEW:
+		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultRENEW)
+		redleasev1.ServerResponseAddRenew(builder, redleasev1.CreateRenewResponse(builder, response.Status, response.TTLMS))
+	case redleasev1.ClientOperationRELEASE:
+		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultRELEASE)
+		redleasev1.ServerResponseAddRelease(builder, redleasev1.CreateReleaseResponse(builder, response.Status))
+	case redleasev1.ClientOperationGET_TTL:
+		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultGET_TTL)
+		redleasev1.ServerResponseAddGetTtl(builder, redleasev1.CreateGetTTLResponse(builder, response.TTLMS))
+	default:
+		panic("unsupported test response operation")
+	}
+	root := redleasev1.ServerResponseEnd(builder)
+	redleasev1.FinishSizePrefixedServerResponseBuffer(builder, root)
+	return builder.FinishedBytes()
 }
 
 func (s *fakeLeaseClientStream) waitForSendAttempt(t *testing.T) {
@@ -470,7 +527,7 @@ func newTestStreamGenerationWithOptions(
 		sendErr:     options.sendErr,
 		closeErr:    options.closeErr,
 	}
-	generation := newConnectionGeneration(stream, cancel)
+	generation := newConnectionGeneration(transport.NewClientConnection(stream), cancel)
 	t.Cleanup(func() { _ = generation.Close() })
 	return generation, stream
 }
