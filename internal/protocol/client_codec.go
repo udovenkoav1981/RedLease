@@ -1,18 +1,10 @@
 package protocol
 
 import (
-	"encoding/binary"
-	"errors"
 	"fmt"
-
-	flatbuffers "github.com/google/flatbuffers/go"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 )
-
-const sizePrefixBytes = 4
-
-var ErrMalformedFrame = errors.New("malformed RedLease FlatBuffer frame")
 
 // DecodeResponse copies a size-prefixed FlatBuffer into an owned Response.
 func DecodeResponse(frame []byte) (response Response, err error) {
@@ -66,18 +58,6 @@ func DecodeResponse(frame []byte) (response Response, err error) {
 		return Response{}, fmt.Errorf("%w: unsupported lease status %d", ErrMalformedFrame, response.Status)
 	}
 	return response, nil
-}
-
-// ValidateFrame checks the size prefix and minimum FlatBuffers root size.
-func ValidateFrame(frame []byte) error {
-	if len(frame) < sizePrefixBytes+flatbuffers.SizeUOffsetT {
-		return fmt.Errorf("%w: frame is too short", ErrMalformedFrame)
-	}
-	payloadSize := binary.LittleEndian.Uint32(frame[:sizePrefixBytes])
-	if uint64(payloadSize)+sizePrefixBytes != uint64(len(frame)) {
-		return fmt.Errorf("%w: size prefix %d does not match frame size %d", ErrMalformedFrame, payloadSize, len(frame))
-	}
-	return nil
 }
 
 func validStatus(status redleasev1.LeaseStatus) bool {
