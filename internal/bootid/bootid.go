@@ -1,5 +1,5 @@
-// Package leaseid provides random boot IDs shared by the RedLease clients.
-package leaseid
+// Package bootid generates random boot identifiers shared by RedLease clients.
+package bootid
 
 import (
 	"crypto/rand"

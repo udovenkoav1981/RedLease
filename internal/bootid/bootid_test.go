@@ -1,8 +1,6 @@
-package leaseid
+package bootid
 
-import (
-	"testing"
-)
+import "testing"
 
 func TestNewBootID(t *testing.T) {
 	if _, err := NewBootID(); err != nil {

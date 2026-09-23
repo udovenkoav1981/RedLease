@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
-	"github.com/udovenkoav1981/RedLease/internal/leaseid"
+	"github.com/udovenkoav1981/RedLease/internal/bootid"
 	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
@@ -56,7 +56,7 @@ func New(config Config) (*Client, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	bootID, err := leaseid.NewBootID()
+	bootID, err := bootid.NewBootID()
 	if err != nil {
 		return nil, err
 	}
