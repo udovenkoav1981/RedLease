@@ -20,7 +20,7 @@ func TestStatelessPeerRespondsToAllOperations(t *testing.T) {
 		defer func() { _ = serverSide.Close() }()
 		done <- serveConnection(serverSide, 1000)
 	}()
-	connection := transport.NewConnection(clientSide)
+	connection := transport.NewClientConnection(clientSide)
 	defer func() {
 		_ = connection.Close()
 		if err := <-done; err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.EOF) {

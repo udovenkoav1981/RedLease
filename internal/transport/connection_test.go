@@ -43,9 +43,9 @@ func (c *recordingConn) SetWriteDeadline(time.Time) error {
 	return nil
 }
 
-func TestConnectionFlushesBufferedClientRequestsWithOneWrite(t *testing.T) {
+func TestClientConnectionFlushesBufferedRequestsWithOneWrite(t *testing.T) {
 	network := &recordingConn{}
-	connection := NewConnection(network)
+	connection := NewClientConnection(network)
 	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
 
 	for requestID := uint64(1); requestID <= 2; requestID++ {
@@ -197,45 +197,5 @@ func TestFrameReaderReadsBufferedFramesWithOneRead(t *testing.T) {
 	}
 	if network.reads != 1 {
 		t.Fatalf("TCP reads = %d, want 1", network.reads)
-	}
-}
-
-type limitedConn struct {
-	recordingConn
-
-	maximum int
-}
-
-func (c *limitedConn) Write(value []byte) (int, error) {
-	return c.Buffer.Write(value[:min(len(value), c.maximum)])
-}
-
-func TestWriteFrameHandlesPartialWrites(t *testing.T) {
-	t.Parallel()
-	connection := &limitedConn{maximum: 2}
-	want := []byte{1, 2, 3, 4, 5}
-	if err := WriteFrame(connection, want); err != nil {
-		t.Fatalf("WriteFrame: %v", err)
-	}
-	if !bytes.Equal(connection.Bytes(), want) {
-		t.Fatalf("written frame = %v, want %v", connection.Bytes(), want)
-	}
-}
-
-func TestWriteFrameTimesOutBlockedTCPWrite(t *testing.T) {
-	t.Parallel()
-	server, client := net.Pipe()
-	t.Cleanup(func() {
-		_ = client.Close()
-		_ = server.Close()
-	})
-
-	err := WriteFrame(client, []byte{1})
-	if err == nil {
-		t.Fatal("blocked frame write succeeded")
-	}
-	var networkError net.Error
-	if !errors.As(err, &networkError) || !networkError.Timeout() {
-		t.Fatalf("blocked frame write error = %v, want network timeout", err)
 	}
 }

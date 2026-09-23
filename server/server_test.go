@@ -965,7 +965,7 @@ func TestConnectionResponseWriterFlushesAvailableResponsesAsOneBatch(t *testing.
 	go func() {
 		done <- session.writeResponses(transport.NewFrameWriter(countingConn))
 	}()
-	client := transport.NewConnection(clientConn)
+	client := transport.NewClientConnection(clientConn)
 	for requestID := uint64(1); requestID <= 2; requestID++ {
 		response, err := client.Recv()
 		if err != nil {
@@ -1026,7 +1026,7 @@ func keysForDifferentShards(t *testing.T, s *Server) (uint64, uint64) {
 	return 0, 0
 }
 
-func newTestConnection(t *testing.T, s *Server) (*transport.Connection, <-chan error) {
+func newTestConnection(t *testing.T, s *Server) (*transport.ClientConnection, <-chan error) {
 	t.Helper()
 	serverConn, clientConn := net.Pipe()
 	errDone := make(chan error, 1)
@@ -1034,10 +1034,10 @@ func newTestConnection(t *testing.T, s *Server) (*transport.Connection, <-chan e
 		errDone <- s.serveConnection(serverConn)
 		_ = serverConn.Close()
 	}()
-	return transport.NewConnection(clientConn), errDone
+	return transport.NewClientConnection(clientConn), errDone
 }
 
-func closeTestConnection(t *testing.T, connection *transport.Connection, errDone <-chan error) {
+func closeTestConnection(t *testing.T, connection *transport.ClientConnection, errDone <-chan error) {
 	t.Helper()
 	if err := connection.Close(); err != nil {
 		t.Fatalf("close test connection: %v", err)
@@ -1053,7 +1053,7 @@ func closeTestConnection(t *testing.T, connection *transport.Connection, errDone
 }
 
 func sendClientRequest(
-	connection *transport.Connection,
+	connection *transport.ClientConnection,
 	request *redleasev1.ClientRequest,
 ) error {
 	if err := connection.BufferClientRequest(request); err != nil {

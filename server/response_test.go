@@ -77,7 +77,7 @@ func TestOutboundResponseIsCopiedBeforeRecycling(t *testing.T) {
 	}
 	flushDone := make(chan error, 1)
 	go func() { flushDone <- writer.Flush() }()
-	connection := transport.NewConnection(clientConn)
+	connection := transport.NewClientConnection(clientConn)
 	for _, want := range []protocol.Response{
 		{RequestID: 10, Operation: redleasev1.ClientOperationACQUIRE, Status: redleasev1.LeaseStatusOK, TTLMS: 500},
 		{RequestID: 11, Operation: redleasev1.ClientOperationRELEASE, Status: redleasev1.LeaseStatusOK},

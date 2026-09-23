@@ -82,7 +82,7 @@ func run(args []string, output, flagOutput io.Writer) error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	connections := make([]*transport.Connection, 0, config.connections)
+	connections := make([]*transport.ClientConnection, 0, config.connections)
 	for range config.connections {
 		connection, dialErr := transport.Dial(ctx, config.target)
 		if dialErr != nil {
@@ -149,7 +149,7 @@ func run(args []string, output, flagOutput io.Writer) error {
 	return nil
 }
 
-func closeConnections(connections []*transport.Connection) {
+func closeConnections(connections []*transport.ClientConnection) {
 	for _, connection := range connections {
 		_ = connection.Close()
 	}
@@ -374,7 +374,7 @@ func bufferBuiltRequest(
 	return connection.BufferClientRequest(request)
 }
 
-func receiveResponses(connection *transport.Connection, counters *responseCounters) error {
+func receiveResponses(connection *transport.ClientConnection, counters *responseCounters) error {
 	for {
 		response, err := connection.Recv()
 		if err != nil {
