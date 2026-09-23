@@ -937,14 +937,13 @@ func TestConnectionResponseWriterFlushesAvailableResponsesAsOneBatch(t *testing.
 	})
 	countingConn := &writeCountingConn{Conn: serverConn}
 	session := &connectionSession{
-		server:         s,
-		conn:           countingConn,
-		ctx:            t.Context(),
-		responses:      mpscring.New[*outboundResponse](),
-		responsesReady: make(chan struct{}, 1),
-		responsesDone:  make(chan struct{}),
-		slots:          make(chan struct{}, 2),
-		recvDone:       make(chan error),
+		server:        s,
+		conn:          countingConn,
+		ctx:           t.Context(),
+		responses:     mpscring.NewNotifying[*outboundResponse](),
+		responsesDone: make(chan struct{}),
+		slots:         make(chan struct{}, 2),
+		recvDone:      make(chan error),
 	}
 	session.slots <- struct{}{}
 	session.slots <- struct{}{}
@@ -959,7 +958,6 @@ func TestConnectionResponseWriterFlushesAvailableResponsesAsOneBatch(t *testing.
 	if !session.responses.TryEnqueue(first) || !session.responses.TryEnqueue(second) {
 		t.Fatal("enqueue response failed")
 	}
-	session.responsesReady <- struct{}{}
 
 	done := make(chan error, 1)
 	go func() {

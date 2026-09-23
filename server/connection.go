@@ -24,11 +24,10 @@ type connectionSession struct {
 	conn   net.Conn
 	ctx    context.Context //nolint:containedctx // Session owns this connection-scoped context.
 
-	responses      *mpscring.Ring[*outboundResponse]
-	responsesReady chan struct{}
-	responsesDone  chan struct{}
-	slots          chan struct{}
-	recvDone       chan error
+	responses     *mpscring.NotifyingRing[*outboundResponse]
+	responsesDone chan struct{}
+	slots         chan struct{}
+	recvDone      chan error
 }
 
 // Serve accepts persistent RedLease TCP connections on listener. Server owns
@@ -138,14 +137,13 @@ func (s *Server) serveConnection(conn net.Conn) (result error) {
 
 	ctx, cancel := context.WithCancel(s.ctx)
 	session := &connectionSession{
-		server:         s,
-		conn:           conn,
-		ctx:            ctx,
-		responses:      mpscring.New[*outboundResponse](),
-		responsesReady: make(chan struct{}, 1),
-		responsesDone:  make(chan struct{}),
-		slots:          make(chan struct{}, mpscring.Capacity),
-		recvDone:       make(chan error, 1),
+		server:        s,
+		conn:          conn,
+		ctx:           ctx,
+		responses:     mpscring.NewNotifying[*outboundResponse](),
+		responsesDone: make(chan struct{}),
+		slots:         make(chan struct{}, mpscring.Capacity),
+		recvDone:      make(chan error, 1),
 	}
 	defer func() {
 		cancel()
@@ -164,7 +162,7 @@ func (s *connectionSession) writeResponses(writer *transport.FrameWriter) error 
 		response, ok := s.responses.TryDequeue()
 		if !ok {
 			select {
-			case <-s.responsesReady:
+			case <-s.responses.Ready():
 				continue
 			case <-s.responsesDone:
 				response, ok = s.responses.TryDequeue()
@@ -292,10 +290,6 @@ func (s *connectionSession) receive() {
 				s.releaseSlot()
 				s.server.fail(errors.New("connection response queue full despite reserved slot"))
 				return
-			}
-			select {
-			case s.responsesReady <- struct{}{}:
-			default:
 			}
 		}
 		if direct {

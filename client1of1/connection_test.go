@@ -126,8 +126,7 @@ func startTestConnection(t *testing.T, connection *fakeLeaseConnection, timeout 
 		cancel:          cancelClient,
 		connection:      connection,
 		changed:         make(chan struct{}),
-		sendQueue:       mpscring.New[*outboundConnectionRequest](),
-		sendReady:       make(chan struct{}, 1),
+		sendQueue:       mpscring.NewNotifying[*outboundConnectionRequest](),
 		pending:         newPendingShards(),
 	}
 	done := make(chan error, 1)

@@ -20,8 +20,7 @@ func TestCandidateValidityRejectsTTLAboveProtocolMaximum(t *testing.T) {
 func TestReleaseIsIdempotent(t *testing.T) {
 	client := &Client{
 		ctx:       context.Background(),
-		sendQueue: mpscring.New[*outboundConnectionRequest](),
-		sendReady: make(chan struct{}, 1),
+		sendQueue: mpscring.NewNotifying[*outboundConnectionRequest](),
 		pending:   newPendingShards(),
 	}
 	lease := &Lease{

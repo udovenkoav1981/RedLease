@@ -135,11 +135,6 @@ func (c *Client) enqueue(request *outboundConnectionRequest, result chan connect
 	}
 	if c.sendQueue.TryEnqueue(request) {
 		shard.mu.Unlock()
-		// A buffered wakeup survives the writer's transition from an empty ring to waiting.
-		select {
-		case c.sendReady <- struct{}{}:
-		default:
-		}
 		return nil
 	}
 	delete(shard.pending, requestID)
@@ -201,7 +196,7 @@ func (c *Client) send(connection transport.LeaseConnection, stop <-chan struct{}
 			select {
 			case <-stop:
 				return nil
-			case <-c.sendReady:
+			case <-c.sendQueue.Ready():
 			}
 			continue
 		}
