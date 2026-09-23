@@ -256,11 +256,6 @@ func (s *Server) Close() error {
 func (s *Server) runQuarantine() {
 	defer s.wg.Done()
 	defer s.timer.Stop()
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			s.failRecoveredPanic("running quarantine", recovered)
-		}
-	}()
 
 	select {
 	case <-s.timer.C:
@@ -275,11 +270,6 @@ func (s *Server) runExpiredLeaseCleanup() {
 	defer s.wg.Done()
 	ticker := time.NewTicker(expiredLeaseCleanupInterval)
 	defer ticker.Stop()
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			s.failRecoveredPanic("cleaning expired leases", recovered)
-		}
-	}()
 
 	for {
 		select {

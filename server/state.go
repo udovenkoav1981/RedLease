@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"hash/maphash"
 	"log/slog"
-	"runtime/debug"
 	"sync"
 	"time"
 
@@ -89,50 +88,10 @@ type leaseShard struct {
 func (s *Server) runShard(shard *leaseShard) {
 	defer s.wg.Done()
 
-	var current shardJob
-	hasCurrent := false
-	completing := false
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			s.failRecoveredPanic("processing shard operation", recovered)
-			if hasCurrent && !completing {
-				s.completeFailedJob(current)
-			}
-			// The owner closes a failed Server after receiving Fatal. Drain the
-			// already accepted jobs so their connection waiters can also finish.
-			for queued := range shard.jobs {
-				s.completeFailedJob(queued)
-			}
-		}
-	}()
-
 	for job := range shard.jobs {
-		current = job
-		hasCurrent = true
 		response := s.apply(shard, job.operation)
-		completing = true
 		job.complete(response)
-		completing = false
-		hasCurrent = false
 	}
-}
-
-func (s *Server) completeFailedJob(job shardJob) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			s.failRecoveredPanic("completing failed shard operation", recovered)
-		}
-	}()
-	job.complete(notReadyResponse(job.operation))
-}
-
-func (s *Server) failRecoveredPanic(scope string, recovered any) {
-	s.fail(fmt.Errorf(
-		"panic while %s: %v\n%s",
-		scope,
-		recovered,
-		debug.Stack(),
-	))
 }
 
 func (shard *leaseShard) addLease(key uint64, id leaseID, deadline time.Time) {
@@ -179,10 +138,6 @@ func removeExpiredKeysFromShard(shard *leaseShard, now time.Time) uint64 {
 }
 
 func (s *Server) apply(shard *leaseShard, op operation) protocol.Response {
-	if op.kind >= operationKindCount {
-		s.fail(fmt.Errorf("unknown operation kind %d", op.kind))
-		return protocol.Response{RequestID: op.requestID}
-	}
 	if !s.active() {
 		return notReadyResponse(op)
 	}

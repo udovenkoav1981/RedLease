@@ -122,13 +122,7 @@ func (s *Server) closeTransport() {
 	}
 }
 
-func (s *Server) serveConnection(conn net.Conn) (result error) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			s.failRecoveredPanic("serving connection", recovered)
-			result = s.unavailableError()
-		}
-	}()
+func (s *Server) serveConnection(conn net.Conn) error {
 	if err := s.unavailableError(); err != nil {
 		return err
 	}
@@ -149,7 +143,7 @@ func (s *Server) serveConnection(conn net.Conn) (result error) {
 		cancel()
 		go session.discardResponses()
 	}()
-	go session.receiveSafely()
+	go session.receive()
 
 	writer := transport.NewFrameWriter(conn)
 	return session.writeResponses(writer)
@@ -226,28 +220,10 @@ func (s *connectionSession) discardResponses() {
 	}
 }
 
-func (s *connectionSession) receiveSafely() {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			s.server.failRecoveredPanic("receiving connection request", recovered)
-			select {
-			case s.recvDone <- s.server.unavailableError():
-			default:
-			}
-		}
-	}()
-	s.receive()
-}
-
 func (s *connectionSession) receive() {
 	var pending pendingJobs
 	defer func() {
 		go func() {
-			defer func() {
-				if recovered := recover(); recovered != nil {
-					s.server.failRecoveredPanic("finishing connection responses", recovered)
-				}
-			}()
 			pending.Wait()
 			close(s.responsesDone)
 		}()

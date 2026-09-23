@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -291,54 +290,6 @@ func TestNormalCloseDoesNotPublishFatalError(t *testing.T) {
 	case err := <-s.Fatal():
 		t.Fatalf("normal Close published fatal error: %v", err)
 	default:
-	}
-}
-
-func TestShardPanicIsConvertedToControlledFailure(t *testing.T) {
-	s := newTestServer(t, 1_000, 1)
-	activateServer(t, s)
-	shard := s.shards[0]
-	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
-	corrupted := &lease{
-		key:       1,
-		id:        id,
-		deadline:  testEpoch.Add(time.Second),
-		heapIndex: 2,
-	}
-	shard.leases[corrupted.key] = corrupted
-	shard.deadlines = leaseDeadlineHeap{corrupted}
-	s.keys.Store(1)
-
-	responses := make(chan protocol.Response, 1)
-	if !s.dispatch(context.Background().Done(), shardJob{
-		operation: operation{
-			requestID: 1,
-			kind:      operationRelease,
-			key:       corrupted.key,
-			leaseID:   id,
-		},
-		complete: func(response protocol.Response) {
-			responses <- response
-		},
-	}) {
-		t.Fatal("dispatch corrupted Release")
-	}
-
-	select {
-	case response := <-responses:
-		if got := response.Status; got != redleasev1.LeaseStatusNOT_READY {
-			t.Fatalf("corrupted Release = %s, want NOT_READY", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("corrupted Release did not complete")
-	}
-	select {
-	case err := <-s.Fatal():
-		if !errors.Is(err, ErrServerFailed) || !strings.Contains(err.Error(), "panic while processing shard operation") {
-			t.Fatalf("fatal error = %v, want recovered panic", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("recovered panic did not publish fatal error")
 	}
 }
 
