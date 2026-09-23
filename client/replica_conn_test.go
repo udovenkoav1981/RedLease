@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/udovenkoav1981/RedLease/internal/protocol"
+	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
@@ -97,7 +97,7 @@ func TestReplicaConnReconnectsAfterGenerationFailure(t *testing.T) {
 	result := startReplicaCall(connection, acquireStreamRequest(1))
 	request := receiveSentRequest(t, secondStream)
 	secondStream.receive <- fakeReceive{
-		response: streamResponse(request.RequestID, protocol.StatusOK),
+		response: streamResponse(request.RequestID, redleasev1.LeaseStatusOK),
 	}
 	if received := receiveCallResult(t, result); received.err != nil {
 		t.Fatalf("call after reconnect failed: %v", received.err)
@@ -130,7 +130,7 @@ func TestReplicaConnReconnectsWhenRequestDeadlineBreaksBlockedSend(t *testing.T)
 	secondResult := startReplicaCall(connection, acquireStreamRequest(2))
 	request := receiveSentRequest(t, secondStream)
 	secondStream.receive <- fakeReceive{
-		response: streamResponse(request.RequestID, protocol.StatusOK),
+		response: streamResponse(request.RequestID, redleasev1.LeaseStatusOK),
 	}
 	if received := receiveCallResult(t, secondResult); received.err != nil {
 		t.Fatalf("call after reconnect failed: %v", received.err)
@@ -198,7 +198,7 @@ func TestReplicaConnConcurrentCalls(t *testing.T) {
 	}
 	for i := calls - 1; i >= 0; i-- {
 		stream.receive <- fakeReceive{
-			response: streamResponse(requests[i].RequestID, protocol.StatusOK),
+			response: streamResponse(requests[i].RequestID, redleasev1.LeaseStatusOK),
 		}
 	}
 	for _, result := range results {

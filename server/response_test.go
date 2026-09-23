@@ -5,6 +5,7 @@ import (
 	"net"
 	"testing"
 
+	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
@@ -13,10 +14,10 @@ import (
 func TestOutboundResponseRoundTrip(t *testing.T) {
 	s := newTestServer(t, 1_000, 1)
 	tests := []protocol.Response{
-		{RequestID: 1, Operation: protocol.OperationAcquire, Status: protocol.StatusAlreadyOwned, TTLMS: 700},
-		{RequestID: 2, Operation: protocol.OperationRenew, Status: protocol.StatusStale, TTLMS: 500},
-		{RequestID: 3, Operation: protocol.OperationRelease, Status: protocol.StatusOK},
-		{RequestID: 4, Operation: protocol.OperationGetTTL, Status: protocol.StatusOK, TTLMS: 1_000},
+		{RequestID: 1, Operation: protocol.OperationAcquire, Status: redleasev1.LeaseStatusALREADY_OWNED, TTLMS: 700},
+		{RequestID: 2, Operation: protocol.OperationRenew, Status: redleasev1.LeaseStatusSTALE, TTLMS: 500},
+		{RequestID: 3, Operation: protocol.OperationRelease, Status: redleasev1.LeaseStatusOK},
+		{RequestID: 4, Operation: protocol.OperationGetTTL, Status: redleasev1.LeaseStatusOK, TTLMS: 1_000},
 	}
 	for _, want := range tests {
 		outbound, err := s.newOutboundResponse(want)
@@ -37,8 +38,8 @@ func TestOutboundResponseRoundTrip(t *testing.T) {
 func TestOutboundResponseRejectsInvalidValues(t *testing.T) {
 	s := newTestServer(t, 1_000, 1)
 	for _, response := range []protocol.Response{
-		{Operation: protocol.OperationAcquire, Status: protocol.StatusKeyLimitReached + 1},
-		{Operation: protocol.OperationGetTTL + 1, Status: protocol.StatusOK},
+		{Operation: protocol.OperationAcquire, Status: redleasev1.LeaseStatusKEY_LIMIT_REACHED + 1},
+		{Operation: protocol.OperationGetTTL + 1, Status: redleasev1.LeaseStatusOK},
 	} {
 		if outbound, err := s.newOutboundResponse(response); err == nil {
 			s.recycleOutboundResponse(outbound)
@@ -62,8 +63,8 @@ func TestOutboundResponseIsCopiedBeforeRecycling(t *testing.T) {
 	}
 	writer := transport.NewFrameWriter(serverConn)
 	for _, want := range []protocol.Response{
-		{RequestID: 10, Operation: protocol.OperationAcquire, Status: protocol.StatusOK, TTLMS: 500},
-		{RequestID: 11, Operation: protocol.OperationRelease, Status: protocol.StatusOK},
+		{RequestID: 10, Operation: protocol.OperationAcquire, Status: redleasev1.LeaseStatusOK, TTLMS: 500},
+		{RequestID: 11, Operation: protocol.OperationRelease, Status: redleasev1.LeaseStatusOK},
 	} {
 		outbound, err := s.newOutboundResponse(want)
 		if err != nil {
@@ -78,8 +79,8 @@ func TestOutboundResponseIsCopiedBeforeRecycling(t *testing.T) {
 	go func() { flushDone <- writer.Flush() }()
 	connection := transport.NewConnection(clientConn)
 	for _, want := range []protocol.Response{
-		{RequestID: 10, Operation: protocol.OperationAcquire, Status: protocol.StatusOK, TTLMS: 500},
-		{RequestID: 11, Operation: protocol.OperationRelease, Status: protocol.StatusOK},
+		{RequestID: 10, Operation: protocol.OperationAcquire, Status: redleasev1.LeaseStatusOK, TTLMS: 500},
+		{RequestID: 11, Operation: protocol.OperationRelease, Status: redleasev1.LeaseStatusOK},
 	} {
 		got, err := connection.Recv()
 		if err != nil {
@@ -106,7 +107,7 @@ func TestDiscardResponsesReleasesSlots(t *testing.T) {
 		outbound, err := s.newOutboundResponse(protocol.Response{
 			RequestID: requestID,
 			Operation: protocol.OperationRelease,
-			Status:    protocol.StatusOK,
+			Status:    redleasev1.LeaseStatusOK,
 		})
 		if err != nil {
 			t.Fatalf("encode response: %v", err)

@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
@@ -137,7 +138,7 @@ func (c *Client) releaseResponseOK(ctx context.Context, future *connectionFuture
 	// A quarantined process has empty RAM state and rejected this Release
 	// without applying any lease mutation. There is nothing from the previous
 	// process incarnation left to clean on that replica.
-	return status == protocol.StatusOK || status == protocol.StatusNotReady
+	return status == redleasev1.LeaseStatusOK || status == redleasev1.LeaseStatusNOT_READY
 }
 
 func releaseRetryWindow(responseTimeout time.Duration) time.Duration {

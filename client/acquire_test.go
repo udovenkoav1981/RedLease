@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
@@ -17,9 +18,9 @@ func TestClientAcquireThreeOKEstablishesValidity(t *testing.T) {
 	result := startClientAcquire(harness.client, context.Background(), key, 2_000)
 	requests := harness.receiveAcquireRequests(t)
 
-	harness.respondAcquire(0, requests[0], protocol.StatusOK, 1_000)
-	harness.respondAcquire(1, requests[1], protocol.StatusAlreadyOwned, 1_500)
-	harness.respondAcquire(2, requests[2], protocol.StatusOK, 2_000)
+	harness.respondAcquire(0, requests[0], redleasev1.LeaseStatusOK, 1_000)
+	harness.respondAcquire(1, requests[1], redleasev1.LeaseStatusALREADY_OWNED, 1_500)
+	harness.respondAcquire(2, requests[2], redleasev1.LeaseStatusOK, 2_000)
 
 	acquired := receiveAcquireCallResult(t, result)
 	if acquired.err != nil {
@@ -41,8 +42,8 @@ func TestClientAcquireThreeOKEstablishesValidity(t *testing.T) {
 		t.Fatalf("lease key = %d, want %d", got, key)
 	}
 
-	harness.respondAcquire(3, requests[3], protocol.StatusBusy, 0)
-	harness.respondAcquire(4, requests[4], protocol.StatusBusy, 0)
+	harness.respondAcquire(3, requests[3], redleasev1.LeaseStatusBUSY, 0)
+	harness.respondAcquire(4, requests[4], redleasev1.LeaseStatusBUSY, 0)
 }
 
 func TestClientAcquireUsesEverySupportedQuorum(t *testing.T) {
@@ -81,7 +82,7 @@ func TestClientAcquireUsesEverySupportedQuorum(t *testing.T) {
 				respondAcquireOnStream(
 					streams[replica],
 					requests[replica],
-					protocol.StatusOK,
+					redleasev1.LeaseStatusOK,
 					2_000,
 				)
 			}
@@ -94,7 +95,7 @@ func TestClientAcquireUsesEverySupportedQuorum(t *testing.T) {
 			respondAcquireOnStream(
 				streams[quorumSize-1],
 				requests[quorumSize-1],
-				protocol.StatusOK,
+				redleasev1.LeaseStatusOK,
 				2_000,
 			)
 			acquired := receiveAcquireCallResult(t, result)
@@ -109,7 +110,7 @@ func TestClientAcquireUsesEverySupportedQuorum(t *testing.T) {
 				respondAcquireOnStream(
 					streams[replica],
 					requests[replica],
-					protocol.StatusOK,
+					redleasev1.LeaseStatusOK,
 					2_000,
 				)
 			}
@@ -123,12 +124,12 @@ func TestClientAcquireSelectsAnyValidThreeFromHeterogeneousResponses(t *testing.
 	result := startClientAcquire(harness.client, context.Background(), uint64(1), 4_000)
 	requests := harness.receiveAcquireRequests(t)
 
-	harness.respondAcquire(0, requests[0], protocol.StatusOK, 2_000)
-	harness.respondAcquire(1, requests[1], protocol.StatusOK, 3_000)
+	harness.respondAcquire(0, requests[0], redleasev1.LeaseStatusOK, 2_000)
+	harness.respondAcquire(1, requests[1], redleasev1.LeaseStatusOK, 3_000)
 	// This successful but already unusable replica must not poison a quorum
 	// made from the other three successful replicas.
-	harness.respondAcquire(2, requests[2], protocol.StatusOK, 50)
-	harness.respondAcquire(3, requests[3], protocol.StatusOK, 2_500)
+	harness.respondAcquire(2, requests[2], redleasev1.LeaseStatusOK, 50)
+	harness.respondAcquire(3, requests[3], redleasev1.LeaseStatusOK, 2_500)
 
 	acquired := receiveAcquireCallResult(t, result)
 	if acquired.err != nil {
@@ -139,7 +140,7 @@ func TestClientAcquireSelectsAnyValidThreeFromHeterogeneousResponses(t *testing.
 		t.Fatalf("validUntil = %v, want best 3/5 quorum %v", got, want)
 	}
 
-	harness.respondAcquire(4, requests[4], protocol.StatusBusy, 0)
+	harness.respondAcquire(4, requests[4], redleasev1.LeaseStatusBUSY, 0)
 }
 
 func TestClientAcquireZeroTTLDoesCleanupOnAllFive(t *testing.T) {
@@ -147,7 +148,7 @@ func TestClientAcquireZeroTTLDoesCleanupOnAllFive(t *testing.T) {
 	result := startClientAcquire(harness.client, context.Background(), uint64(1), 0)
 	requests := harness.receiveAcquireRequests(t)
 	for replica, request := range requests {
-		harness.respondAcquire(replica, request, protocol.StatusOK, 0)
+		harness.respondAcquire(replica, request, redleasev1.LeaseStatusOK, 0)
 	}
 
 	failed := receiveAcquireCallResult(t, result)
@@ -163,7 +164,7 @@ func TestClientAcquireReportsServerKeyLimit(t *testing.T) {
 		harness.respondAcquire(
 			replica,
 			request,
-			protocol.StatusKeyLimitReached,
+			redleasev1.LeaseStatusKEY_LIMIT_REACHED,
 			0,
 		)
 	}
@@ -182,7 +183,7 @@ func TestClientAcquireExpiredQuorumDoesCleanupOnAllFive(t *testing.T) {
 	for replica, request := range requests {
 		// safetyMargin is 100ms, so this candidate is already at the strict
 		// validity boundary even though every server returned OK.
-		harness.respondAcquire(replica, request, protocol.StatusOK, 100)
+		harness.respondAcquire(replica, request, redleasev1.LeaseStatusOK, 100)
 	}
 
 	failed := receiveAcquireCallResult(t, result)
@@ -196,9 +197,9 @@ func TestClientAcquireTwoOKThreeBusyCleansSameLeaseIDOnAllFive(t *testing.T) {
 	requests := harness.receiveAcquireRequests(t)
 
 	for replica, request := range requests {
-		status := protocol.StatusBusy
+		status := redleasev1.LeaseStatusBUSY
 		if replica < 2 {
-			status = protocol.StatusOK
+			status = redleasev1.LeaseStatusOK
 		}
 		harness.respondAcquire(replica, request, status, 2_000)
 	}
@@ -214,7 +215,7 @@ func TestClientAcquireCleansImmediatelyWhenQuorumBecomesImpossible(t *testing.T)
 	requests := harness.receiveAcquireRequests(t)
 
 	for replica := range testQuorumSize {
-		harness.respondAcquire(replica, requests[replica], protocol.StatusBusy, 0)
+		harness.respondAcquire(replica, requests[replica], redleasev1.LeaseStatusBUSY, 0)
 	}
 
 	select {
@@ -257,7 +258,7 @@ func TestClientAcquireWaitsForAllFiveSubmissionBarriers(t *testing.T) {
 		requests[replica] = receiveAcquireRequest(t, harness.streams[replica])
 	}
 	for replica := range testQuorumSize {
-		harness.respondAcquire(replica, requests[replica], protocol.StatusOK, 2_000)
+		harness.respondAcquire(replica, requests[replica], redleasev1.LeaseStatusOK, 2_000)
 	}
 
 	select {
@@ -267,7 +268,7 @@ func TestClientAcquireWaitsForAllFiveSubmissionBarriers(t *testing.T) {
 	}
 
 	blockerRequest := receiveSentRequest(t, harness.streams[4])
-	harness.respondAcquire(4, blockerRequest, protocol.StatusBusy, 0)
+	harness.respondAcquire(4, blockerRequest, redleasev1.LeaseStatusBUSY, 0)
 	if _, err := blocker.await(context.Background()); err != nil {
 		t.Fatalf("await blocker: %v", err)
 	}
@@ -278,8 +279,8 @@ func TestClientAcquireWaitsForAllFiveSubmissionBarriers(t *testing.T) {
 	}
 
 	requests[4] = receiveAcquireRequest(t, harness.streams[4])
-	harness.respondAcquire(3, requests[3], protocol.StatusBusy, 0)
-	harness.respondAcquire(4, requests[4], protocol.StatusBusy, 0)
+	harness.respondAcquire(3, requests[3], redleasev1.LeaseStatusBUSY, 0)
+	harness.respondAcquire(4, requests[4], redleasev1.LeaseStatusBUSY, 0)
 }
 
 func TestClientAcquireCanUseQuorumAfterUnacceptedSubmitTimesOut(t *testing.T) {
@@ -299,7 +300,7 @@ func TestClientAcquireCanUseQuorumAfterUnacceptedSubmitTimesOut(t *testing.T) {
 		requests[replica] = receiveAcquireRequest(t, harness.streams[replica])
 	}
 	for replica := range testQuorumSize {
-		harness.respondAcquire(replica, requests[replica], protocol.StatusOK, 2_000)
+		harness.respondAcquire(replica, requests[replica], redleasev1.LeaseStatusOK, 2_000)
 	}
 
 	acquired := receiveAcquireCallResult(t, result)
@@ -308,12 +309,12 @@ func TestClientAcquireCanUseQuorumAfterUnacceptedSubmitTimesOut(t *testing.T) {
 	}
 
 	blockerRequest := receiveSentRequest(t, harness.streams[4])
-	harness.respondAcquire(4, blockerRequest, protocol.StatusBusy, 0)
+	harness.respondAcquire(4, blockerRequest, redleasev1.LeaseStatusBUSY, 0)
 	if _, err := blocker.await(context.Background()); err != nil {
 		t.Fatalf("await blocker: %v", err)
 	}
 	for replica := testQuorumSize; replica < len(requests); replica++ {
-		harness.respondAcquire(replica, requests[replica], protocol.StatusBusy, 0)
+		harness.respondAcquire(replica, requests[replica], redleasev1.LeaseStatusBUSY, 0)
 	}
 }
 
@@ -323,7 +324,7 @@ func TestClientAcquireLateResponsesOnlyUpdateConfirmedReplicas(t *testing.T) {
 	requests := harness.receiveAcquireRequests(t)
 
 	for replica := range testQuorumSize {
-		harness.respondAcquire(replica, requests[replica], protocol.StatusOK, 1_000)
+		harness.respondAcquire(replica, requests[replica], redleasev1.LeaseStatusOK, 1_000)
 	}
 	acquired := receiveAcquireCallResult(t, result)
 	if acquired.err != nil {
@@ -331,8 +332,8 @@ func TestClientAcquireLateResponsesOnlyUpdateConfirmedReplicas(t *testing.T) {
 	}
 	originalValidUntil := leaseValidUntil(acquired.lease)
 
-	harness.respondAcquire(3, requests[3], protocol.StatusAlreadyOwned, 5_000)
-	harness.respondAcquire(4, requests[4], protocol.StatusOK, 5_000)
+	harness.respondAcquire(3, requests[3], redleasev1.LeaseStatusALREADY_OWNED, 5_000)
+	harness.respondAcquire(4, requests[4], redleasev1.LeaseStatusOK, 5_000)
 	waitForConfirmedReplicas(t, acquired.lease, [testServerCount]bool{true, true, true, true, true})
 
 	if got := leaseValidUntil(acquired.lease); !got.Equal(originalValidUntil) {
@@ -361,7 +362,7 @@ func TestClientAcquireConcurrentCalls(t *testing.T) {
 			defer responders.Done()
 			for range calls {
 				request := receiveAcquireRequest(t, stream)
-				harness.respondAcquire(replica, request, protocol.StatusOK, 2_000)
+				harness.respondAcquire(replica, request, redleasev1.LeaseStatusOK, 2_000)
 			}
 		}()
 	}
@@ -423,7 +424,7 @@ func (h *acquireHarness) receiveAcquireRequests(t *testing.T) [testServerCount]o
 func (h *acquireHarness) respondAcquire(
 	replica int,
 	request observedRequest,
-	status protocol.Status,
+	status redleasev1.LeaseStatus,
 	ttl uint64,
 ) {
 	h.streams[replica].receive <- fakeReceive{
@@ -453,7 +454,7 @@ func (h *acquireHarness) receiveAndRespondToCleanup(
 			response: protocol.Response{
 				RequestID: release.RequestID,
 				Operation: protocol.OperationRelease,
-				Status:    protocol.StatusOK,
+				Status:    redleasev1.LeaseStatusOK,
 			},
 		}
 	}
@@ -497,7 +498,7 @@ func receiveAcquireRequest(t *testing.T, stream *fakeLeaseClientStream) observed
 func respondAcquireOnStream(
 	stream *fakeLeaseClientStream,
 	request observedRequest,
-	status protocol.Status,
+	status redleasev1.LeaseStatus,
 	ttl uint64,
 ) {
 	stream.receive <- fakeReceive{

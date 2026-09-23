@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
@@ -98,7 +99,7 @@ func benchmarkResponse(request observedRequest) protocol.Response {
 	response := protocol.Response{
 		RequestID: request.RequestID,
 		Operation: request.Operation,
-		Status:    protocol.StatusOK,
+		Status:    redleasev1.LeaseStatusOK,
 	}
 	switch request.Operation {
 	case protocol.OperationAcquire, protocol.OperationRenew:

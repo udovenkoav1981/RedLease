@@ -443,7 +443,7 @@ func (s *Server) decodeRequest(
 		return operation{}, protocol.Response{
 			RequestID: request.RequestId(),
 			Operation: protocol.OperationGetTTL,
-			Status:    protocol.StatusOK,
+			Status:    redleasev1.LeaseStatusOK,
 			TTLMS:     s.config.MaxTTL,
 		}, true, nil
 

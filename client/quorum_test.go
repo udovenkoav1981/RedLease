@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
@@ -65,7 +66,7 @@ func TestAcquireQuorumRejectsExpiredValidity(t *testing.T) {
 }
 
 func TestAcquireQuorumAcceptsAlreadyOwned(t *testing.T) {
-	if !isSuccessfulAcquire(protocol.StatusAlreadyOwned) {
+	if !isSuccessfulAcquire(redleasev1.LeaseStatusALREADY_OWNED) {
 		t.Fatal("ALREADY_OWNED did not count as an Acquire success")
 	}
 }

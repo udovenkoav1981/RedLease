@@ -16,10 +16,10 @@ import (
 func TestResponseRoundTrip(t *testing.T) {
 	t.Parallel()
 	tests := []Response{
-		{RequestID: 1, Operation: OperationAcquire, Status: StatusAlreadyOwned, TTLMS: 2},
-		{RequestID: 3, Operation: OperationRenew, Status: StatusStale, TTLMS: 4},
-		{RequestID: 5, Operation: OperationRelease, Status: StatusOK},
-		{RequestID: 6, Operation: OperationGetTTL, Status: StatusOK, TTLMS: 7},
+		{RequestID: 1, Operation: OperationAcquire, Status: redleasev1.LeaseStatusALREADY_OWNED, TTLMS: 2},
+		{RequestID: 3, Operation: OperationRenew, Status: redleasev1.LeaseStatusSTALE, TTLMS: 4},
+		{RequestID: 5, Operation: OperationRelease, Status: redleasev1.LeaseStatusOK},
+		{RequestID: 6, Operation: OperationGetTTL, Status: redleasev1.LeaseStatusOK, TTLMS: 7},
 	}
 	for _, want := range tests {
 		frame := testResponseFrame(want)

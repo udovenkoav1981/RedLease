@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
@@ -74,7 +75,7 @@ func BenchmarkServerApplyAcquireRelease(b *testing.B) {
 						leaseID:        id,
 						requestedTTLMS: server.config.MaxTTL,
 					})
-					if status := acquire.Status; status != protocol.StatusOK {
+					if status := acquire.Status; status != redleasev1.LeaseStatusOK {
 						b.Errorf("Acquire status = %s", status)
 						return
 					}
@@ -85,7 +86,7 @@ func BenchmarkServerApplyAcquireRelease(b *testing.B) {
 						key:       key,
 						leaseID:   id,
 					})
-					if status := release.Status; status != protocol.StatusOK {
+					if status := release.Status; status != redleasev1.LeaseStatusOK {
 						b.Errorf("Release status = %s", status)
 						return
 					}
@@ -169,7 +170,7 @@ func BenchmarkServerAcquireReleaseQueue(b *testing.B) {
 		}) {
 			b.Fatal("dispatch Acquire")
 		}
-		if status := (<-responses).Status; status != protocol.StatusOK {
+		if status := (<-responses).Status; status != redleasev1.LeaseStatusOK {
 			b.Fatalf("Acquire status = %s", status)
 		}
 
@@ -179,7 +180,7 @@ func BenchmarkServerAcquireReleaseQueue(b *testing.B) {
 		}) {
 			b.Fatal("dispatch Release")
 		}
-		if status := (<-responses).Status; status != protocol.StatusOK {
+		if status := (<-responses).Status; status != redleasev1.LeaseStatusOK {
 			b.Fatalf("Release status = %s", status)
 		}
 	}

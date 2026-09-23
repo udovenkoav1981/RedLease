@@ -21,18 +21,18 @@ func TestStreamGenerationCorrelatesOutOfOrderResponses(t *testing.T) {
 	secondRequest := receiveSentRequest(t, stream)
 
 	stream.receive <- fakeReceive{
-		response: streamResponse(secondRequest.RequestID, protocol.StatusBusy),
+		response: streamResponse(secondRequest.RequestID, redleasev1.LeaseStatusBUSY),
 	}
 	stream.receive <- fakeReceive{
-		response: streamResponse(firstRequest.RequestID, protocol.StatusOK),
+		response: streamResponse(firstRequest.RequestID, redleasev1.LeaseStatusOK),
 	}
 
 	second := receiveCallResult(t, secondResult)
 	first := receiveCallResult(t, firstResult)
-	if second.err != nil || second.response.Status != protocol.StatusBusy {
+	if second.err != nil || second.response.Status != redleasev1.LeaseStatusBUSY {
 		t.Fatalf("unexpected second result: %+v", second)
 	}
-	if first.err != nil || first.response.Status != protocol.StatusOK {
+	if first.err != nil || first.response.Status != redleasev1.LeaseStatusOK {
 		t.Fatalf("unexpected first result: %+v", first)
 	}
 	if firstRequest.RequestID >= secondRequest.RequestID {
@@ -46,7 +46,7 @@ func TestStreamGenerationCallRemainsSubmitAndAwaitWrapper(t *testing.T) {
 	result := startStreamCall(generation, acquireStreamRequest(1))
 	request := receiveSentRequest(t, stream)
 	stream.receive <- fakeReceive{
-		response: streamResponse(request.RequestID, protocol.StatusOK),
+		response: streamResponse(request.RequestID, redleasev1.LeaseStatusOK),
 	}
 
 	received := receiveCallResult(t, result)
@@ -71,7 +71,7 @@ func TestStreamFutureBuffersResponseBeforeAwait(t *testing.T) {
 	}
 	request := receiveSentRequest(t, stream)
 	stream.receive <- fakeReceive{
-		response: streamResponse(request.RequestID, protocol.StatusOK),
+		response: streamResponse(request.RequestID, redleasev1.LeaseStatusOK),
 	}
 
 	// Observe that Recv completed the buffered future before await is invoked,
@@ -113,7 +113,7 @@ func TestStreamSubmitReturnsAfterWriterAcceptanceBeforeSendCompletes(t *testing.
 
 	request := receiveSentRequest(t, stream)
 	stream.receive <- fakeReceive{
-		response: streamResponse(request.RequestID, protocol.StatusOK),
+		response: streamResponse(request.RequestID, redleasev1.LeaseStatusOK),
 	}
 	if _, err := submitted.future.await(context.Background()); err != nil {
 		t.Fatalf("await: %v", err)
@@ -160,7 +160,7 @@ func TestStreamSubmitCancellationBeforeWriterAcceptanceDoesNotSend(t *testing.T)
 
 	firstRequest := receiveSentRequest(t, stream)
 	stream.receive <- fakeReceive{
-		response: streamResponse(firstRequest.RequestID, protocol.StatusOK),
+		response: streamResponse(firstRequest.RequestID, redleasev1.LeaseStatusOK),
 	}
 	if _, err := first.await(context.Background()); err != nil {
 		t.Fatalf("first await: %v", err)
@@ -191,7 +191,7 @@ func TestStreamSubmitCancellationAfterWriterAcceptanceReturnsFuture(t *testing.T
 
 	request := receiveSentRequest(t, stream)
 	stream.receive <- fakeReceive{
-		response: streamResponse(request.RequestID, protocol.StatusOK),
+		response: streamResponse(request.RequestID, redleasev1.LeaseStatusOK),
 	}
 	if _, err := submitted.future.await(context.Background()); err != nil {
 		t.Fatalf("await: %v", err)
@@ -232,11 +232,11 @@ func TestStreamGenerationTimeoutAndLateResponseDoNotBlockAnotherCall(t *testing.
 
 	// The response arrives after its pending entry has been removed and must be
 	// ignored. A later request on the same generation still completes normally.
-	stream.receive <- fakeReceive{response: streamResponse(firstRequest.RequestID, protocol.StatusOK)}
+	stream.receive <- fakeReceive{response: streamResponse(firstRequest.RequestID, redleasev1.LeaseStatusOK)}
 
 	secondResult := startStreamCall(generation, acquireStreamRequest(2))
 	secondRequest := receiveSentRequest(t, stream)
-	stream.receive <- fakeReceive{response: streamResponse(secondRequest.RequestID, protocol.StatusOK)}
+	stream.receive <- fakeReceive{response: streamResponse(secondRequest.RequestID, redleasev1.LeaseStatusOK)}
 
 	second := receiveCallResult(t, secondResult)
 	if second.err != nil {
@@ -305,7 +305,7 @@ func TestStreamGenerationConcurrentCalls(t *testing.T) {
 	}
 	for i := calls - 1; i >= 0; i-- {
 		stream.receive <- fakeReceive{
-			response: streamResponse(requests[i].RequestID, protocol.StatusOK),
+			response: streamResponse(requests[i].RequestID, redleasev1.LeaseStatusOK),
 		}
 	}
 	for _, resultChannel := range results {
@@ -557,7 +557,7 @@ func acquireStreamRequest(key uint64) *outboundConnectionRequest {
 	return testRequestClient.newAcquireRequest(key, 0, 0)
 }
 
-func streamResponse(requestID uint64, status protocol.Status) protocol.Response {
+func streamResponse(requestID uint64, status redleasev1.LeaseStatus) protocol.Response {
 	return protocol.Response{
 		RequestID: requestID,
 		Operation: protocol.OperationAcquire,

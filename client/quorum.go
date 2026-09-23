@@ -3,6 +3,7 @@ package client
 import (
 	"time"
 
+	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
@@ -45,6 +46,6 @@ func candidateValidUntil(operationStart time.Time, ttlMS uint64) time.Time {
 	return operationStart.Add(time.Duration(ttlMS-safetyMarginMS) * time.Millisecond)
 }
 
-func isSuccessfulAcquire(status protocol.Status) bool {
-	return status == protocol.StatusOK || status == protocol.StatusAlreadyOwned
+func isSuccessfulAcquire(status redleasev1.LeaseStatus) bool {
+	return status == redleasev1.LeaseStatusOK || status == redleasev1.LeaseStatusALREADY_OWNED
 }

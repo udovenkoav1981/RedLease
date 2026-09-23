@@ -57,7 +57,7 @@ func DecodeResponse(frame []byte) (response Response, err error) {
 		if root.GetTtl(&getTTL) == nil {
 			return Response{}, fmt.Errorf("%w: GetTTL response is missing", ErrMalformedFrame)
 		}
-		response.Status = StatusOK
+		response.Status = redleasev1.LeaseStatusOK
 		response.TTLMS = getTTL.ConfiguredMaxTtlMs()
 	default:
 		return Response{}, fmt.Errorf("%w: unsupported response result %d", ErrMalformedFrame, root.Result())
@@ -80,6 +80,6 @@ func ValidateFrame(frame []byte) error {
 	return nil
 }
 
-func validStatus(status Status) bool {
-	return status >= StatusOK && status <= StatusKeyLimitReached
+func validStatus(status redleasev1.LeaseStatus) bool {
+	return status >= redleasev1.LeaseStatusOK && status <= redleasev1.LeaseStatusKEY_LIMIT_REACHED
 }

@@ -155,7 +155,7 @@ func (c *Client) Acquire(
 				}
 			} else {
 				switch result.response.Status {
-				case protocol.StatusKeyLimitReached:
+				case redleasev1.LeaseStatusKEY_LIMIT_REACHED:
 					keyLimitSeen = true
 				default:
 					// Other statuses are represented by notAcquiredError below.

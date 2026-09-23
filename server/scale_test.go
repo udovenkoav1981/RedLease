@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
@@ -20,7 +21,7 @@ func TestServerHandlesTenThousandActiveLeases(t *testing.T) {
 		t,
 		responses,
 		leaseCount,
-		protocol.StatusOK,
+		redleasev1.LeaseStatusOK,
 	)
 	if got := s.keys.Load(); got != leaseCount {
 		t.Fatalf("resident keys = %d, want %d", got, leaseCount)
@@ -39,7 +40,7 @@ func TestServerHandlesTenThousandActiveLeases(t *testing.T) {
 	}) {
 		t.Fatal("dispatch over-limit Acquire")
 	}
-	if status := (<-responses).Status; status != protocol.StatusKeyLimitReached {
+	if status := (<-responses).Status; status != redleasev1.LeaseStatusKEY_LIMIT_REACHED {
 		t.Fatalf("10,001st Acquire = %s, want KEY_LIMIT_REACHED", status)
 	}
 
@@ -50,7 +51,7 @@ func TestServerHandlesTenThousandActiveLeases(t *testing.T) {
 		t,
 		responses,
 		leaseCount,
-		protocol.StatusBusy,
+		redleasev1.LeaseStatusBUSY,
 	)
 }
 
@@ -86,7 +87,7 @@ func assertAcquireBatchStatus(
 	t *testing.T,
 	responses <-chan protocol.Response,
 	count int,
-	want protocol.Status,
+	want redleasev1.LeaseStatus,
 ) {
 	t.Helper()
 	deadline := time.NewTimer(5 * time.Second)

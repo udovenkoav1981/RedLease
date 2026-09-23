@@ -16,22 +16,11 @@ const (
 	OperationGetTTL  = redleasev1.ClientOperationGET_TTL
 )
 
-type Status = redleasev1.LeaseStatus
-
-const (
-	StatusOK              = redleasev1.LeaseStatusOK
-	StatusAlreadyOwned    = redleasev1.LeaseStatusALREADY_OWNED
-	StatusBusy            = redleasev1.LeaseStatusBUSY
-	StatusStale           = redleasev1.LeaseStatusSTALE
-	StatusNotReady        = redleasev1.LeaseStatusNOT_READY
-	StatusKeyLimitReached = redleasev1.LeaseStatusKEY_LIMIT_REACHED
-)
-
 // Response is the owned scalar representation returned by a server. TTLMS is
 // the effective TTL for Acquire/Renew and configuredMaxTTL for GetTTL.
 type Response struct {
 	RequestID uint64
 	Operation Operation
-	Status    Status
+	Status    redleasev1.LeaseStatus
 	TTLMS     uint64
 }

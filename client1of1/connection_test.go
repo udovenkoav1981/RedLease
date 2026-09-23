@@ -431,7 +431,7 @@ func TestFailedAcquireQueuesCleanupRelease(t *testing.T) {
 		connection.responses <- protocol.Response{
 			RequestID: request.RequestID,
 			Operation: protocol.OperationAcquire,
-			Status:    protocol.StatusBusy,
+			Status:    redleasev1.LeaseStatusBUSY,
 		}
 	}()
 
@@ -596,6 +596,6 @@ func releaseServerResponse(requestID uint64) protocol.Response {
 	return protocol.Response{
 		RequestID: requestID,
 		Operation: protocol.OperationRelease,
-		Status:    protocol.StatusOK,
+		Status:    redleasev1.LeaseStatusOK,
 	}
 }

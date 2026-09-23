@@ -17,7 +17,7 @@ type outboundResponse struct {
 }
 
 func (s *Server) newOutboundResponse(response protocol.Response) (*outboundResponse, error) {
-	if response.Status > protocol.StatusKeyLimitReached {
+	if response.Status > redleasev1.LeaseStatusKEY_LIMIT_REACHED {
 		return nil, fmt.Errorf("unsupported lease status %d", response.Status)
 	}
 	if response.Operation < protocol.OperationAcquire || response.Operation > protocol.OperationGetTTL {

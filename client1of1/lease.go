@@ -114,14 +114,14 @@ func (l *Lease) acceptAcquireResponse(
 		return false, errors.New("Acquire received a non-Acquire response")
 	}
 	switch response.Status {
-	case protocol.StatusOK, protocol.StatusAlreadyOwned:
+	case redleasev1.LeaseStatusOK, redleasev1.LeaseStatusALREADY_OWNED:
 		validUntil := candidateValidUntil(l.now, response.TTLMS)
 		if !time.Now().Before(validUntil) {
 			return false, nil
 		}
 		l.validUntil = validUntil
 		return true, nil
-	case protocol.StatusKeyLimitReached:
+	case redleasev1.LeaseStatusKEY_LIMIT_REACHED:
 		return false, ErrKeyLimitReached
 	default:
 		return false, nil
@@ -174,7 +174,7 @@ func (l *Lease) acceptRenewResponse(
 	if response.Operation != protocol.OperationRenew {
 		return false, errors.New("Renew received a non-Renew response")
 	}
-	if response.Status != protocol.StatusOK {
+	if response.Status != redleasev1.LeaseStatusOK {
 		return false, nil
 	}
 	validUntil := candidateValidUntil(l.now, response.TTLMS)

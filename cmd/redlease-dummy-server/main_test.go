@@ -71,7 +71,7 @@ func TestStatelessPeerRespondsToAllOperations(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if response.RequestID != uint64(index+1) || response.Status != protocol.StatusOK || response.TTLMS != item.wantTTL {
+		if response.RequestID != uint64(index+1) || response.Status != redleasev1.LeaseStatusOK || response.TTLMS != item.wantTTL {
 			t.Errorf("response %d = %+v; want ID=%d, status OK, TTL=%d", index, response, index+1, item.wantTTL)
 		}
 	}

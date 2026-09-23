@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
@@ -40,7 +41,7 @@ func TestLeaseRenewExtendsValidity(t *testing.T) {
 	result := startLeaseRenew(lease, context.Background(), 3_000)
 	requests := harness.receiveRenewRequests(t)
 	for replica := range testQuorumSize {
-		harness.respondRenew(replica, requests[replica], protocol.StatusOK, 3_000)
+		harness.respondRenew(replica, requests[replica], redleasev1.LeaseStatusOK, 3_000)
 	}
 
 	if err := receiveRenewResult(t, result); err != nil {
@@ -58,7 +59,7 @@ func TestLeaseRenewExtendsValidity(t *testing.T) {
 	}
 
 	for replica := testQuorumSize; replica < testServerCount; replica++ {
-		harness.respondRenew(replica, requests[replica], protocol.StatusOK, 3_000)
+		harness.respondRenew(replica, requests[replica], redleasev1.LeaseStatusOK, 3_000)
 	}
 }
 
@@ -76,7 +77,7 @@ func TestLeaseNowIsAcquireStartAndChangesAtRenewStart(t *testing.T) {
 	}
 
 	for replica, request := range requests {
-		harness.respondRenew(replica, request, protocol.StatusOK, 2_000)
+		harness.respondRenew(replica, request, redleasev1.LeaseStatusOK, 2_000)
 	}
 	if err := receiveRenewResult(t, result); err != nil {
 		t.Fatalf("Renew: %v", err)
@@ -96,7 +97,7 @@ func TestLateAcquireResponseKeepsAcquireNowAfterRenewStarts(t *testing.T) {
 		harness.respondAcquire(
 			replica,
 			acquireRequests[replica],
-			protocol.StatusOK,
+			redleasev1.LeaseStatusOK,
 			2_000,
 		)
 	}
@@ -113,7 +114,7 @@ func TestLateAcquireResponseKeepsAcquireNowAfterRenewStarts(t *testing.T) {
 		harness.respondRenew(
 			replica,
 			renewRequests[replica],
-			protocol.StatusOK,
+			redleasev1.LeaseStatusOK,
 			2_000,
 		)
 	}
@@ -124,13 +125,13 @@ func TestLateAcquireResponseKeepsAcquireNowAfterRenewStarts(t *testing.T) {
 	harness.respondAcquire(
 		3,
 		acquireRequests[3],
-		protocol.StatusOK,
+		redleasev1.LeaseStatusOK,
 		1_000,
 	)
 	harness.respondAcquire(
 		4,
 		acquireRequests[4],
-		protocol.StatusBusy,
+		redleasev1.LeaseStatusBUSY,
 		0,
 	)
 
@@ -146,9 +147,9 @@ func TestLeaseFailedRenewKeepsPreviousValidity(t *testing.T) {
 	result := startLeaseRenew(lease, context.Background(), 4_000)
 	requests := harness.receiveRenewRequests(t)
 	for replica, request := range requests {
-		status := protocol.StatusStale
+		status := redleasev1.LeaseStatusSTALE
 		if replica < 2 {
-			status = protocol.StatusOK
+			status = redleasev1.LeaseStatusOK
 		}
 		harness.respondRenew(replica, request, status, 4_000)
 	}
@@ -188,7 +189,7 @@ func TestLeaseRenewCanUseQuorumAfterUnacceptedSubmitTimesOut(t *testing.T) {
 		requests[replica] = request
 	}
 	for replica := range testQuorumSize {
-		harness.respondRenew(replica, requests[replica], protocol.StatusOK, 3_000)
+		harness.respondRenew(replica, requests[replica], redleasev1.LeaseStatusOK, 3_000)
 	}
 
 	if err := receiveRenewResult(t, result); err != nil {
@@ -196,7 +197,7 @@ func TestLeaseRenewCanUseQuorumAfterUnacceptedSubmitTimesOut(t *testing.T) {
 	}
 
 	blockerRequest := receiveSentRequest(t, harness.streams[4])
-	harness.respondAcquire(4, blockerRequest, protocol.StatusBusy, 0)
+	harness.respondAcquire(4, blockerRequest, redleasev1.LeaseStatusBUSY, 0)
 	if _, err := blocker.await(context.Background()); err != nil {
 		t.Fatalf("await blocker: %v", err)
 	}
@@ -217,7 +218,7 @@ func TestLeaseConcurrentRenewAndReleasePreservesWireOrderAndNoResurrection(t *te
 	// These responses arrive after Release has transitioned the lease out of
 	// ACTIVE. They must neither restore validity nor confirmations.
 	for replica, request := range renewRequests {
-		harness.respondRenew(replica, request, protocol.StatusOK, 4_000)
+		harness.respondRenew(replica, request, redleasev1.LeaseStatusOK, 4_000)
 	}
 	err := receiveRenewResult(t, renewResult)
 	if !errors.Is(err, ErrNotRenewed) || !errors.Is(err, ErrLeaseReleased) {
@@ -276,10 +277,10 @@ func TestFailedAcquireCleanupRetriesAfterReplicaReconnect(t *testing.T) {
 	result := startClientAcquire(harness.client, context.Background(), uint64(1), 2_000)
 	requests := harness.receiveAcquireRequests(t)
 
-	harness.respondAcquire(0, requests[0], protocol.StatusOK, 2_000)
-	harness.respondAcquire(1, requests[1], protocol.StatusOK, 2_000)
-	harness.respondAcquire(2, requests[2], protocol.StatusBusy, 0)
-	harness.respondAcquire(3, requests[3], protocol.StatusBusy, 0)
+	harness.respondAcquire(0, requests[0], redleasev1.LeaseStatusOK, 2_000)
+	harness.respondAcquire(1, requests[1], redleasev1.LeaseStatusOK, 2_000)
+	harness.respondAcquire(2, requests[2], redleasev1.LeaseStatusBUSY, 0)
+	harness.respondAcquire(3, requests[3], redleasev1.LeaseStatusBUSY, 0)
 	harness.streams[4].receive <- fakeReceive{err: errors.New("disconnect before cleanup")}
 
 	failed := receiveAcquireCallResult(t, result)
@@ -309,14 +310,14 @@ func TestConfirmedReplicaExpiresIndependently(t *testing.T) {
 	requests := harness.receiveAcquireRequests(t)
 
 	for replica := range testQuorumSize {
-		harness.respondAcquire(replica, requests[replica], protocol.StatusOK, 2_000)
+		harness.respondAcquire(replica, requests[replica], redleasev1.LeaseStatusOK, 2_000)
 	}
 	acquired := receiveAcquireCallResult(t, result)
 	if acquired.err != nil {
 		t.Fatalf("Acquire: %v", acquired.err)
 	}
-	harness.respondAcquire(3, requests[3], protocol.StatusOK, 500)
-	harness.respondAcquire(4, requests[4], protocol.StatusOK, 2_000)
+	harness.respondAcquire(3, requests[3], redleasev1.LeaseStatusOK, 500)
+	harness.respondAcquire(4, requests[4], redleasev1.LeaseStatusOK, 2_000)
 	waitForConfirmedReplicas(t, acquired.lease, [testServerCount]bool{true, true, true, true, true})
 
 	acquired.lease.stateMu.Lock()
@@ -345,7 +346,7 @@ func acquireFullyConfirmedLease(
 	result := startClientAcquire(harness.client, context.Background(), key, ttl)
 	requests := harness.receiveAcquireRequests(t)
 	for replica, request := range requests {
-		harness.respondAcquire(replica, request, protocol.StatusOK, ttl)
+		harness.respondAcquire(replica, request, redleasev1.LeaseStatusOK, ttl)
 	}
 	acquired := receiveAcquireCallResult(t, result)
 	if acquired.err != nil {
@@ -388,7 +389,7 @@ func (h *acquireHarness) receiveRenewRequests(t *testing.T) [testServerCount]obs
 func (h *acquireHarness) respondRenew(
 	replica int,
 	request observedRequest,
-	status protocol.Status,
+	status redleasev1.LeaseStatus,
 	ttl uint64,
 ) {
 	h.streams[replica].receive <- fakeReceive{
@@ -415,7 +416,7 @@ func (h *acquireHarness) respondRelease(replica int, request observedRequest) {
 		response: protocol.Response{
 			RequestID: request.RequestID,
 			Operation: protocol.OperationRelease,
-			Status:    protocol.StatusOK,
+			Status:    redleasev1.LeaseStatusOK,
 		},
 	}
 }

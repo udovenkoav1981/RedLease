@@ -236,7 +236,7 @@ func waitForActive(parent context.Context, config *options, bootID uint32) error
 			return fmt.Errorf("readiness request %d: unexpected response operation %d", response.RequestID, response.Operation)
 		}
 		switch response.Status {
-		case protocol.StatusOK:
+		case redleasev1.LeaseStatusOK:
 			if err := bufferRelease(connection, builder, requestID+1, 0, bootID, sequence); err != nil {
 				return fmt.Errorf("send readiness Release: %w", err)
 			}
@@ -247,11 +247,11 @@ func waitForActive(parent context.Context, config *options, bootID uint32) error
 			if err != nil {
 				return fmt.Errorf("receive readiness Release: %w", err)
 			}
-			if release.Operation != protocol.OperationRelease || release.Status != protocol.StatusOK {
+			if release.Operation != protocol.OperationRelease || release.Status != redleasev1.LeaseStatusOK {
 				return fmt.Errorf("readiness Release response: operation=%d status=%d", release.Operation, release.Status)
 			}
 			return nil
-		case protocol.StatusNotReady, protocol.StatusBusy:
+		case redleasev1.LeaseStatusNOT_READY, redleasev1.LeaseStatusBUSY:
 			timer := time.NewTimer(25 * time.Millisecond)
 			select {
 			case <-timer.C:
@@ -380,7 +380,7 @@ func receiveResponses(connection *transport.Connection, counters *responseCounte
 		if err != nil {
 			return fmt.Errorf("receive response: %w", err)
 		}
-		if response.Status != protocol.StatusOK {
+		if response.Status != redleasev1.LeaseStatusOK {
 			return fmt.Errorf("request %d: status %d", response.RequestID, response.Status)
 		}
 		switch response.Operation {

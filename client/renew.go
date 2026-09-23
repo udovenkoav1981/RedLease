@@ -119,7 +119,7 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 				if firstFailure == nil {
 					firstFailure = result.err
 				}
-			} else if result.response.Status != protocol.StatusOK {
+			} else if result.response.Status != redleasev1.LeaseStatusOK {
 				l.clearConfirmed(result.replica)
 			} else {
 				now := time.Now()
@@ -234,7 +234,7 @@ func (l *Lease) collectRemainingRenewResults(
 	for range remaining {
 		result := <-results
 		if result.err != nil ||
-			result.response.Status != protocol.StatusOK {
+			result.response.Status != redleasev1.LeaseStatusOK {
 			l.clearConfirmed(result.replica)
 			continue
 		}
