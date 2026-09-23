@@ -214,7 +214,7 @@ func (l *Lease) submitRenew(
 		results <- renewReplicaResult{replica: replica, err: err}
 		return
 	}
-	if response.Operation != protocol.OperationRenew {
+	if response.Operation != redleasev1.ClientOperationRENEW {
 		results <- renewReplicaResult{
 			replica: replica,
 			err:     errors.New("Renew received a non-Renew response"),

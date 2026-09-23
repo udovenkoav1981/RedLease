@@ -29,7 +29,7 @@ func DecodeResponse(frame []byte) (response Response, err error) {
 	response.RequestID = root.RequestId()
 	switch root.Result() {
 	case redleasev1.ServerResultACQUIRE:
-		response.Operation = OperationAcquire
+		response.Operation = redleasev1.ClientOperationACQUIRE
 		var acquire redleasev1.AcquireResponse
 		if root.Acquire(&acquire) == nil {
 			return Response{}, fmt.Errorf("%w: Acquire response is missing", ErrMalformedFrame)
@@ -37,7 +37,7 @@ func DecodeResponse(frame []byte) (response Response, err error) {
 		response.Status = acquire.Status()
 		response.TTLMS = acquire.TtlMs()
 	case redleasev1.ServerResultRENEW:
-		response.Operation = OperationRenew
+		response.Operation = redleasev1.ClientOperationRENEW
 		var renew redleasev1.RenewResponse
 		if root.Renew(&renew) == nil {
 			return Response{}, fmt.Errorf("%w: Renew response is missing", ErrMalformedFrame)
@@ -45,14 +45,14 @@ func DecodeResponse(frame []byte) (response Response, err error) {
 		response.Status = renew.Status()
 		response.TTLMS = renew.TtlMs()
 	case redleasev1.ServerResultRELEASE:
-		response.Operation = OperationRelease
+		response.Operation = redleasev1.ClientOperationRELEASE
 		var release redleasev1.ReleaseResponse
 		if root.Release(&release) == nil {
 			return Response{}, fmt.Errorf("%w: Release response is missing", ErrMalformedFrame)
 		}
 		response.Status = release.Status()
 	case redleasev1.ServerResultGET_TTL:
-		response.Operation = OperationGetTTL
+		response.Operation = redleasev1.ClientOperationGET_TTL
 		var getTTL redleasev1.GetTTLResponse
 		if root.GetTtl(&getTTL) == nil {
 			return Response{}, fmt.Errorf("%w: GetTTL response is missing", ErrMalformedFrame)

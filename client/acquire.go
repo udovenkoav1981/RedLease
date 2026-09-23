@@ -222,7 +222,7 @@ func (c *Client) submitAcquire(
 		results <- acquireReplicaResult{replica: replica, err: err}
 		return
 	}
-	if response.Operation != protocol.OperationAcquire {
+	if response.Operation != redleasev1.ClientOperationACQUIRE {
 		results <- acquireReplicaResult{
 			replica: replica,
 			err:     errors.New("Acquire received a non-Acquire response"),

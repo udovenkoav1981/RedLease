@@ -102,9 +102,9 @@ func benchmarkResponse(request observedRequest) protocol.Response {
 		Status:    redleasev1.LeaseStatusOK,
 	}
 	switch request.Operation {
-	case protocol.OperationAcquire, protocol.OperationRenew:
+	case redleasev1.ClientOperationACQUIRE, redleasev1.ClientOperationRENEW:
 		response.TTLMS = min(request.RequestedTTLMS, uint64(5_000))
-	case protocol.OperationRelease:
+	case redleasev1.ClientOperationRELEASE:
 	default:
 		panic("unexpected benchmark request")
 	}

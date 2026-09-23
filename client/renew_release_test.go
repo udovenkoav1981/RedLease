@@ -183,7 +183,7 @@ func TestLeaseRenewCanUseQuorumAfterUnacceptedSubmitTimesOut(t *testing.T) {
 	var requests [testServerCount - 1]observedRequest
 	for replica := range requests {
 		request := receiveSentRequest(t, harness.streams[replica])
-		if request.Operation != protocol.OperationRenew {
+		if request.Operation != redleasev1.ClientOperationRENEW {
 			t.Fatalf("replica %d request is not Renew: %+v", replica, request)
 		}
 		requests[replica] = request
@@ -378,7 +378,7 @@ func (h *acquireHarness) receiveRenewRequests(t *testing.T) [testServerCount]obs
 	var requests [testServerCount]observedRequest
 	for replica, stream := range h.streams {
 		request := receiveSentRequest(t, stream)
-		if request.Operation != protocol.OperationRenew {
+		if request.Operation != redleasev1.ClientOperationRENEW {
 			t.Fatalf("replica %d request is not Renew: %+v", replica, request)
 		}
 		requests[replica] = request
@@ -395,7 +395,7 @@ func (h *acquireHarness) respondRenew(
 	h.streams[replica].receive <- fakeReceive{
 		response: protocol.Response{
 			RequestID: request.RequestID,
-			Operation: protocol.OperationRenew,
+			Operation: redleasev1.ClientOperationRENEW,
 			Status:    status,
 			TTLMS:     ttl,
 		},
@@ -415,7 +415,7 @@ func (h *acquireHarness) respondRelease(replica int, request observedRequest) {
 	h.streams[replica].receive <- fakeReceive{
 		response: protocol.Response{
 			RequestID: request.RequestID,
-			Operation: protocol.OperationRelease,
+			Operation: redleasev1.ClientOperationRELEASE,
 			Status:    redleasev1.LeaseStatusOK,
 		},
 	}

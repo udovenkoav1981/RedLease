@@ -7,7 +7,6 @@ import (
 	"time"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
-	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
 func TestBackgroundHealingRetriesMissingReplicasToFiveOfFive(t *testing.T) {
@@ -263,7 +262,7 @@ func TestBackgroundHealingDoesNotAcquireAfterReleaseAndReconnect(t *testing.T) {
 	harness.streams[4] = reconnected
 
 	request := receiveSentRequest(t, reconnected)
-	if request.Operation != protocol.OperationRelease {
+	if request.Operation != redleasev1.ClientOperationRELEASE {
 		t.Fatalf("first request after Release and reconnect is not Release: %+v", request)
 	}
 	if !sameLeaseID(request, initial[4]) {

@@ -232,7 +232,7 @@ func waitForActive(parent context.Context, config *options, bootID uint32) error
 		if err != nil {
 			return fmt.Errorf("receive readiness Acquire: %w", err)
 		}
-		if response.Operation != protocol.OperationAcquire {
+		if response.Operation != redleasev1.ClientOperationACQUIRE {
 			return fmt.Errorf("readiness request %d: unexpected response operation %d", response.RequestID, response.Operation)
 		}
 		switch response.Status {
@@ -247,7 +247,7 @@ func waitForActive(parent context.Context, config *options, bootID uint32) error
 			if err != nil {
 				return fmt.Errorf("receive readiness Release: %w", err)
 			}
-			if release.Operation != protocol.OperationRelease || release.Status != redleasev1.LeaseStatusOK {
+			if release.Operation != redleasev1.ClientOperationRELEASE || release.Status != redleasev1.LeaseStatusOK {
 				return fmt.Errorf("readiness Release response: operation=%d status=%d", release.Operation, release.Status)
 			}
 			return nil
@@ -384,9 +384,9 @@ func receiveResponses(connection *transport.Connection, counters *responseCounte
 			return fmt.Errorf("request %d: status %d", response.RequestID, response.Status)
 		}
 		switch response.Operation {
-		case protocol.OperationAcquire:
+		case redleasev1.ClientOperationACQUIRE:
 			counters.acquires.Add(1)
-		case protocol.OperationRelease:
+		case redleasev1.ClientOperationRELEASE:
 			counters.releases.Add(1)
 		default:
 			return fmt.Errorf("request %d: unexpected response operation %d", response.RequestID, response.Operation)

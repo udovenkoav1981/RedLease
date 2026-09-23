@@ -110,7 +110,7 @@ func (l *Lease) acceptAcquireResponse(
 	if err := l.client.cancellationError(caller); err != nil {
 		return false, err
 	}
-	if response.Operation != protocol.OperationAcquire {
+	if response.Operation != redleasev1.ClientOperationACQUIRE {
 		return false, errors.New("Acquire received a non-Acquire response")
 	}
 	switch response.Status {
@@ -171,7 +171,7 @@ func (l *Lease) acceptRenewResponse(
 	if err := l.client.cancellationError(caller); err != nil {
 		return false, err
 	}
-	if response.Operation != protocol.OperationRenew {
+	if response.Operation != redleasev1.ClientOperationRENEW {
 		return false, errors.New("Renew received a non-Renew response")
 	}
 	if response.Status != redleasev1.LeaseStatusOK {

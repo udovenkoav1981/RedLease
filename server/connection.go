@@ -380,7 +380,7 @@ func (s *Server) decodeRequest(
 	}
 	request := redleasev1.GetSizePrefixedRootAsClientRequest(frame, 0)
 	switch request.Operation() {
-	case protocol.OperationAcquire:
+	case redleasev1.ClientOperationACQUIRE:
 		var acquire redleasev1.AcquireRequest
 		if request.Acquire(&acquire) == nil {
 			return operation{}, protocol.Response{}, false, fmt.Errorf(
@@ -400,7 +400,7 @@ func (s *Server) decodeRequest(
 			requestedTTLMS: acquire.RequestedTtlMs(),
 		}, protocol.Response{}, false, nil
 
-	case protocol.OperationRenew:
+	case redleasev1.ClientOperationRENEW:
 		var renew redleasev1.RenewRequest
 		if request.Renew(&renew) == nil {
 			return operation{}, protocol.Response{}, false, fmt.Errorf(
@@ -420,7 +420,7 @@ func (s *Server) decodeRequest(
 			requestedTTLMS: renew.RequestedTtlMs(),
 		}, protocol.Response{}, false, nil
 
-	case protocol.OperationRelease:
+	case redleasev1.ClientOperationRELEASE:
 		var release redleasev1.ReleaseRequest
 		if request.Release(&release) == nil {
 			return operation{}, protocol.Response{}, false, fmt.Errorf(
@@ -439,10 +439,10 @@ func (s *Server) decodeRequest(
 			},
 		}, protocol.Response{}, false, nil
 
-	case protocol.OperationGetTTL:
+	case redleasev1.ClientOperationGET_TTL:
 		return operation{}, protocol.Response{
 			RequestID: request.RequestId(),
-			Operation: protocol.OperationGetTTL,
+			Operation: redleasev1.ClientOperationGET_TTL,
 			Status:    redleasev1.LeaseStatusOK,
 			TTLMS:     s.config.MaxTTL,
 		}, true, nil

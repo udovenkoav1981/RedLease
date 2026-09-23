@@ -16,10 +16,10 @@ import (
 func TestResponseRoundTrip(t *testing.T) {
 	t.Parallel()
 	tests := []Response{
-		{RequestID: 1, Operation: OperationAcquire, Status: redleasev1.LeaseStatusALREADY_OWNED, TTLMS: 2},
-		{RequestID: 3, Operation: OperationRenew, Status: redleasev1.LeaseStatusSTALE, TTLMS: 4},
-		{RequestID: 5, Operation: OperationRelease, Status: redleasev1.LeaseStatusOK},
-		{RequestID: 6, Operation: OperationGetTTL, Status: redleasev1.LeaseStatusOK, TTLMS: 7},
+		{RequestID: 1, Operation: redleasev1.ClientOperationACQUIRE, Status: redleasev1.LeaseStatusALREADY_OWNED, TTLMS: 2},
+		{RequestID: 3, Operation: redleasev1.ClientOperationRENEW, Status: redleasev1.LeaseStatusSTALE, TTLMS: 4},
+		{RequestID: 5, Operation: redleasev1.ClientOperationRELEASE, Status: redleasev1.LeaseStatusOK},
+		{RequestID: 6, Operation: redleasev1.ClientOperationGET_TTL, Status: redleasev1.LeaseStatusOK, TTLMS: 7},
 	}
 	for _, want := range tests {
 		frame := testResponseFrame(want)
@@ -38,26 +38,28 @@ func testResponseFrame(response Response) []byte {
 	redleasev1.ServerResponseStart(builder)
 	redleasev1.ServerResponseAddRequestId(builder, response.RequestID)
 	switch response.Operation {
-	case OperationAcquire:
+	case redleasev1.ClientOperationACQUIRE:
 		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultACQUIRE)
 		redleasev1.ServerResponseAddAcquire(builder, redleasev1.CreateAcquireResponse(
 			builder, response.Status, response.TTLMS,
 		))
-	case OperationRenew:
+	case redleasev1.ClientOperationRENEW:
 		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultRENEW)
 		redleasev1.ServerResponseAddRenew(builder, redleasev1.CreateRenewResponse(
 			builder, response.Status, response.TTLMS,
 		))
-	case OperationRelease:
+	case redleasev1.ClientOperationRELEASE:
 		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultRELEASE)
 		redleasev1.ServerResponseAddRelease(builder, redleasev1.CreateReleaseResponse(
 			builder, response.Status,
 		))
-	case OperationGetTTL:
+	case redleasev1.ClientOperationGET_TTL:
 		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultGET_TTL)
 		redleasev1.ServerResponseAddGetTtl(builder, redleasev1.CreateGetTTLResponse(
 			builder, response.TTLMS,
 		))
+	case redleasev1.ClientOperationNONE:
+		return nil
 	}
 	root := redleasev1.ServerResponseEnd(builder)
 	redleasev1.FinishSizePrefixedServerResponseBuffer(builder, root)
@@ -68,7 +70,7 @@ func TestFrameReader(t *testing.T) {
 	t.Parallel()
 	builder := flatbuffers.NewBuilder(NewBuilderSize)
 	redleasev1.ClientRequestStart(builder)
-	redleasev1.ClientRequestAddOperation(builder, OperationGetTTL)
+	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationGET_TTL)
 	root := redleasev1.ClientRequestEnd(builder)
 	redleasev1.FinishSizePrefixedClientRequestBuffer(builder, root)
 	want := builder.FinishedBytes()

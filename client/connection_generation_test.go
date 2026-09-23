@@ -333,7 +333,7 @@ type fakeStreamOptions struct {
 
 type observedRequest struct {
 	RequestID      uint64
-	Operation      protocol.Operation
+	Operation      redleasev1.ClientOperation
 	Key            uint64
 	ClientID       uint32
 	BootID         uint32
@@ -347,7 +347,7 @@ func observeClientRequest(request *redleasev1.ClientRequest) (observedRequest, e
 		Operation: request.Operation(),
 	}
 	switch observed.Operation {
-	case protocol.OperationAcquire:
+	case redleasev1.ClientOperationACQUIRE:
 		var acquire redleasev1.AcquireRequest
 		if request.Acquire(&acquire) == nil {
 			return observedRequest{}, errors.New("Acquire payload is missing")
@@ -357,7 +357,7 @@ func observeClientRequest(request *redleasev1.ClientRequest) (observedRequest, e
 		observed.BootID = acquire.BootId()
 		observed.LeaseSequence = acquire.LeaseSeq()
 		observed.RequestedTTLMS = acquire.RequestedTtlMs()
-	case protocol.OperationRenew:
+	case redleasev1.ClientOperationRENEW:
 		var renew redleasev1.RenewRequest
 		if request.Renew(&renew) == nil {
 			return observedRequest{}, errors.New("Renew payload is missing")
@@ -367,7 +367,7 @@ func observeClientRequest(request *redleasev1.ClientRequest) (observedRequest, e
 		observed.BootID = renew.BootId()
 		observed.LeaseSequence = renew.LeaseSeq()
 		observed.RequestedTTLMS = renew.RequestedTtlMs()
-	case protocol.OperationRelease:
+	case redleasev1.ClientOperationRELEASE:
 		var release redleasev1.ReleaseRequest
 		if request.Release(&release) == nil {
 			return observedRequest{}, errors.New("Release payload is missing")
@@ -376,7 +376,7 @@ func observeClientRequest(request *redleasev1.ClientRequest) (observedRequest, e
 		observed.ClientID = release.ClientId()
 		observed.BootID = release.BootId()
 		observed.LeaseSequence = release.LeaseSeq()
-	case protocol.OperationGetTTL:
+	case redleasev1.ClientOperationGET_TTL:
 	default:
 		return observedRequest{}, errors.New("unsupported request operation")
 	}
@@ -560,7 +560,7 @@ func acquireStreamRequest(key uint64) *outboundConnectionRequest {
 func streamResponse(requestID uint64, status redleasev1.LeaseStatus) protocol.Response {
 	return protocol.Response{
 		RequestID: requestID,
-		Operation: protocol.OperationAcquire,
+		Operation: redleasev1.ClientOperationACQUIRE,
 		Status:    status,
 	}
 }

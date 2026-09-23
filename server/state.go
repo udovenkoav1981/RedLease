@@ -395,7 +395,7 @@ func remainingTTLMS(deadline, now time.Time, maximum uint64) uint64 {
 func acquireResponse(requestID uint64, status redleasev1.LeaseStatus, ttlMS uint64) protocol.Response {
 	return protocol.Response{
 		RequestID: requestID,
-		Operation: protocol.OperationAcquire,
+		Operation: redleasev1.ClientOperationACQUIRE,
 		Status:    status,
 		TTLMS:     ttlMS,
 	}
@@ -404,7 +404,7 @@ func acquireResponse(requestID uint64, status redleasev1.LeaseStatus, ttlMS uint
 func renewResponse(requestID uint64, status redleasev1.LeaseStatus, ttlMS uint64) protocol.Response {
 	return protocol.Response{
 		RequestID: requestID,
-		Operation: protocol.OperationRenew,
+		Operation: redleasev1.ClientOperationRENEW,
 		Status:    status,
 		TTLMS:     ttlMS,
 	}
@@ -413,7 +413,7 @@ func renewResponse(requestID uint64, status redleasev1.LeaseStatus, ttlMS uint64
 func releaseResponse(requestID uint64, status redleasev1.LeaseStatus) protocol.Response {
 	return protocol.Response{
 		RequestID: requestID,
-		Operation: protocol.OperationRelease,
+		Operation: redleasev1.ClientOperationRELEASE,
 		Status:    status,
 	}
 }

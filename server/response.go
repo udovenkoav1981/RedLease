@@ -20,7 +20,7 @@ func (s *Server) newOutboundResponse(response protocol.Response) (*outboundRespo
 	if response.Status > redleasev1.LeaseStatusKEY_LIMIT_REACHED {
 		return nil, fmt.Errorf("unsupported lease status %d", response.Status)
 	}
-	if response.Operation < protocol.OperationAcquire || response.Operation > protocol.OperationGetTTL {
+	if response.Operation < redleasev1.ClientOperationACQUIRE || response.Operation > redleasev1.ClientOperationGET_TTL {
 		return nil, fmt.Errorf("unsupported response operation %d", response.Operation)
 	}
 
@@ -38,26 +38,29 @@ func (s *Server) newOutboundResponse(response protocol.Response) (*outboundRespo
 	redleasev1.ServerResponseStart(builder)
 	redleasev1.ServerResponseAddRequestId(builder, response.RequestID)
 	switch response.Operation {
-	case protocol.OperationAcquire:
+	case redleasev1.ClientOperationACQUIRE:
 		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultACQUIRE)
 		redleasev1.ServerResponseAddAcquire(builder, redleasev1.CreateAcquireResponse(
 			builder, response.Status, response.TTLMS,
 		))
-	case protocol.OperationRenew:
+	case redleasev1.ClientOperationRENEW:
 		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultRENEW)
 		redleasev1.ServerResponseAddRenew(builder, redleasev1.CreateRenewResponse(
 			builder, response.Status, response.TTLMS,
 		))
-	case protocol.OperationRelease:
+	case redleasev1.ClientOperationRELEASE:
 		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultRELEASE)
 		redleasev1.ServerResponseAddRelease(builder, redleasev1.CreateReleaseResponse(
 			builder, response.Status,
 		))
-	case protocol.OperationGetTTL:
+	case redleasev1.ClientOperationGET_TTL:
 		redleasev1.ServerResponseAddResult(builder, redleasev1.ServerResultGET_TTL)
 		redleasev1.ServerResponseAddGetTtl(builder, redleasev1.CreateGetTTLResponse(
 			builder, response.TTLMS,
 		))
+	case redleasev1.ClientOperationNONE:
+		s.recycleOutboundResponse(outbound)
+		return nil, fmt.Errorf("unsupported response operation %d", response.Operation)
 	}
 	root := redleasev1.ServerResponseEnd(builder)
 	redleasev1.FinishSizePrefixedServerResponseBuffer(builder, root)

@@ -430,7 +430,7 @@ func (h *acquireHarness) respondAcquire(
 	h.streams[replica].receive <- fakeReceive{
 		response: protocol.Response{
 			RequestID: request.RequestID,
-			Operation: protocol.OperationAcquire,
+			Operation: redleasev1.ClientOperationACQUIRE,
 			Status:    status,
 			TTLMS:     ttl,
 		},
@@ -453,7 +453,7 @@ func (h *acquireHarness) receiveAndRespondToCleanup(
 		stream.receive <- fakeReceive{
 			response: protocol.Response{
 				RequestID: release.RequestID,
-				Operation: protocol.OperationRelease,
+				Operation: redleasev1.ClientOperationRELEASE,
 				Status:    redleasev1.LeaseStatusOK,
 			},
 		}
@@ -489,7 +489,7 @@ func receiveAcquireCallResult(t *testing.T, result <-chan acquireCallResult) acq
 func receiveAcquireRequest(t *testing.T, stream *fakeLeaseClientStream) observedRequest {
 	t.Helper()
 	request := receiveSentRequest(t, stream)
-	if request.Operation != protocol.OperationAcquire {
+	if request.Operation != redleasev1.ClientOperationACQUIRE {
 		t.Fatalf("request is not Acquire: %+v", request)
 	}
 	return request
@@ -504,7 +504,7 @@ func respondAcquireOnStream(
 	stream.receive <- fakeReceive{
 		response: protocol.Response{
 			RequestID: request.RequestID,
-			Operation: protocol.OperationAcquire,
+			Operation: redleasev1.ClientOperationACQUIRE,
 			Status:    status,
 			TTLMS:     ttl,
 		},
@@ -514,7 +514,7 @@ func respondAcquireOnStream(
 func receiveReleaseRequest(t *testing.T, stream *fakeLeaseClientStream) observedRequest {
 	t.Helper()
 	request := receiveSentRequest(t, stream)
-	if request.Operation != protocol.OperationRelease {
+	if request.Operation != redleasev1.ClientOperationRELEASE {
 		t.Fatalf("request is not Release: %+v", request)
 	}
 	return request

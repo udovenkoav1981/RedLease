@@ -12,8 +12,6 @@ import (
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
-const protocolMaxTTL = 5 * time.Second
-
 type releaseSubmission struct {
 	replica int
 	future  *connectionFuture
@@ -39,7 +37,8 @@ func (l *Lease) Release() {
 // response handling and bounded retries in the background.
 func (c *Client) releaseAll(key, sequence uint64) {
 	serverCount := len(c.replicas)
-	retryContext, cancelRetries := context.WithTimeout(c.ctx, releaseRetryWindow(c.responseTimeout))
+	retryTimeout := time.Duration(protocol.MaxTTLMS)*time.Millisecond + c.responseTimeout
+	retryContext, cancelRetries := context.WithTimeout(c.ctx, retryTimeout)
 	initialContext, cancelInitial := context.WithTimeout(retryContext, c.responseTimeout)
 
 	submissions := make(chan releaseSubmission, serverCount)
@@ -131,7 +130,7 @@ func (c *Client) releaseResponseOK(ctx context.Context, future *connectionFuture
 	defer cancelResponse()
 
 	response, err := future.await(responseContext)
-	if err != nil || response.Operation != protocol.OperationRelease {
+	if err != nil || response.Operation != redleasev1.ClientOperationRELEASE {
 		return false
 	}
 	status := response.Status
@@ -139,11 +138,4 @@ func (c *Client) releaseResponseOK(ctx context.Context, future *connectionFuture
 	// without applying any lease mutation. There is nothing from the previous
 	// process incarnation left to clean on that replica.
 	return status == redleasev1.LeaseStatusOK || status == redleasev1.LeaseStatusNOT_READY
-}
-
-func releaseRetryWindow(responseTimeout time.Duration) time.Duration {
-	if responseTimeout > time.Duration(1<<63-1)-protocolMaxTTL {
-		return time.Duration(1<<63 - 1)
-	}
-	return protocolMaxTTL + responseTimeout
 }
