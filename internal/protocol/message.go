@@ -2,7 +2,7 @@
 // response values. Server requests are decoded directly into server operations.
 package protocol
 
-import redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+import redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 
 // MaxTTLMS is the maximum lease TTL representable by the RedLease protocol.
 const MaxTTLMS uint64 = 5_000

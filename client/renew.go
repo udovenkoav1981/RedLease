@@ -5,8 +5,8 @@ import (
 	"errors"
 	"time"
 
+	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
 var (

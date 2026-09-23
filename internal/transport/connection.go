@@ -1,6 +1,6 @@
 // Package transport implements the persistent TCP connection used by
 // RedLease clients. Framing lives in internal/protocol; generated messages
-// live in proto/redlease/v1.
+// live in fbs/redlease/v1.
 package transport
 
 import (
@@ -12,8 +12,8 @@ import (
 	"net"
 	"time"
 
+	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
 )
 
 // TCPWriteTimeout bounds one direct frame write or one buffered batch flush.

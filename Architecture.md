@@ -548,7 +548,7 @@ Persistent connections:
 - не создают отдельный RPC/context на каждую операцию;
 - позволяют обслуживать тысячи активных leases через `N` соединений.
 
-Wire schema находится в `proto/redlease/v1/redlease.fbs`. Каждый request и
+Wire schema находится в `fbs/redlease/v1/redlease.fbs`. Каждый request и
 response кодируется отдельным стандартным size-prefixed FlatBuffer: первые
 четыре байта содержат little-endian размер следующего FlatBuffer payload.
 Дополнительного собственного envelope или RPC service нет. Transport закрывает

@@ -43,4 +43,4 @@ jobs:
       - name: Verify generated FlatBuffers files
         run: |
           make generate-flatbuffers
-          git diff --exit-code -- proto/redlease/v1
+          git diff --exit-code -- fbs/redlease/v1

@@ -7,7 +7,7 @@ import (
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
-	redleasev1 "github.com/udovenkoav1981/RedLease/proto/redlease/v1"
+	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 )
 
 const sizePrefixBytes = 4

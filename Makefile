@@ -1,5 +1,5 @@
-FLATBUFFERS_SCHEMA := proto/redlease/v1/redlease.fbs
-FLATBUFFERS_OUTPUT := proto/redlease/v1
+FLATBUFFERS_SCHEMA := fbs/redlease/v1/redlease.fbs
+FLATBUFFERS_OUTPUT := fbs/redlease/v1
 
 .PHONY: all build lint generate generate-flatbuffers test
 
