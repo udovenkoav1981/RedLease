@@ -2,7 +2,9 @@ package transport
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -137,6 +139,28 @@ func TestFrameWriterEmptyFlushDoesNotSetDeadline(t *testing.T) {
 	}
 }
 
+func TestFrameReaderRejectsInvalidPayloadSize(t *testing.T) {
+	t.Parallel()
+	for _, payloadSize := range []uint32{0, protocol.MaxFrameBytes, ^uint32(0)} {
+		var prefix [flatbuffers.SizeUint32]byte
+		binary.LittleEndian.PutUint32(prefix[:], payloadSize)
+		reader := NewFrameReader(bytes.NewReader(prefix[:]))
+		if _, err := reader.ReadFrame(); !errors.Is(err, protocol.ErrMalformedFrame) {
+			t.Fatalf("payload size %d error = %v, want ErrMalformedFrame", payloadSize, err)
+		}
+	}
+}
+
+func TestFrameReaderRejectsTruncatedPayload(t *testing.T) {
+	t.Parallel()
+	var frame [flatbuffers.SizeUint32 + 1]byte
+	binary.LittleEndian.PutUint32(frame[:flatbuffers.SizeUint32], 2)
+	reader := NewFrameReader(bytes.NewReader(frame[:]))
+	if _, err := reader.ReadFrame(); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("truncated payload error = %v, want io.ErrUnexpectedEOF", err)
+	}
+}
+
 func TestFrameReaderReadsBufferedFramesWithOneRead(t *testing.T) {
 	network := &recordingConn{}
 	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
@@ -176,6 +200,28 @@ func TestFrameReaderReadsBufferedFramesWithOneRead(t *testing.T) {
 	}
 }
 
+type limitedConn struct {
+	recordingConn
+
+	maximum int
+}
+
+func (c *limitedConn) Write(value []byte) (int, error) {
+	return c.Buffer.Write(value[:min(len(value), c.maximum)])
+}
+
+func TestWriteFrameHandlesPartialWrites(t *testing.T) {
+	t.Parallel()
+	connection := &limitedConn{maximum: 2}
+	want := []byte{1, 2, 3, 4, 5}
+	if err := WriteFrame(connection, want); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	if !bytes.Equal(connection.Bytes(), want) {
+		t.Fatalf("written frame = %v, want %v", connection.Bytes(), want)
+	}
+}
+
 func TestWriteFrameTimesOutBlockedTCPWrite(t *testing.T) {
 	t.Parallel()
 	server, client := net.Pipe()
@@ -184,7 +230,7 @@ func TestWriteFrameTimesOutBlockedTCPWrite(t *testing.T) {
 		_ = server.Close()
 	})
 
-	err := writeFrame(client, []byte{1}, 10*time.Millisecond)
+	err := WriteFrame(client, []byte{1})
 	if err == nil {
 		t.Fatal("blocked frame write succeeded")
 	}

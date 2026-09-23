@@ -6,11 +6,14 @@ package transport
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"time"
+
+	flatbuffers "github.com/google/flatbuffers/go"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
@@ -37,8 +40,8 @@ type Connection struct {
 // FrameReader reads complete FlatBuffers frames through one connection-scoped
 // buffer. It is owned by exactly one reader goroutine.
 type FrameReader struct {
-	frames protocol.FrameReader
-	buffer *bufio.Reader
+	buffer       *bufio.Reader
+	pendingBytes int
 }
 
 // FrameWriter accumulates complete FlatBuffers frames and flushes them as one
@@ -125,7 +128,8 @@ func (w *FrameWriter) BufferFrame(frame []byte) error {
 			return fmt.Errorf("flush full write buffer: %w", err)
 		}
 	}
-	return protocol.WriteFrame(w.buffer, frame)
+	_, err := w.buffer.Write(frame)
+	return err
 }
 
 // FlushClientRequests writes the current request batch to the TCP connection.
@@ -147,19 +151,56 @@ func (w *FrameWriter) Flush() error {
 // ReadFrame reads the next size-prefixed FlatBuffer. One underlying read may
 // fill the buffer with multiple frames for subsequent calls.
 func (r *FrameReader) ReadFrame() ([]byte, error) {
-	return r.frames.ReadFrame(r.buffer)
+	if r.pendingBytes != 0 {
+		if _, err := r.buffer.Discard(r.pendingBytes); err != nil {
+			return nil, err
+		}
+		r.pendingBytes = 0
+	}
+
+	prefix, err := r.buffer.Peek(flatbuffers.SizeUint32)
+	if err != nil {
+		return nil, frameReadError(prefix, err)
+	}
+	payloadSize := binary.LittleEndian.Uint32(prefix)
+	if payloadSize == 0 || payloadSize > uint32(protocol.MaxFrameBytes-flatbuffers.SizeUint32) {
+		return nil, fmt.Errorf("%w: payload size %d exceeds limit", protocol.ErrMalformedFrame, payloadSize)
+	}
+	frameSize := flatbuffers.SizeUint32 + int(payloadSize)
+	frame, err := r.buffer.Peek(frameSize)
+	if err != nil {
+		return nil, frameReadError(frame, err)
+	}
+	r.pendingBytes = frameSize
+	return frame, nil
+}
+
+func frameReadError(partial []byte, err error) error {
+	if errors.Is(err, io.EOF) && len(partial) != 0 {
+		return io.ErrUnexpectedEOF
+	}
+	return err
 }
 
 // WriteFrame writes one complete frame with the fixed TCP write timeout.
 func WriteFrame(conn net.Conn, frame []byte) error {
-	return writeFrame(conn, frame, TCPWriteTimeout)
-}
-
-func writeFrame(conn net.Conn, frame []byte, timeout time.Duration) error {
-	if err := conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+	if err := conn.SetWriteDeadline(time.Now().Add(TCPWriteTimeout)); err != nil {
 		return fmt.Errorf("set TCP write deadline: %w", err)
 	}
-	return protocol.WriteFrame(conn, frame)
+	for len(frame) != 0 {
+		written, err := conn.Write(frame)
+		if err != nil {
+			return err
+		}
+		if written == 0 {
+			return io.ErrNoProgress
+		}
+		if written < 0 || written > len(frame) {
+			return errors.New("invalid frame write count")
+		}
+		frame = frame[written:]
+	}
+	return nil
 }
 
 func (c *Connection) Recv() (protocol.Response, error) {

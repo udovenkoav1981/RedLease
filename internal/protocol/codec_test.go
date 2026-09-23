@@ -1,11 +1,7 @@
 package protocol
 
 import (
-	"bufio"
-	"bytes"
-	"encoding/binary"
 	"errors"
-	"io"
 	"testing"
 
 	flatbuffers "github.com/google/flatbuffers/go"
@@ -64,70 +60,6 @@ func testResponseFrame(response Response) []byte {
 	root := redleasev1.ServerResponseEnd(builder)
 	redleasev1.FinishSizePrefixedServerResponseBuffer(builder, root)
 	return builder.FinishedBytes()
-}
-
-func TestFrameReader(t *testing.T) {
-	t.Parallel()
-	builder := flatbuffers.NewBuilder(NewBuilderSize)
-	redleasev1.ClientRequestStart(builder)
-	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationGET_TTL)
-	root := redleasev1.ClientRequestEnd(builder)
-	redleasev1.FinishSizePrefixedClientRequestBuffer(builder, root)
-	want := builder.FinishedBytes()
-	var reader FrameReader
-	got, err := reader.ReadFrame(bufio.NewReader(bytes.NewReader(want)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("frame differs: %x != %x", got, want)
-	}
-	if err := ValidateFrame(got); err != nil {
-		t.Fatalf("validate frame: %v", err)
-	}
-}
-
-func TestFrameReaderRejectsInvalidPayloadSize(t *testing.T) {
-	t.Parallel()
-	for _, payloadSize := range []uint32{0, MaxFrameBytes, ^uint32(0)} {
-		var prefix [sizePrefixBytes]byte
-		binary.LittleEndian.PutUint32(prefix[:], payloadSize)
-		var reader FrameReader
-		if _, err := reader.ReadFrame(bufio.NewReader(bytes.NewReader(prefix[:]))); !errors.Is(err, ErrMalformedFrame) {
-			t.Fatalf("payload size %d error = %v, want ErrMalformedFrame", payloadSize, err)
-		}
-	}
-}
-
-func TestFrameReaderRejectsTruncatedPayload(t *testing.T) {
-	t.Parallel()
-	var frame [sizePrefixBytes + 1]byte
-	binary.LittleEndian.PutUint32(frame[:sizePrefixBytes], 2)
-	var reader FrameReader
-	if _, err := reader.ReadFrame(bufio.NewReader(bytes.NewReader(frame[:]))); !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("truncated payload error = %v, want io.ErrUnexpectedEOF", err)
-	}
-}
-
-func TestWriteFrameHandlesPartialWrites(t *testing.T) {
-	t.Parallel()
-	writer := &limitedWriter{maximum: 2}
-	want := []byte{1, 2, 3, 4, 5}
-	if err := WriteFrame(writer, want); err != nil {
-		t.Fatalf("WriteFrame: %v", err)
-	}
-	if !bytes.Equal(writer.buffer.Bytes(), want) {
-		t.Fatalf("written frame = %v, want %v", writer.buffer.Bytes(), want)
-	}
-}
-
-type limitedWriter struct {
-	buffer  bytes.Buffer
-	maximum int
-}
-
-func (w *limitedWriter) Write(value []byte) (int, error) {
-	return w.buffer.Write(value[:min(len(value), w.maximum)])
 }
 
 func TestMalformedFrame(t *testing.T) {
