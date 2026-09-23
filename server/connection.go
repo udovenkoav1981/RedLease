@@ -375,9 +375,6 @@ func (s *Server) decodeRequest(
 			err = fmt.Errorf("%w: %v", protocol.ErrMalformedFrame, recovered)
 		}
 	}()
-	if err := protocol.ValidateFrame(frame); err != nil {
-		return operation{}, protocol.Response{}, false, err
-	}
 	request := redleasev1.GetSizePrefixedRootAsClientRequest(frame, 0)
 	switch request.Operation() {
 	case redleasev1.ClientOperationACQUIRE:

@@ -101,8 +101,9 @@ func (r *FrameReader) ReadFrame() ([]byte, error) {
 		return nil, frameReadError(prefix, err)
 	}
 	payloadSize := binary.LittleEndian.Uint32(prefix)
-	if payloadSize == 0 || payloadSize > uint32(protocol.MaxFrameBytes-flatbuffers.SizeUint32) {
-		return nil, fmt.Errorf("%w: payload size %d exceeds limit", protocol.ErrMalformedFrame, payloadSize)
+	if payloadSize < uint32(flatbuffers.SizeUOffsetT) ||
+		payloadSize > uint32(protocol.MaxFrameBytes-flatbuffers.SizeUint32) {
+		return nil, fmt.Errorf("%w: invalid payload size %d", protocol.ErrMalformedFrame, payloadSize)
 	}
 	frameSize := flatbuffers.SizeUint32 + int(payloadSize)
 	frame, err := r.buffer.Peek(frameSize)

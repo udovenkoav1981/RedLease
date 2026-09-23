@@ -82,9 +82,6 @@ func TestClientConnectionFlushesBufferedRequestsWithOneWrite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read request %d: %v", requestID, err)
 		}
-		if err := protocol.ValidateFrame(frame); err != nil {
-			t.Fatalf("decode request %d: %v", requestID, err)
-		}
 		request := redleasev1.GetSizePrefixedRootAsClientRequest(frame, 0)
 		if request.RequestId() != requestID {
 			t.Fatalf("request ID = %d, want %d", request.RequestId(), requestID)
@@ -141,7 +138,7 @@ func TestFrameWriterEmptyFlushDoesNotSetDeadline(t *testing.T) {
 
 func TestFrameReaderRejectsInvalidPayloadSize(t *testing.T) {
 	t.Parallel()
-	for _, payloadSize := range []uint32{0, protocol.MaxFrameBytes, ^uint32(0)} {
+	for _, payloadSize := range []uint32{0, flatbuffers.SizeUOffsetT - 1, protocol.MaxFrameBytes, ^uint32(0)} {
 		var prefix [flatbuffers.SizeUint32]byte
 		binary.LittleEndian.PutUint32(prefix[:], payloadSize)
 		reader := NewFrameReader(bytes.NewReader(prefix[:]))
@@ -154,7 +151,7 @@ func TestFrameReaderRejectsInvalidPayloadSize(t *testing.T) {
 func TestFrameReaderRejectsTruncatedPayload(t *testing.T) {
 	t.Parallel()
 	var frame [flatbuffers.SizeUint32 + 1]byte
-	binary.LittleEndian.PutUint32(frame[:flatbuffers.SizeUint32], 2)
+	binary.LittleEndian.PutUint32(frame[:flatbuffers.SizeUint32], flatbuffers.SizeUOffsetT)
 	reader := NewFrameReader(bytes.NewReader(frame[:]))
 	if _, err := reader.ReadFrame(); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("truncated payload error = %v, want io.ErrUnexpectedEOF", err)

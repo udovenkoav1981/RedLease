@@ -13,10 +13,6 @@ func DecodeResponse(frame []byte) (response Response, err error) {
 			err = fmt.Errorf("%w: %v", ErrMalformedFrame, recovered)
 		}
 	}()
-	if err := ValidateFrame(frame); err != nil {
-		return Response{}, err
-	}
-
 	root := redleasev1.GetSizePrefixedRootAsServerResponse(frame, 0)
 	response.RequestID = root.RequestId()
 	switch root.Result() {

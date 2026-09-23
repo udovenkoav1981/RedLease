@@ -62,11 +62,11 @@ func testResponseFrame(response Response) []byte {
 	return builder.FinishedBytes()
 }
 
-func TestMalformedFrame(t *testing.T) {
+func TestDecodeMalformedResponse(t *testing.T) {
 	t.Parallel()
 	for _, frame := range [][]byte{nil, {1, 0, 0, 0, 0}, {255, 0, 0, 0, 0, 0, 0, 0}} {
-		if err := ValidateFrame(frame); !errors.Is(err, ErrMalformedFrame) {
-			t.Fatalf("ValidateFrame(%x) error = %v", frame, err)
+		if _, err := DecodeResponse(frame); !errors.Is(err, ErrMalformedFrame) {
+			t.Fatalf("DecodeResponse(%x) error = %v", frame, err)
 		}
 	}
 }
