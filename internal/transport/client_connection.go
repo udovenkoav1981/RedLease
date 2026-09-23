@@ -73,7 +73,7 @@ func (c *ClientConnection) Recv() (protocol.Response, error) {
 	if err != nil {
 		return protocol.Response{}, err
 	}
-	return protocol.DecodeResponse(frame)
+	return DecodeResponse(frame)
 }
 
 func (c *ClientConnection) Close() error {

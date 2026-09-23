@@ -372,7 +372,7 @@ func (s *Server) decodeRequest(
 			decoded = operation{}
 			response = protocol.Response{}
 			direct = false
-			err = fmt.Errorf("%w: %v", protocol.ErrMalformedFrame, recovered)
+			err = fmt.Errorf("%w: %v", transport.ErrMalformedFrame, recovered)
 		}
 	}()
 	request := redleasev1.GetSizePrefixedRootAsClientRequest(frame, 0)
@@ -382,7 +382,7 @@ func (s *Server) decodeRequest(
 		if request.Acquire(&acquire) == nil {
 			return operation{}, protocol.Response{}, false, fmt.Errorf(
 				"%w: Acquire payload is missing",
-				protocol.ErrMalformedFrame,
+				transport.ErrMalformedFrame,
 			)
 		}
 		return operation{
@@ -402,7 +402,7 @@ func (s *Server) decodeRequest(
 		if request.Renew(&renew) == nil {
 			return operation{}, protocol.Response{}, false, fmt.Errorf(
 				"%w: Renew payload is missing",
-				protocol.ErrMalformedFrame,
+				transport.ErrMalformedFrame,
 			)
 		}
 		return operation{
@@ -422,7 +422,7 @@ func (s *Server) decodeRequest(
 		if request.Release(&release) == nil {
 			return operation{}, protocol.Response{}, false, fmt.Errorf(
 				"%w: Release payload is missing",
-				protocol.ErrMalformedFrame,
+				transport.ErrMalformedFrame,
 			)
 		}
 		return operation{
@@ -447,7 +447,7 @@ func (s *Server) decodeRequest(
 	default:
 		return operation{}, protocol.Response{}, false, fmt.Errorf(
 			"%w: unsupported request operation %d",
-			protocol.ErrMalformedFrame,
+			transport.ErrMalformedFrame,
 			request.Operation(),
 		)
 	}

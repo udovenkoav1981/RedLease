@@ -1,5 +1,5 @@
-// Package transport implements buffered frame I/O and client TCP connections.
-// Framing lives in internal/protocol; generated messages live in fbs/redlease/v1.
+// Package transport implements buffered RedLease frame I/O and client TCP connections.
+// Generated messages live in fbs/redlease/v1.
 package transport
 
 import (
@@ -12,8 +12,15 @@ import (
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
+)
 
-	"github.com/udovenkoav1981/RedLease/internal/protocol"
+var ErrMalformedFrame = errors.New("malformed RedLease FlatBuffer frame")
+
+const (
+	// MaxFrameBytes bounds one size-prefixed FlatBuffer, including its prefix.
+	MaxFrameBytes = 1024
+	// InitialBufferSize is the initial capacity used for RedLease FlatBuffers.
+	InitialBufferSize = 128
 )
 
 // TCPWriteTimeout bounds one buffered batch flush.
@@ -102,8 +109,8 @@ func (r *FrameReader) ReadFrame() ([]byte, error) {
 	}
 	payloadSize := binary.LittleEndian.Uint32(prefix)
 	if payloadSize < uint32(flatbuffers.SizeUOffsetT) ||
-		payloadSize > uint32(protocol.MaxFrameBytes-flatbuffers.SizeUint32) {
-		return nil, fmt.Errorf("%w: invalid payload size %d", protocol.ErrMalformedFrame, payloadSize)
+		payloadSize > uint32(MaxFrameBytes-flatbuffers.SizeUint32) {
+		return nil, fmt.Errorf("%w: invalid payload size %d", ErrMalformedFrame, payloadSize)
 	}
 	frameSize := flatbuffers.SizeUint32 + int(payloadSize)
 	frame, err := r.buffer.Peek(frameSize)

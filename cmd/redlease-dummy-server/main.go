@@ -16,7 +16,7 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
-	"github.com/udovenkoav1981/RedLease/internal/protocol"
+	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
 const (
@@ -76,7 +76,7 @@ func run(listen string, maxTTL uint64) error {
 func serveConnection(connection net.Conn, maxTTL uint64) (result error) {
 	defer func() {
 		if recover() != nil {
-			result = protocol.ErrMalformedFrame
+			result = transport.ErrMalformedFrame
 		}
 	}()
 	reader := bufio.NewReaderSize(connection, bufferBytes)
@@ -122,8 +122,8 @@ func readFrame(reader *bufio.Reader, bufferedOnly bool) ([]byte, error) {
 		return nil, err
 	}
 	size := binary.LittleEndian.Uint32(prefix)
-	if size < 4 || size > protocol.MaxFrameBytes-4 {
-		return nil, protocol.ErrMalformedFrame
+	if size < 4 || size > transport.MaxFrameBytes-4 {
+		return nil, transport.ErrMalformedFrame
 	}
 	if bufferedOnly && reader.Buffered() < int(size)+4 {
 		return nil, nil
@@ -144,7 +144,7 @@ func processFrame(
 	case redleasev1.ClientOperationACQUIRE:
 		var acquire redleasev1.AcquireRequest
 		if request.Acquire(&acquire) == nil {
-			return protocol.ErrMalformedFrame
+			return transport.ErrMalformedFrame
 		}
 		response = &responses.acquire
 		var acquireResponse redleasev1.AcquireResponse
@@ -153,7 +153,7 @@ func processFrame(
 	case redleasev1.ClientOperationRENEW:
 		var renew redleasev1.RenewRequest
 		if request.Renew(&renew) == nil {
-			return protocol.ErrMalformedFrame
+			return transport.ErrMalformedFrame
 		}
 		response = &responses.renew
 		var renewResponse redleasev1.RenewResponse
@@ -162,13 +162,13 @@ func processFrame(
 	case redleasev1.ClientOperationRELEASE:
 		var release redleasev1.ReleaseRequest
 		if request.Release(&release) == nil {
-			return protocol.ErrMalformedFrame
+			return transport.ErrMalformedFrame
 		}
 		response = &responses.release
 	case redleasev1.ClientOperationGET_TTL:
 		response = &responses.getTTL
 	default:
-		return protocol.ErrMalformedFrame
+		return transport.ErrMalformedFrame
 	}
 	if !response.root.MutateRequestId(request.RequestId()) {
 		return errors.New("response template is missing request ID")
@@ -187,7 +187,7 @@ func newTemplates(maxTTL uint64) templates {
 }
 
 func buildTemplate(result redleasev1.ServerResult, maxTTL uint64) responseTemplate {
-	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
+	builder := flatbuffers.NewBuilder(transport.InitialBufferSize)
 	redleasev1.ServerResponseStart(builder)
 	redleasev1.ServerResponseAddRequestId(builder, 1)
 	redleasev1.ServerResponseAddResult(builder, result)

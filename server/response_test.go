@@ -24,7 +24,7 @@ func TestOutboundResponseRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encode %+v: %v", want, err)
 		}
-		got, err := protocol.DecodeResponse(outbound.message.Table().Bytes)
+		got, err := transport.DecodeResponse(outbound.message.Table().Bytes)
 		s.recycleOutboundResponse(outbound)
 		if err != nil {
 			t.Fatalf("decode %+v: %v", want, err)

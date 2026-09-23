@@ -9,7 +9,6 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
-	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
@@ -39,7 +38,7 @@ func TestStatelessPeerRespondsToAllOperations(t *testing.T) {
 		{redleasev1.ClientOperationGET_TTL, 0, 1000},
 		{redleasev1.ClientOperationACQUIRE, 0, 0},
 	}
-	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
+	builder := flatbuffers.NewBuilder(transport.InitialBufferSize)
 	for index, item := range requests {
 		builder.Reset()
 		redleasev1.ClientRequestStart(builder)

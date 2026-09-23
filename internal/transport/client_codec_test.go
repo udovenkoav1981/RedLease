@@ -1,4 +1,4 @@
-package protocol
+package transport
 
 import (
 	"errors"
@@ -7,11 +7,12 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
 func TestResponseRoundTrip(t *testing.T) {
 	t.Parallel()
-	tests := []Response{
+	tests := []protocol.Response{
 		{RequestID: 1, Operation: redleasev1.ClientOperationACQUIRE, Status: redleasev1.LeaseStatusALREADY_OWNED, TTLMS: 2},
 		{RequestID: 3, Operation: redleasev1.ClientOperationRENEW, Status: redleasev1.LeaseStatusSTALE, TTLMS: 4},
 		{RequestID: 5, Operation: redleasev1.ClientOperationRELEASE, Status: redleasev1.LeaseStatusOK},
@@ -29,8 +30,8 @@ func TestResponseRoundTrip(t *testing.T) {
 	}
 }
 
-func testResponseFrame(response Response) []byte {
-	builder := flatbuffers.NewBuilder(NewBuilderSize)
+func testResponseFrame(response protocol.Response) []byte {
+	builder := flatbuffers.NewBuilder(InitialBufferSize)
 	redleasev1.ServerResponseStart(builder)
 	redleasev1.ServerResponseAddRequestId(builder, response.RequestID)
 	switch response.Operation {

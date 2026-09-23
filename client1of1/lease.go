@@ -9,6 +9,7 @@ import (
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
+	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
 const safetyMarginMS uint64 = 100
@@ -272,7 +273,7 @@ func (c *Client) newOutboundRequest() *outboundConnectionRequest {
 		}
 	}
 	return &outboundConnectionRequest{
-		builder: flatbuffers.NewBuilder(protocol.NewBuilderSize),
+		builder: flatbuffers.NewBuilder(transport.InitialBufferSize),
 	}
 }
 

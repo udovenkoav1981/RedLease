@@ -1,13 +1,14 @@
-package protocol
+package transport
 
 import (
 	"fmt"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
-// DecodeResponse copies a size-prefixed FlatBuffer into an owned Response.
-func DecodeResponse(frame []byte) (response Response, err error) {
+// DecodeResponse copies a size-prefixed FlatBuffer into an owned response.
+func DecodeResponse(frame []byte) (response protocol.Response, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("%w: %v", ErrMalformedFrame, recovered)
@@ -20,7 +21,7 @@ func DecodeResponse(frame []byte) (response Response, err error) {
 		response.Operation = redleasev1.ClientOperationACQUIRE
 		var acquire redleasev1.AcquireResponse
 		if root.Acquire(&acquire) == nil {
-			return Response{}, fmt.Errorf("%w: Acquire response is missing", ErrMalformedFrame)
+			return protocol.Response{}, fmt.Errorf("%w: Acquire response is missing", ErrMalformedFrame)
 		}
 		response.Status = acquire.Status()
 		response.TTLMS = acquire.TtlMs()
@@ -28,7 +29,7 @@ func DecodeResponse(frame []byte) (response Response, err error) {
 		response.Operation = redleasev1.ClientOperationRENEW
 		var renew redleasev1.RenewResponse
 		if root.Renew(&renew) == nil {
-			return Response{}, fmt.Errorf("%w: Renew response is missing", ErrMalformedFrame)
+			return protocol.Response{}, fmt.Errorf("%w: Renew response is missing", ErrMalformedFrame)
 		}
 		response.Status = renew.Status()
 		response.TTLMS = renew.TtlMs()
@@ -36,22 +37,22 @@ func DecodeResponse(frame []byte) (response Response, err error) {
 		response.Operation = redleasev1.ClientOperationRELEASE
 		var release redleasev1.ReleaseResponse
 		if root.Release(&release) == nil {
-			return Response{}, fmt.Errorf("%w: Release response is missing", ErrMalformedFrame)
+			return protocol.Response{}, fmt.Errorf("%w: Release response is missing", ErrMalformedFrame)
 		}
 		response.Status = release.Status()
 	case redleasev1.ServerResultGET_TTL:
 		response.Operation = redleasev1.ClientOperationGET_TTL
 		var getTTL redleasev1.GetTTLResponse
 		if root.GetTtl(&getTTL) == nil {
-			return Response{}, fmt.Errorf("%w: GetTTL response is missing", ErrMalformedFrame)
+			return protocol.Response{}, fmt.Errorf("%w: GetTTL response is missing", ErrMalformedFrame)
 		}
 		response.Status = redleasev1.LeaseStatusOK
 		response.TTLMS = getTTL.ConfiguredMaxTtlMs()
 	default:
-		return Response{}, fmt.Errorf("%w: unsupported response result %d", ErrMalformedFrame, root.Result())
+		return protocol.Response{}, fmt.Errorf("%w: unsupported response result %d", ErrMalformedFrame, root.Result())
 	}
 	if !validStatus(response.Status) {
-		return Response{}, fmt.Errorf("%w: unsupported lease status %d", ErrMalformedFrame, response.Status)
+		return protocol.Response{}, fmt.Errorf("%w: unsupported lease status %d", ErrMalformedFrame, response.Status)
 	}
 	return response, nil
 }

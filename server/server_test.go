@@ -1063,7 +1063,7 @@ func sendClientRequest(
 }
 
 func acquireRequest(requestID, key, sequence uint64) *redleasev1.ClientRequest {
-	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
+	builder := flatbuffers.NewBuilder(transport.InitialBufferSize)
 	redleasev1.ClientRequestStart(builder)
 	redleasev1.ClientRequestAddRequestId(builder, requestID)
 	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationACQUIRE)
@@ -1079,7 +1079,7 @@ func acquireRequest(requestID, key, sequence uint64) *redleasev1.ClientRequest {
 }
 
 func getTTLRequest(requestID uint64) *redleasev1.ClientRequest {
-	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
+	builder := flatbuffers.NewBuilder(transport.InitialBufferSize)
 	redleasev1.ClientRequestStart(builder)
 	redleasev1.ClientRequestAddRequestId(builder, requestID)
 	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationGET_TTL)
@@ -1087,7 +1087,7 @@ func getTTLRequest(requestID uint64) *redleasev1.ClientRequest {
 }
 
 func requestWithoutPayload(operation redleasev1.ClientOperation) *redleasev1.ClientRequest {
-	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
+	builder := flatbuffers.NewBuilder(transport.InitialBufferSize)
 	redleasev1.ClientRequestStart(builder)
 	redleasev1.ClientRequestAddOperation(builder, operation)
 	return finishTestClientRequest(builder)
@@ -1108,7 +1108,7 @@ func TestDecodeInvalidRequest(t *testing.T) {
 		requestWithoutPayload(redleasev1.ClientOperation(255)),
 	} {
 		_, _, _, err := s.decodeRequest(request.Table().Bytes)
-		if !errors.Is(err, protocol.ErrMalformedFrame) {
+		if !errors.Is(err, transport.ErrMalformedFrame) {
 			t.Fatalf("decodeRequest(%v) error = %v, want ErrMalformedFrame", request, err)
 		}
 	}
@@ -1119,7 +1119,7 @@ func TestDecodeInvalidRequest(t *testing.T) {
 		{4, 0, 0, 0, 255, 255, 255, 127},
 	} {
 		_, _, _, err := s.decodeRequest(frame)
-		if !errors.Is(err, protocol.ErrMalformedFrame) {
+		if !errors.Is(err, transport.ErrMalformedFrame) {
 			t.Fatalf("decodeRequest(%x) error = %v, want ErrMalformedFrame", frame, err)
 		}
 	}

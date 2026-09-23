@@ -7,6 +7,7 @@ import (
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
+	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
 // outboundResponse owns its FlatBuffers backing bytes until the connection
@@ -32,7 +33,7 @@ func (s *Server) newOutboundResponse(response protocol.Response) (*outboundRespo
 		}
 	}
 	if outbound == nil {
-		outbound = &outboundResponse{builder: flatbuffers.NewBuilder(protocol.NewBuilderSize)}
+		outbound = &outboundResponse{builder: flatbuffers.NewBuilder(transport.InitialBufferSize)}
 	}
 	builder := outbound.builder
 	redleasev1.ServerResponseStart(builder)

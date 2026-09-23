@@ -12,7 +12,6 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
-	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
 type recordingConn struct {
@@ -46,7 +45,7 @@ func (c *recordingConn) SetWriteDeadline(time.Time) error {
 func TestClientConnectionFlushesBufferedRequestsWithOneWrite(t *testing.T) {
 	network := &recordingConn{}
 	connection := NewClientConnection(network)
-	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
+	builder := flatbuffers.NewBuilder(InitialBufferSize)
 
 	for requestID := uint64(1); requestID <= 2; requestID++ {
 		builder.Reset()
@@ -138,11 +137,11 @@ func TestFrameWriterEmptyFlushDoesNotSetDeadline(t *testing.T) {
 
 func TestFrameReaderRejectsInvalidPayloadSize(t *testing.T) {
 	t.Parallel()
-	for _, payloadSize := range []uint32{0, flatbuffers.SizeUOffsetT - 1, protocol.MaxFrameBytes, ^uint32(0)} {
+	for _, payloadSize := range []uint32{0, flatbuffers.SizeUOffsetT - 1, MaxFrameBytes, ^uint32(0)} {
 		var prefix [flatbuffers.SizeUint32]byte
 		binary.LittleEndian.PutUint32(prefix[:], payloadSize)
 		reader := NewFrameReader(bytes.NewReader(prefix[:]))
-		if _, err := reader.ReadFrame(); !errors.Is(err, protocol.ErrMalformedFrame) {
+		if _, err := reader.ReadFrame(); !errors.Is(err, ErrMalformedFrame) {
 			t.Fatalf("payload size %d error = %v, want ErrMalformedFrame", payloadSize, err)
 		}
 	}
@@ -160,7 +159,7 @@ func TestFrameReaderRejectsTruncatedPayload(t *testing.T) {
 
 func TestFrameReaderReadsBufferedFramesWithOneRead(t *testing.T) {
 	network := &recordingConn{}
-	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
+	builder := flatbuffers.NewBuilder(InitialBufferSize)
 
 	for requestID := uint64(1); requestID <= 2; requestID++ {
 		builder.Reset()
@@ -184,7 +183,7 @@ func TestFrameReaderReadsBufferedFramesWithOneRead(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read response %d: %v", requestID, err)
 		}
-		response, err := protocol.DecodeResponse(frame)
+		response, err := DecodeResponse(frame)
 		if err != nil {
 			t.Fatalf("decode response %d: %v", requestID, err)
 		}

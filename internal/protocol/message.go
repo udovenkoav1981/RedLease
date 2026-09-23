@@ -1,5 +1,5 @@
-// Package protocol defines RedLease wire framing, shared constants, and owned
-// response values. Server requests are decoded directly into server operations.
+// Package protocol defines shared RedLease wire constants and owned response values.
+// Server requests are decoded directly into server operations.
 package protocol
 
 import redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"

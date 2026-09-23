@@ -92,7 +92,7 @@ func (c *Client) newOutboundRequest() *outboundConnectionRequest {
 		}
 	}
 	if builder == nil {
-		builder = flatbuffers.NewBuilder(protocol.NewBuilderSize)
+		builder = flatbuffers.NewBuilder(transport.InitialBufferSize)
 	}
 	return &outboundConnectionRequest{
 		builder:     builder,

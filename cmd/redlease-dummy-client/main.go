@@ -19,7 +19,6 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
-	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
@@ -218,7 +217,7 @@ func waitForActive(parent context.Context, config *options, bootID uint32) error
 		<-ctx.Done()
 		_ = connection.Close()
 	}()
-	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
+	builder := flatbuffers.NewBuilder(transport.InitialBufferSize)
 
 	for sequence := uint64(1); ; sequence++ {
 		requestID := sequence*2 - 1
@@ -286,7 +285,7 @@ func sendRequests(
 	bootID uint32,
 	ttlMS uint64,
 ) error {
-	builder := flatbuffers.NewBuilder(protocol.NewBuilderSize)
+	builder := flatbuffers.NewBuilder(transport.InitialBufferSize)
 	for {
 		var pair requestPair
 		select {
