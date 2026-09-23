@@ -165,11 +165,11 @@ func (c *Client) runConnection(connection *transport.ClientConnection) error {
 	workers.Add(2)
 	go func() {
 		defer workers.Done()
-		results <- c.send(connection, stop)
+		results <- c.send(connection.Writer, stop)
 	}()
 	go func() {
 		defer workers.Done()
-		results <- c.receive(connection)
+		results <- c.receive(connection.Reader)
 	}()
 
 	var cause error
@@ -184,7 +184,7 @@ func (c *Client) runConnection(connection *transport.ClientConnection) error {
 	return cause
 }
 
-func (c *Client) send(connection *transport.ClientConnection, stop <-chan struct{}) error {
+func (c *Client) send(writer *transport.FrameWriter, stop <-chan struct{}) error {
 	for {
 		select {
 		case <-stop:
@@ -207,7 +207,7 @@ func (c *Client) send(connection *transport.ClientConnection, stop <-chan struct
 				return nil
 			default:
 			}
-			err := connection.Writer.BufferFrame(outbound.request.Table().Bytes)
+			err := writer.BufferFrame(outbound.request.Table().Bytes)
 			c.recycleOutboundRequest(outbound)
 			if err != nil {
 				return fmt.Errorf("send: %w", err)
@@ -216,7 +216,7 @@ func (c *Client) send(connection *transport.ClientConnection, stop <-chan struct
 			if ok {
 				continue
 			}
-			if err := connection.Writer.Flush(); err != nil {
+			if err := writer.Flush(); err != nil {
 				return fmt.Errorf("flush send batch: %w", err)
 			}
 			break
@@ -224,9 +224,9 @@ func (c *Client) send(connection *transport.ClientConnection, stop <-chan struct
 	}
 }
 
-func (c *Client) receive(connection *transport.ClientConnection) error {
+func (c *Client) receive(reader *transport.FrameReader) error {
 	for {
-		frame, err := connection.Reader.ReadFrame()
+		frame, err := reader.ReadFrame()
 		if err != nil {
 			return fmt.Errorf("receive: %w", err)
 		}
