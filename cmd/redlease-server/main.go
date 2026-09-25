@@ -35,7 +35,6 @@ type launcherConfig struct {
 	configuredMaxTTLMS   uint64
 	maxKeys              uint64
 	shardCount           uint32
-	shardQueueDepth      uint32
 }
 
 func main() {
@@ -159,12 +158,6 @@ func parseFlags(args []string, output io.Writer) (launcherConfig, error) {
 		"shard-count",
 		"server shard count (0 uses the library default)",
 	)
-	uint32Flag(
-		flags,
-		&config.shardQueueDepth,
-		"shard-queue-depth",
-		"jobs buffered per shard (0 uses the library default)",
-	)
 	flags.Usage = func() {
 		_, _ = fmt.Fprintf(output, "Usage: %s [flags]\n\n", flags.Name())
 		_, _ = fmt.Fprintln(output, "Local test launcher using plaintext TCP; no TLS or authentication.")
@@ -259,11 +252,10 @@ func (c launcherConfig) serverConfig(logger *slog.Logger) (server.Config, error)
 		maxKeys = server.DefaultMaxKeys
 	}
 	result := server.Config{
-		MaxTTL:          c.configuredMaxTTLMS,
-		MaxKeys:         maxKeys,
-		Logger:          logger,
-		ShardCount:      c.shardCount,
-		ShardQueueDepth: c.shardQueueDepth,
+		MaxTTL:     c.configuredMaxTTLMS,
+		MaxKeys:    maxKeys,
+		Logger:     logger,
+		ShardCount: c.shardCount,
 	}
 	if err := result.Validate(); err != nil {
 		return server.Config{}, err

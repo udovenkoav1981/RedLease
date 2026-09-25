@@ -130,7 +130,6 @@ func newIntegrationServer(t *testing.T) *integrationServer {
 		Logger:                slog.New(slog.DiscardHandler),
 		SkipRestartQuarantine: true,
 		ShardCount:            8,
-		ShardQueueDepth:       64,
 	})
 	if err != nil {
 		_ = listener.Close()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/mpscring"
@@ -59,7 +60,6 @@ func TestOutboundResponseIsCopiedBeforeRecycling(t *testing.T) {
 	session := &connectionSession{
 		server: s,
 		ctx:    context.Background(),
-		slots:  make(chan struct{}, 1),
 	}
 	writer := transport.NewFrameWriter(serverConn)
 	for _, want := range []protocol.Response{
@@ -70,7 +70,6 @@ func TestOutboundResponseIsCopiedBeforeRecycling(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encode response: %v", err)
 		}
-		session.slots <- struct{}{}
 		if err := session.bufferResponse(writer, outbound); err != nil {
 			t.Fatalf("buffer response: %v", err)
 		}
@@ -99,13 +98,58 @@ func TestOutboundResponseIsCopiedBeforeRecycling(t *testing.T) {
 	}
 }
 
-func TestDiscardResponsesReleasesSlots(t *testing.T) {
+func TestEnqueueResponseWaitsForQueueSpace(t *testing.T) {
+	s := newTestServer(t, 1_000, 1)
+	session := &connectionSession{
+		server:    s,
+		ctx:       t.Context(),
+		respQueue: mpscring.NewNotifying[*outboundResponse](2),
+	}
+	for requestID := uint64(1); requestID <= 2; requestID++ {
+		if !session.enqueueResponse(releaseResponse(requestID, redleasev1.LeaseStatusOK)) {
+			t.Fatalf("enqueue response %d", requestID)
+		}
+	}
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- session.enqueueResponse(releaseResponse(3, redleasev1.LeaseStatusOK))
+	}()
+	select {
+	case <-done:
+		t.Fatal("enqueue completed while response queue was full")
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	first, ok := session.respQueue.TryDequeue()
+	if !ok {
+		t.Fatal("dequeue first response")
+	}
+	s.recycleOutboundResponse(first)
+	select {
+	case enqueued := <-done:
+		if !enqueued {
+			t.Fatal("enqueue stopped after queue space became available")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("enqueue did not observe available queue space")
+	}
+
+	for {
+		response, ok := session.respQueue.TryDequeue()
+		if !ok {
+			break
+		}
+		s.recycleOutboundResponse(response)
+	}
+}
+
+func TestDiscardResponsesDrainsQueue(t *testing.T) {
 	s := newTestServer(t, 1_000, 1)
 	session := &connectionSession{
 		server:        s,
-		respQueue:     mpscring.NewNotifying[*outboundResponse](maxInFlightPerConnection),
+		respQueue:     mpscring.NewNotifying[*outboundResponse](responseQueueCapacity),
 		responsesDone: make(chan struct{}),
-		slots:         make(chan struct{}, 2),
 	}
 	for requestID := uint64(1); requestID <= 2; requestID++ {
 		outbound, err := s.newOutboundResponse(protocol.Response{
@@ -116,14 +160,13 @@ func TestDiscardResponsesReleasesSlots(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encode response: %v", err)
 		}
-		session.slots <- struct{}{}
 		if !session.respQueue.TryEnqueue(outbound) {
 			t.Fatal("enqueue response failed")
 		}
 	}
 	close(session.responsesDone)
 	session.discardResponses()
-	if got := len(session.slots); got != 0 {
-		t.Fatalf("reserved slots after discard = %d, want 0", got)
+	if got := session.respQueue.Len(); got != 0 {
+		t.Fatalf("queued responses after discard = %d, want 0", got)
 	}
 }

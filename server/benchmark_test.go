@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -9,6 +8,7 @@ import (
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
+	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
 // BenchmarkServerLeaseStorage isolates the sharded map, deadline heap and
@@ -146,38 +146,47 @@ func BenchmarkServerAcquireReleaseQueue(b *testing.B) {
 	})
 	s.phase.Store(uint32(phaseActive))
 
-	ctx := context.Background()
-	responses := make(chan protocol.Response, 1)
-	complete := func(response protocol.Response) { responses <- response }
+	session := newOperationTestSession(s, 2)
 	b.ReportAllocs()
 	b.ResetTimer()
 
 	for iteration := range b.N {
 		key := uint64(iteration)
 		id := leaseID{clientID: 1, bootID: 1, leaseSeq: uint64(iteration + 1)}
-		if !s.dispatch(ctx.Done(), shardJob{
-			operation: operation{
-				kind:           operationAcquire,
-				key:            key,
-				leaseID:        id,
-				requestedTTLMS: uint64(ProtocolMaxTTL / time.Millisecond),
-			},
-			complete: complete,
-		}) {
-			b.Fatal("dispatch Acquire")
-		}
-		if status := (<-responses).Status; status != redleasev1.LeaseStatusOK {
+		dispatchTestOperation(b, s, session, operation{
+			kind:           operationAcquire,
+			key:            key,
+			leaseID:        id,
+			requestedTTLMS: uint64(ProtocolMaxTTL / time.Millisecond),
+		})
+		if status := receiveBenchmarkOperationResponse(b, s, session).Status; status != redleasev1.LeaseStatusOK {
 			b.Fatalf("Acquire status = %s", status)
 		}
 
-		if !s.dispatch(ctx.Done(), shardJob{
-			operation: operation{kind: operationRelease, key: key, leaseID: id},
-			complete:  complete,
-		}) {
-			b.Fatal("dispatch Release")
-		}
-		if status := (<-responses).Status; status != redleasev1.LeaseStatusOK {
+		dispatchTestOperation(b, s, session, operation{kind: operationRelease, key: key, leaseID: id})
+		if status := receiveBenchmarkOperationResponse(b, s, session).Status; status != redleasev1.LeaseStatusOK {
 			b.Fatalf("Release status = %s", status)
 		}
+	}
+}
+
+func receiveBenchmarkOperationResponse(
+	b *testing.B,
+	s *Server,
+	session *connectionSession,
+) protocol.Response {
+	b.Helper()
+	for {
+		outbound, ok := session.respQueue.TryDequeue()
+		if !ok {
+			<-session.respQueue.Ready()
+			continue
+		}
+		response, err := transport.DecodeResponse(outbound.message.Table().Bytes)
+		s.recycleOutboundResponse(outbound)
+		if err != nil {
+			b.Fatalf("decode queued operation response: %v", err)
+		}
+		return response
 	}
 }

@@ -588,26 +588,37 @@ Writer каждого client connection блокируется в ожидани
 управление request lifecycle и quorum поверх transport. Оба client package
 также сразу строят generated FlatBuffers `ClientRequest`, без промежуточного
 owned request. Server разбирает generated FlatBuffers view и до чтения
-следующего frame сразу копирует нужные скаляры в `server.operation`, который
-можно безопасно передать в shard queue независимо от receive buffer.
+следующего frame сразу копирует нужные скаляры в `server.operation`, не
+удерживая ссылку на receive buffer. Для `GetTTL` connection reader сразу
+формирует ответ и синхронно помещает его в `respQueue`; операция не проходит
+через shard. Во время quarantine lease-операции также получают прямой ответ
+`NOT_READY`.
+
+В фазе `ACTIVE` операции `Acquire`, `Renew` и `Release` синхронно помещаются в
+принадлежащий выбранному shard `mpscring.NotifyingRing[operation]` фиксированной
+ёмкости 16. При заполнении ring connection reader ждёт освобождения места,
+уступая процессор другим goroutine; запросы не отбрасываются. `operation`
+содержит ссылку на connection session, поэтому shard worker после выполнения
+кладёт результат непосредственно в `respQueue`, без отдельной callback closure
+на каждый запрос.
 
 После применения операции server сразу собирает generated FlatBuffers
 `ServerResponse` на builder из общего pool; готовый frame помещается в
 connection-scoped MPSC ring, а не промежуточная структура для последующего
-кодирования. Ring и лимит in-flight операций каждого соединения имеют
-фиксированную ёмкость 4096; зарезервированный slot гарантирует место для
-response. Отдельное уведомление будит writer, а сигнал завершения закрывается
-после всех pending jobs.
-Send queue `client1of1` и response ring server используют одну generic
-реализацию fixed-capacity MPSC FIFO из `internal/mpscring`; у каждой очереди
-несколько producers и ровно один consumer.
+кодирования. Ring имеет фиксированную ёмкость 4096. Если он заполнен, producer
+уступает процессор через `runtime.Gosched()` и повторяет enqueue, пока writer не
+освободит место либо connection не будет закрыт. Отдельное уведомление будит
+writer, а сигнал завершения закрывается после всех pending jobs.
+Send queue `client1of1`, response ring server и очереди операций shard
+используют одну generic реализацию fixed-capacity MPSC FIFO из
+`internal/mpscring`; у каждой очереди несколько producers и ровно один
+consumer.
 Server response writer блокируется до первого response, копирует его и остальные уже доступные responses в
 connection write buffer, выполняет промежуточные `Flush()` только при заполнении
-64 KiB и финальный `Flush()` перед возвратом к блокирующему ожиданию. Connection
-in-flight slot освобождается, а builder возвращается в pool после копирования
-response в write buffer; последующая ошибка flush закрывает соединение.
-При закрытии соединения неотправленные responses освобождают свои slots и
-возвращают builders в pool.
+64 KiB и финальный `Flush()` перед возвратом к блокирующему ожиданию. Builder
+возвращается в pool после копирования response в write buffer; последующая
+ошибка flush закрывает соединение. При закрытии соединения builders
+неотправленных responses также возвращаются в pool.
 
 `client1of1` помещает запрос в send queue без ожидания свободного места. Если
 очередь заполнена, только новый запрос отклоняется как не выполненный:
@@ -622,14 +633,21 @@ response в write buffer; последующая ошибка flush закрыв
 операции: он не задаёт порядок применения, не сохраняется server после reconnect
 и не обеспечивает дедупликацию.
 
-Server принимает запросы одного соединения по порядку и направляет их в ordered
-очереди по `key`. Операции одного ключа применяются в порядке получения, а
-разные ключи могут обрабатываться параллельно. На практике это может быть
-реализовано фиксированным количеством worker queues с выбором очереди по
-`hash(key)`. Количество workers является параметром реализации.
+Server принимает запросы одного соединения по порядку и направляет lease-операции
+в ring выбранного по `key` shard. Один shard worker извлекает их FIFO, поэтому
+операции одного соединения над одним ключом применяются в порядке получения, а
+операции разных соединений и разных shards могут обрабатываться параллельно.
+Количество shards является параметром реализации.
 
-Завершённые операции поступают в общий response channel и отправляются одним
-TCP writer. Поэтому ответы для разных ключей могут возвращаться не в
+При остановке server сначала отменяет context и закрывает TCP-соединения, затем
+каждый `runConnection` дожидается завершения своего request reader. Только после
+завершения всех connection readers останавливаются shard workers. Поэтому на
+горячем пути `dispatch` не использует lifecycle mutex: после начала остановки
+новый producer уже не может пережить `connectionWG.Wait()` и положить operation
+в ring с завершившимся consumer.
+
+Завершённые операции поступают в connection-scoped `respQueue` и отправляются
+одним TCP writer. Поэтому ответы для разных ключей могут возвращаться не в
 порядке запросов. Client сопоставляет их через `requestID` и не ждёт предыдущий
 ответ перед отправкой следующего запроса.
 

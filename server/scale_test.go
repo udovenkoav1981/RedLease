@@ -6,7 +6,9 @@ import (
 	"time"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
+	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
 func TestServerHandlesTenThousandActiveLeases(t *testing.T) {
@@ -14,12 +16,13 @@ func TestServerHandlesTenThousandActiveLeases(t *testing.T) {
 
 	s := newTestServer(t, uint64(ProtocolMaxTTL/time.Millisecond), defaultShardCount)
 	activateServer(t, s)
-	responses := make(chan protocol.Response, leaseCount)
+	session := newOperationTestSession(s, 16_384)
 
-	submitAcquireBatch(t, s, leaseCount, 1, responses)
+	submitAcquireBatch(t, s, session, leaseCount, 1)
 	assertAcquireBatchStatus(
 		t,
-		responses,
+		s,
+		session,
 		leaseCount,
 		redleasev1.LeaseStatusOK,
 	)
@@ -27,29 +30,23 @@ func TestServerHandlesTenThousandActiveLeases(t *testing.T) {
 		t.Fatalf("resident keys = %d, want %d", got, leaseCount)
 	}
 
-	if !s.dispatch(context.Background().Done(), shardJob{
-		operation: operation{
-			kind:           operationAcquire,
-			key:            10001,
-			leaseID:        leaseID{clientID: 3, bootID: 3, leaseSeq: 1},
-			requestedTTLMS: uint64(ProtocolMaxTTL / time.Millisecond),
-		},
-		complete: func(response protocol.Response) {
-			responses <- response
-		},
-	}) {
-		t.Fatal("dispatch over-limit Acquire")
-	}
-	if status := (<-responses).Status; status != redleasev1.LeaseStatusKEY_LIMIT_REACHED {
+	dispatchTestOperation(t, s, session, operation{
+		kind:           operationAcquire,
+		key:            10001,
+		leaseID:        leaseID{clientID: 3, bootID: 3, leaseSeq: 1},
+		requestedTTLMS: uint64(ProtocolMaxTTL / time.Millisecond),
+	})
+	if status := receiveTestOperationResponse(t, s, session).Status; status != redleasev1.LeaseStatusKEY_LIMIT_REACHED {
 		t.Fatalf("10,001st Acquire = %s, want KEY_LIMIT_REACHED", status)
 	}
 
 	// Every key must still be owned simultaneously: a different lease ID is
 	// rejected for all ten thousand keys.
-	submitAcquireBatch(t, s, leaseCount, 2, responses)
+	submitAcquireBatch(t, s, session, leaseCount, 2)
 	assertAcquireBatchStatus(
 		t,
-		responses,
+		s,
+		session,
 		leaseCount,
 		redleasev1.LeaseStatusBUSY,
 	)
@@ -58,9 +55,9 @@ func TestServerHandlesTenThousandActiveLeases(t *testing.T) {
 func submitAcquireBatch(
 	t *testing.T,
 	s *Server,
+	session *connectionSession,
 	count int,
 	clientID uint32,
-	responses chan<- protocol.Response,
 ) {
 	t.Helper()
 	ctx := context.Background()
@@ -72,12 +69,10 @@ func submitAcquireBatch(
 			leaseID:        leaseID{clientID: clientID, bootID: clientID, leaseSeq: uint64(sequence)},
 			requestedTTLMS: uint64(ProtocolMaxTTL / time.Millisecond),
 		}
-		if !s.dispatch(ctx.Done(), shardJob{
-			operation: op,
-			complete: func(response protocol.Response) {
-				responses <- response
-			},
-		}) {
+		session.pending.Add(1)
+		op.session = session
+		if !s.dispatch(ctx.Done(), op) {
+			session.pending.Done()
 			t.Fatalf("dispatch Acquire %d", sequence)
 		}
 	}
@@ -85,21 +80,60 @@ func submitAcquireBatch(
 
 func assertAcquireBatchStatus(
 	t *testing.T,
-	responses <-chan protocol.Response,
+	s *Server,
+	session *connectionSession,
 	count int,
 	want redleasev1.LeaseStatus,
 ) {
 	t.Helper()
-	deadline := time.NewTimer(5 * time.Second)
-	defer deadline.Stop()
 	for received := range count {
-		select {
-		case response := <-responses:
-			if got := response.Status; got != want {
-				t.Fatalf("response %d status = %s, want %s", received, got, want)
+		response := receiveTestOperationResponse(t, s, session)
+		if got := response.Status; got != want {
+			t.Fatalf("response %d status = %s, want %s", received, got, want)
+		}
+	}
+}
+
+func newOperationTestSession(s *Server, capacity int) *connectionSession {
+	return &connectionSession{
+		server:    s,
+		ctx:       context.Background(),
+		respQueue: mpscring.NewNotifying[*outboundResponse](capacity),
+	}
+}
+
+func dispatchTestOperation(t testing.TB, s *Server, session *connectionSession, op operation) {
+	t.Helper()
+	session.pending.Add(1)
+	op.session = session
+	if !s.dispatch(context.Background().Done(), op) {
+		session.pending.Done()
+		t.Fatal("dispatch operation")
+	}
+}
+
+func receiveTestOperationResponse(
+	t testing.TB,
+	s *Server,
+	session *connectionSession,
+) protocol.Response {
+	t.Helper()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for {
+		outbound, ok := session.respQueue.TryDequeue()
+		if ok {
+			response, err := transport.DecodeResponse(outbound.message.Table().Bytes)
+			s.recycleOutboundResponse(outbound)
+			if err != nil {
+				t.Fatalf("decode queued operation response: %v", err)
 			}
-		case <-deadline.C:
-			t.Fatalf("received %d/%d responses before timeout", received, count)
+			return response
+		}
+		select {
+		case <-session.respQueue.Ready():
+		case <-timer.C:
+			t.Fatal("queued operation response timeout")
 		}
 	}
 }

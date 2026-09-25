@@ -35,9 +35,8 @@ func TestParseFlagsDefaults(t *testing.T) {
 	if config.maxKeys != server.DefaultMaxKeys {
 		t.Errorf("max keys = %d, want %d", config.maxKeys, server.DefaultMaxKeys)
 	}
-	if config.shardCount != 0 || config.shardQueueDepth != 0 {
-		t.Errorf("implementation tuning defaults = (%d, %d), want (0, 0)",
-			config.shardCount, config.shardQueueDepth)
+	if config.shardCount != 0 {
+		t.Errorf("shard count = %d, want 0", config.shardCount)
 	}
 }
 
@@ -48,7 +47,6 @@ func TestParseFlagsCustomValues(t *testing.T) {
 		"-configured-max-ttl-ms", "1234",
 		"-max-keys", "123",
 		"-shard-count", "8",
-		"-shard-queue-depth", "16",
 	}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("parseFlags: %v", err)
@@ -57,8 +55,7 @@ func TestParseFlagsCustomValues(t *testing.T) {
 		config.metricsListenAddress != "127.0.0.1:19090" ||
 		config.configuredMaxTTLMS != 1234 ||
 		config.maxKeys != 123 ||
-		config.shardCount != 8 ||
-		config.shardQueueDepth != 16 {
+		config.shardCount != 8 {
 		t.Fatalf("unexpected config: %+v", config)
 	}
 }
@@ -92,7 +89,6 @@ func TestMetricsHandlerServesPrivateRegistry(t *testing.T) {
 		Logger:                testLogger,
 		SkipRestartQuarantine: true,
 		ShardCount:            1,
-		ShardQueueDepth:       1,
 	})
 	if err != nil {
 		_ = listener.Close()
@@ -160,12 +156,11 @@ func TestServerConfigPassesImplementationTuning(t *testing.T) {
 		configuredMaxTTLMS: 1000,
 		maxKeys:            123,
 		shardCount:         8,
-		shardQueueDepth:    16,
 	}).serverConfig(testLogger)
 	if err != nil {
 		t.Fatalf("serverConfig: %v", err)
 	}
-	if config.MaxKeys != 123 || config.ShardCount != 8 || config.ShardQueueDepth != 16 {
+	if config.MaxKeys != 123 || config.ShardCount != 8 {
 		t.Fatalf("unexpected server config: %+v", config)
 	}
 }

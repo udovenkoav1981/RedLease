@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
@@ -28,7 +29,7 @@ const (
 	safetyMargin = 100 * time.Millisecond
 
 	defaultShardCount           = 256
-	defaultShardQueueDepth      = 256
+	shardQueueCapacity          = 16
 	expiredLeaseCleanupInterval = time.Minute
 )
 
@@ -37,8 +38,8 @@ const (
 var ErrServerFailed = errors.New("RedLease server failed")
 
 // Config controls one in-memory lock-server instance. MaxTTL is measured in
-// milliseconds. Zero values for MaxKeys and the queue-related fields select
-// implementation defaults.
+// milliseconds. Zero values for MaxKeys and ShardCount select implementation
+// defaults.
 type Config struct {
 	MaxTTL  uint64
 	MaxKeys uint64
@@ -53,8 +54,7 @@ type Config struct {
 	// in-memory lease state may have been lost.
 	SkipRestartQuarantine bool
 
-	ShardCount      uint32
-	ShardQueueDepth uint32
+	ShardCount uint32
 }
 
 // Validate checks values explicitly supplied by the caller.
@@ -81,9 +81,6 @@ func resolveConfig(c Config) (Config, error) {
 	}
 	if c.MaxKeys == 0 {
 		c.MaxKeys = DefaultMaxKeys
-	}
-	if c.ShardQueueDepth == 0 {
-		c.ShardQueueDepth = defaultShardQueueDepth
 	}
 	return c, nil
 }
@@ -117,7 +114,6 @@ type Server struct {
 
 	shards []*leaseShard
 
-	dispatchMu sync.RWMutex
 	// cleanupMu prevents concurrent capacity-triggered scans of all shards.
 	cleanupMu    sync.Mutex
 	connectionMu sync.Mutex
@@ -161,8 +157,9 @@ func New(listener net.Listener, c Config) (*Server, error) {
 
 	for i := range s.shards {
 		shard := &leaseShard{
-			leases: make(map[uint64]*lease),
-			jobs:   make(chan shardJob, config.ShardQueueDepth),
+			leases:     make(map[uint64]*lease),
+			operations: mpscring.NewNotifying[operation](shardQueueCapacity),
+			stop:       make(chan struct{}),
 		}
 		s.shards[i] = shard
 		s.wg.Add(1)
@@ -181,7 +178,6 @@ func New(listener net.Listener, c Config) (*Server, error) {
 		slog.Uint64("max_ttl_ms", config.MaxTTL),
 		slog.Uint64("max_keys", config.MaxKeys),
 		slog.Uint64("shard_count", uint64(config.ShardCount)),
-		slog.Uint64("shard_queue_depth", uint64(config.ShardQueueDepth)),
 	}
 	if config.SkipRestartQuarantine {
 		startAttrs = append(startAttrs, slog.String("state", "ACTIVE"))
@@ -247,15 +243,11 @@ func (s *Server) Close() error {
 		s.closeConnections()
 		s.connectionWG.Wait()
 
-		// A dispatcher holds a read lock until its send to a shard succeeds or
-		// its connection is cancelled. Cancelling above guarantees that Close can
-		// eventually acquire this write lock without closing a channel under a
-		// sender.
-		s.dispatchMu.Lock()
+		// runConnection does not finish until its request reader has stopped, so
+		// no dispatch producer remains after connectionWG.Wait.
 		for _, shard := range s.shards {
-			close(shard.jobs)
+			close(shard.stop)
 		}
-		s.dispatchMu.Unlock()
 
 		s.wg.Wait()
 		s.logger.Info("server stopped", slog.String("state", "CLOSED"))

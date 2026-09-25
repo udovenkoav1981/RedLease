@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"runtime"
 	"sync"
 	"time"
 
@@ -22,9 +23,9 @@ var (
 )
 
 const (
-	initialAcceptRetryDelay  = 5 * time.Millisecond
-	maximumAcceptRetryDelay  = time.Second
-	maxInFlightPerConnection = 4096
+	initialAcceptRetryDelay = 5 * time.Millisecond
+	maximumAcceptRetryDelay = time.Second
+	responseQueueCapacity   = 4096
 )
 
 type connectionSession struct {
@@ -34,8 +35,9 @@ type connectionSession struct {
 
 	respQueue     *mpscring.NotifyingRing[*outboundResponse]
 	responsesDone chan struct{}
-	slots         chan struct{}
+	requestsDone  chan struct{}
 	recvDone      chan error
+	pending       sync.WaitGroup
 }
 
 func (s *Server) runListener(listener net.Listener) {
@@ -101,9 +103,9 @@ func (s *Server) runConnection(conn net.Conn) {
 		server:        s,
 		conn:          conn,
 		ctx:           ctx,
-		respQueue:     mpscring.NewNotifying[*outboundResponse](maxInFlightPerConnection),
+		respQueue:     mpscring.NewNotifying[*outboundResponse](responseQueueCapacity),
 		responsesDone: make(chan struct{}),
-		slots:         make(chan struct{}, maxInFlightPerConnection),
+		requestsDone:  make(chan struct{}),
 		recvDone:      make(chan error, 1),
 	}
 	go session.receiveRequests()
@@ -111,6 +113,8 @@ func (s *Server) runConnection(conn net.Conn) {
 	writer := transport.NewFrameWriter(conn)
 	err := session.sendResponses(writer)
 	cancel()
+	_ = conn.Close()
+	<-session.requestsDone
 	go session.discardResponses()
 	s.activeConnections.Add(-1)
 	if err != nil && s.ctx.Err() == nil {
@@ -177,7 +181,6 @@ func (s *connectionSession) bufferResponse(
 	writer *transport.FrameWriter,
 	response *outboundResponse,
 ) error {
-	defer s.releaseSlot()
 	defer s.server.recycleOutboundResponse(response)
 	if err := s.server.unavailableError(); err != nil {
 		return err
@@ -196,15 +199,14 @@ func (s *connectionSession) discardResponses() {
 			return
 		}
 		s.server.recycleOutboundResponse(response)
-		s.releaseSlot()
 	}
 }
 
 func (s *connectionSession) receiveRequests() {
-	var pending pendingJobs
+	defer close(s.requestsDone)
 	defer func() {
 		go func() {
-			pending.Wait()
+			s.pending.Wait()
 			close(s.responsesDone)
 		}()
 	}()
@@ -222,43 +224,27 @@ func (s *connectionSession) receiveRequests() {
 			return
 		}
 		phaseAtReceive := serverPhase(s.server.phase.Load())
-		if err := s.reserveSlot(); err != nil {
-			s.recvDone <- err
-			return
-		}
 		if err := s.server.unavailableError(); err != nil {
-			s.releaseSlot()
 			s.recvDone <- err
 			return
 		}
 
-		pending.Add(1)
-		complete := func(response protocol.Response) {
-			defer pending.Done()
-			outbound, err := s.server.newOutboundResponse(response)
-			if err != nil {
-				s.releaseSlot()
-				s.server.fail(fmt.Errorf("encode response: %w", err))
-				return
-			}
-			if !s.respQueue.TryEnqueue(outbound) {
-				s.server.recycleOutboundResponse(outbound)
-				s.releaseSlot()
-				s.server.fail(errors.New("connection response queue full despite reserved slot"))
-				return
-			}
-		}
 		if direct {
-			complete(directResponse)
+			if !s.enqueueResponse(directResponse) {
+				return
+			}
 			continue
 		}
 		if phaseAtReceive == phaseQuarantine {
-			complete(notReadyResponse(decoded))
+			if !s.enqueueResponse(notReadyResponse(decoded)) {
+				return
+			}
 			continue
 		}
-		if !s.server.dispatch(s.ctx.Done(), shardJob{operation: decoded, complete: complete}) {
-			pending.Done()
-			s.releaseSlot()
+		decoded.session = s
+		s.pending.Add(1)
+		if !s.server.dispatch(s.ctx.Done(), decoded) {
+			s.pending.Done()
 			if err := s.server.unavailableError(); err != nil {
 				s.recvDone <- err
 			} else {
@@ -269,29 +255,22 @@ func (s *connectionSession) receiveRequests() {
 	}
 }
 
-type pendingJobs struct {
-	waitGroup sync.WaitGroup
-}
-
-func (p *pendingJobs) Add(delta int) { p.waitGroup.Add(delta) }
-func (p *pendingJobs) Done()         { p.waitGroup.Done() }
-func (p *pendingJobs) Wait()         { p.waitGroup.Wait() }
-
-func (s *connectionSession) reserveSlot() error {
-	select {
-	case s.slots <- struct{}{}:
-		return nil
-	case <-s.ctx.Done():
-		return s.ctx.Err()
+func (s *connectionSession) enqueueResponse(response protocol.Response) bool {
+	outbound, err := s.server.newOutboundResponse(response)
+	if err != nil {
+		s.server.fail(fmt.Errorf("encode response: %w", err))
+		return false
 	}
-}
-
-func (s *connectionSession) releaseSlot() {
-	select {
-	case <-s.slots:
-	default:
-		s.server.fail(errors.New("released an unreserved connection slot"))
+	for !s.respQueue.TryEnqueue(outbound) {
+		select {
+		case <-s.ctx.Done():
+			s.server.recycleOutboundResponse(outbound)
+			return false
+		default:
+			runtime.Gosched()
+		}
 	}
+	return true
 }
 
 func (s *Server) unavailableError() error {

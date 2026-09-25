@@ -20,7 +20,7 @@ type MetricsSnapshot struct {
 func (s *Server) MetricsSnapshot() MetricsSnapshot {
 	var queuedOperations uint64
 	for _, shard := range s.shards {
-		queuedOperations += uint64(len(shard.jobs))
+		queuedOperations += shard.operations.Len()
 	}
 
 	return MetricsSnapshot{

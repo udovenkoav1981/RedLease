@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"hash/maphash"
 	"log/slog"
+	"runtime"
 	"sync"
 	"time"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
@@ -71,27 +73,44 @@ type operation struct {
 	key            uint64
 	leaseID        leaseID
 	requestedTTLMS uint64
-}
-
-type shardJob struct {
-	operation operation
-	complete  func(protocol.Response)
+	session        *connectionSession
 }
 
 type leaseShard struct {
-	mu        sync.Mutex
-	leases    map[uint64]*lease
-	deadlines leaseDeadlineHeap
-	jobs      chan shardJob
+	mu         sync.Mutex
+	leases     map[uint64]*lease
+	deadlines  leaseDeadlineHeap
+	operations *mpscring.NotifyingRing[operation]
+	stop       chan struct{}
 }
 
 func (s *Server) runShard(shard *leaseShard) {
 	defer s.wg.Done()
 
-	for job := range shard.jobs {
-		response := s.apply(shard, job.operation)
-		job.complete(response)
+	for {
+		op, ok := shard.operations.TryDequeue()
+		if !ok {
+			select {
+			case <-shard.operations.Ready():
+				continue
+			case <-shard.stop:
+				for {
+					op, ok = shard.operations.TryDequeue()
+					if !ok {
+						return
+					}
+					s.applyOperation(shard, op)
+				}
+			}
+		}
+		s.applyOperation(shard, op)
 	}
+}
+
+func (s *Server) applyOperation(shard *leaseShard, op operation) {
+	response := s.apply(shard, op)
+	op.session.enqueueResponse(response)
+	op.session.pending.Done()
 }
 
 func (shard *leaseShard) addLease(key uint64, id leaseID, deadline time.Time) {
@@ -426,21 +445,15 @@ func (s *Server) shardIndex(key uint64) int {
 	return int(maphash.Comparable(hashSeed, key) % uint64(len(s.shards)))
 }
 
-func (s *Server) dispatch(ctxDone <-chan struct{}, job shardJob) bool {
-	if !s.active() {
-		return false
+func (s *Server) dispatch(ctxDone <-chan struct{}, op operation) bool {
+	shard := s.shards[s.shardIndex(op.key)]
+	for !shard.operations.TryEnqueue(op) {
+		select {
+		case <-ctxDone:
+			return false
+		default:
+			runtime.Gosched()
+		}
 	}
-
-	shard := s.shards[s.shardIndex(job.operation.key)]
-	s.dispatchMu.RLock()
-	defer s.dispatchMu.RUnlock()
-	if !s.active() {
-		return false
-	}
-	select {
-	case shard.jobs <- job:
-		return true
-	case <-ctxDone:
-		return false
-	}
+	return true
 }

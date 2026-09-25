@@ -17,7 +17,6 @@ import (
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/mpscring"
-	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
@@ -58,10 +57,9 @@ func (l *temporaryErrorListener) Addr() net.Addr { return &net.TCPAddr{} }
 func newTestServer(t *testing.T, maxTTL uint64, shardCount uint32) *Server {
 	t.Helper()
 	return newTestServerWithConfig(t, Config{
-		MaxTTL:          maxTTL,
-		Logger:          testLogger,
-		ShardCount:      shardCount,
-		ShardQueueDepth: 8,
+		MaxTTL:     maxTTL,
+		Logger:     testLogger,
+		ShardCount: shardCount,
 	})
 }
 
@@ -136,7 +134,6 @@ func TestListenerFailureFailsServer(t *testing.T) {
 		Logger:                testLogger,
 		SkipRestartQuarantine: true,
 		ShardCount:            1,
-		ShardQueueDepth:       1,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -164,7 +161,6 @@ func TestTemporaryListenerFailureIsRetried(t *testing.T) {
 		Logger:                testLogger,
 		SkipRestartQuarantine: true,
 		ShardCount:            1,
-		ShardQueueDepth:       1,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -193,6 +189,15 @@ func TestConfigDefaultsMaxKeys(t *testing.T) {
 	}
 	if config.MaxKeys != DefaultMaxKeys {
 		t.Fatalf("max keys = %d, want %d", config.MaxKeys, DefaultMaxKeys)
+	}
+}
+
+func TestShardOperationRingCapacity(t *testing.T) {
+	s := newTestServer(t, 1_000, 2)
+	for index, shard := range s.shards {
+		if got := shard.operations.Capacity(); got != shardQueueCapacity {
+			t.Fatalf("shard %d operation ring capacity = %d, want %d", index, got, shardQueueCapacity)
+		}
 	}
 }
 
@@ -261,14 +266,16 @@ func TestOperationMetricsCountActiveRequestsOnce(t *testing.T) {
 }
 
 func TestMetricsSnapshot(t *testing.T) {
-	firstJobs := make(chan shardJob, 2)
-	secondJobs := make(chan shardJob, 2)
-	firstJobs <- shardJob{}
-	secondJobs <- shardJob{}
-	secondJobs <- shardJob{}
+	firstOperations := mpscring.NewNotifying[operation](shardQueueCapacity)
+	secondOperations := mpscring.NewNotifying[operation](shardQueueCapacity)
+	if !firstOperations.TryEnqueue(operation{}) ||
+		!secondOperations.TryEnqueue(operation{}) ||
+		!secondOperations.TryEnqueue(operation{}) {
+		t.Fatal("enqueue metric test operations")
+	}
 	s := &Server{
 		config: Config{SkipRestartQuarantine: true},
-		shards: []*leaseShard{{jobs: firstJobs}, {jobs: secondJobs}},
+		shards: []*leaseShard{{operations: firstOperations}, {operations: secondOperations}},
 	}
 	s.phase.Store(uint32(phaseFailed))
 	s.keys.Store(7)
@@ -308,7 +315,6 @@ func TestSkipRestartQuarantineStartsActiveWithoutTimer(t *testing.T) {
 		Logger:                testLogger,
 		SkipRestartQuarantine: true,
 		ShardCount:            1,
-		ShardQueueDepth:       8,
 	})
 
 	if !s.active() {
@@ -887,7 +893,7 @@ func TestConnectionPreservesSameKeyFIFO(t *testing.T) {
 
 	key := uint64(1)
 	shard := s.shards[s.shardIndex(key)]
-	unblockShard := blockShard(t, shard, key)
+	unblockShard := blockShard(t, shard)
 	connection, errDone := newTestConnection(t, s)
 	if err := sendClientRequest(connection, acquireRequest(1, key, 1)); err != nil {
 		t.Fatalf("send first Acquire: %v", err)
@@ -897,9 +903,9 @@ func TestConnectionPreservesSameKeyFIFO(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(time.Second)
-	for len(shard.jobs) != 2 {
+	for shard.operations.Len() != 1 {
 		if time.Now().After(deadline) {
-			t.Fatalf("same-key requests queued = %d, want 2", len(shard.jobs))
+			t.Fatalf("same-key requests queued = %d, want 1", shard.operations.Len())
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -929,6 +935,55 @@ func TestConnectionPreservesSameKeyFIFO(t *testing.T) {
 	closeTestConnection(t, connection, errDone)
 }
 
+func TestConnectionGetTTLBypassesBlockedShard(t *testing.T) {
+	s := newTestServer(t, 1_000, 1)
+	activateServer(t, s)
+
+	key := uint64(1)
+	unblockShard := blockShard(t, s.shards[0])
+	connection, errDone := newTestConnection(t, s)
+	if err := sendClientRequest(connection, acquireRequest(1, key, 1)); err != nil {
+		t.Fatalf("send Acquire: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for s.MetricsSnapshot().AcquiresTotal != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("Acquire did not reach blocked shard")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := sendClientRequest(connection, getTTLRequest(2)); err != nil {
+		t.Fatalf("send GetTTL: %v", err)
+	}
+
+	frame, err := connection.Reader.ReadFrame()
+	if err != nil {
+		t.Fatalf("read GetTTL response: %v", err)
+	}
+	response, err := transport.DecodeResponse(frame)
+	if err != nil {
+		t.Fatalf("decode GetTTL response: %v", err)
+	}
+	if response.RequestID != 2 || response.Operation != redleasev1.ClientOperationGET_TTL || response.TTLMS != 1_000 {
+		t.Fatalf("first response = %+v, want GetTTL request 2 with TTL 1000", response)
+	}
+
+	unblockShard()
+	frame, err = connection.Reader.ReadFrame()
+	if err != nil {
+		t.Fatalf("read Acquire response: %v", err)
+	}
+	response, err = transport.DecodeResponse(frame)
+	if err != nil {
+		t.Fatalf("decode Acquire response: %v", err)
+	}
+	if response.RequestID != 1 || response.Status != redleasev1.LeaseStatusOK {
+		t.Fatalf("second response = %+v, want successful Acquire request 1", response)
+	}
+	closeTestConnection(t, connection, errDone)
+}
+
 func TestConnectionCanReplyOutOfOrderAcrossShards(t *testing.T) {
 	s := newTestServer(t, 1_000, 2)
 	activateServer(t, s)
@@ -937,7 +992,6 @@ func TestConnectionCanReplyOutOfOrderAcrossShards(t *testing.T) {
 	unblockFirstShard := blockShard(
 		t,
 		s.shards[s.shardIndex(firstKey)],
-		firstKey,
 	)
 	connection, errDone := newTestConnection(t, s)
 	if err := sendClientRequest(connection, acquireRequest(1, firstKey, 1)); err != nil {
@@ -998,13 +1052,10 @@ func TestConnectionResponseWriterFlushesAvailableResponsesAsOneBatch(t *testing.
 		server:        s,
 		conn:          countingConn,
 		ctx:           t.Context(),
-		respQueue:     mpscring.NewNotifying[*outboundResponse](maxInFlightPerConnection),
+		respQueue:     mpscring.NewNotifying[*outboundResponse](responseQueueCapacity),
 		responsesDone: make(chan struct{}),
-		slots:         make(chan struct{}, 2),
 		recvDone:      make(chan error),
 	}
-	session.slots <- struct{}{}
-	session.slots <- struct{}{}
 	first, err := s.newOutboundResponse(acquireResponse(1, redleasev1.LeaseStatusOK, 1_000))
 	if err != nil {
 		t.Fatalf("encode Acquire response: %v", err)
@@ -1049,26 +1100,12 @@ func TestConnectionResponseWriterFlushesAvailableResponsesAsOneBatch(t *testing.
 	}
 }
 
-func blockShard(t *testing.T, shard *leaseShard, key uint64) func() {
+func blockShard(t *testing.T, shard *leaseShard) func() {
 	t.Helper()
-	started := make(chan struct{})
-	unblock := make(chan struct{})
 	var unblockOnce sync.Once
-	release := func() { unblockOnce.Do(func() { close(unblock) }) }
+	shard.mu.Lock()
+	release := func() { unblockOnce.Do(shard.mu.Unlock) }
 	t.Cleanup(release)
-
-	shard.jobs <- shardJob{
-		operation: operation{kind: operationRelease, key: key},
-		complete: func(protocol.Response) {
-			close(started)
-			<-unblock
-		},
-	}
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("shard worker did not start blocker")
-	}
 	return release
 }
 
