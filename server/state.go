@@ -108,9 +108,12 @@ func (s *Server) runShard(shard *leaseShard) {
 }
 
 func (s *Server) applyOperation(shard *leaseShard, op operation) {
+	defer op.session.pending.Done()
+	if !s.active() {
+		return
+	}
 	response := s.apply(shard, op)
 	op.session.enqueueResponse(response)
-	op.session.pending.Done()
 }
 
 func (shard *leaseShard) addLease(key uint64, id leaseID, deadline time.Time) {
@@ -139,7 +142,7 @@ func (shard *leaseShard) removeExpiredLeases(now time.Time) uint64 {
 	return deleted
 }
 
-func (s *Server) removeExpiredKeys(now time.Time) bool {
+func (s *Server) removeExpiredKeys(now time.Time) {
 	s.cleanupMu.Lock()
 	defer s.cleanupMu.Unlock()
 
@@ -147,7 +150,7 @@ func (s *Server) removeExpiredKeys(now time.Time) bool {
 	for _, shard := range s.shards {
 		deleted += removeExpiredKeysFromShard(shard, now)
 	}
-	return s.releaseKeys(deleted)
+	s.releaseKeys(deleted)
 }
 
 func removeExpiredKeysFromShard(shard *leaseShard, now time.Time) uint64 {
@@ -157,9 +160,6 @@ func removeExpiredKeysFromShard(shard *leaseShard, now time.Time) uint64 {
 }
 
 func (s *Server) apply(shard *leaseShard, op operation) protocol.Response {
-	if !s.active() {
-		return notReadyResponse(op)
-	}
 	s.operationTotals[op.kind].Add(1)
 	now := time.Now()
 	switch op.kind {
@@ -186,9 +186,7 @@ func (s *Server) acquire(shard *leaseShard, op operation, now time.Time) protoco
 		if cleanupAttempted {
 			return acquireResponse(op.requestID, redleasev1.LeaseStatusKEY_LIMIT_REACHED, 0)
 		}
-		if !s.removeExpiredKeys(now) {
-			return notReadyResponse(op)
-		}
+		s.removeExpiredKeys(now)
 		cleanupAttempted = true
 	}
 }
@@ -215,9 +213,7 @@ func (s *Server) acquireLocked(
 	}
 	if exists {
 		shard.removeLease(current)
-		if !s.releaseKeys(1) {
-			return notReadyResponse(op), false
-		}
+		s.releaseKeys(1)
 	}
 
 	if effectiveTTLMS == 0 {
@@ -254,7 +250,7 @@ func (s *Server) renew(shard *leaseShard, op operation, now time.Time) protocol.
 	if !current.deadline.After(now) {
 		expiredByMS := uint64(now.Sub(current.deadline).Milliseconds())
 		shard.removeLease(current)
-		released := s.releaseKeys(1)
+		s.releaseKeys(1)
 		shard.mu.Unlock()
 		s.logLeaseOperation(
 			slog.LevelWarn,
@@ -265,9 +261,6 @@ func (s *Server) renew(shard *leaseShard, op operation, now time.Time) protocol.
 			true,
 			expiredByMS,
 		)
-		if !released {
-			return notReadyResponse(op)
-		}
 		return renewResponse(op.requestID, redleasev1.LeaseStatusSTALE, 0)
 	}
 	if current.id != op.leaseID {
@@ -297,7 +290,7 @@ func (s *Server) release(shard *leaseShard, op operation, now time.Time) protoco
 	if !current.deadline.After(now) {
 		expiredByMS := uint64(now.Sub(current.deadline).Milliseconds())
 		shard.removeLease(current)
-		released := s.releaseKeys(1)
+		s.releaseKeys(1)
 		shard.mu.Unlock()
 		s.logLeaseOperation(
 			slog.LevelWarn,
@@ -308,18 +301,12 @@ func (s *Server) release(shard *leaseShard, op operation, now time.Time) protoco
 			true,
 			expiredByMS,
 		)
-		if !released {
-			return notReadyResponse(op)
-		}
 		return releaseResponse(op.requestID, redleasev1.LeaseStatusOK)
 	}
 	if current.id == op.leaseID {
 		shard.removeLease(current)
-		released := s.releaseKeys(1)
+		s.releaseKeys(1)
 		shard.mu.Unlock()
-		if !released {
-			return notReadyResponse(op)
-		}
 		return releaseResponse(op.requestID, redleasev1.LeaseStatusOK)
 	}
 	shard.mu.Unlock()
@@ -421,7 +408,7 @@ func (s *Server) reserveKey() bool {
 	}
 }
 
-func (s *Server) releaseKeys(count uint64) bool {
+func (s *Server) releaseKeys(count uint64) {
 	for count != 0 {
 		current := s.keys.Load()
 		if count > current {
@@ -430,13 +417,12 @@ func (s *Server) releaseKeys(count uint64) bool {
 				count,
 				current,
 			))
-			return false
+			return
 		}
 		if s.keys.CompareAndSwap(current, current-count) {
-			return true
+			return
 		}
 	}
-	return true
 }
 
 var hashSeed = maphash.MakeSeed()

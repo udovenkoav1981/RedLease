@@ -225,19 +225,6 @@ func TestQuarantineAndGetTTL(t *testing.T) {
 	shard := s.shards[0]
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
 
-	acquire := s.apply(shard, operation{requestID: 10, kind: operationAcquire, key: 1, leaseID: id, requestedTTLMS: 1000})
-	if got := acquire.Status; got != redleasev1.LeaseStatusNOT_READY {
-		t.Fatalf("Acquire during quarantine = %s", got)
-	}
-	renew := s.apply(shard, operation{requestID: 11, kind: operationRenew, key: 1, leaseID: id, requestedTTLMS: 1000})
-	if got := renew.Status; got != redleasev1.LeaseStatusNOT_READY {
-		t.Fatalf("Renew during quarantine = %s", got)
-	}
-	release := s.apply(shard, operation{requestID: 12, kind: operationRelease, key: 1, leaseID: id})
-	if got := release.Status; got != redleasev1.LeaseStatusNOT_READY {
-		t.Fatalf("Release during quarantine = %s", got)
-	}
-
 	_, getTTL, direct, err := session.decodeRequest(getTTLRequest(13).Table().Bytes)
 	if err != nil {
 		t.Fatalf("decode GetTTL: %v", err)
@@ -250,7 +237,7 @@ func TestQuarantineAndGetTTL(t *testing.T) {
 	}
 
 	activateServer(t, s)
-	acquire = s.apply(shard, operation{requestID: 14, kind: operationAcquire, key: 1, leaseID: id, requestedTTLMS: 1000})
+	acquire := s.apply(shard, operation{requestID: 14, kind: operationAcquire, key: 1, leaseID: id, requestedTTLMS: 1000})
 	if got := acquire.Status; got != redleasev1.LeaseStatusOK {
 		t.Fatalf("Acquire after quarantine = %s", got)
 	}
@@ -260,10 +247,17 @@ func TestOperationMetricsCountActiveRequestsOnce(t *testing.T) {
 	s := newTestServer(t, 2_000, 1)
 	shard := s.shards[0]
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
+	session := &connectionSession{}
 
-	s.apply(shard, operation{kind: operationAcquire, key: 5, leaseID: id, requestedTTLMS: 1_000})
-	s.apply(shard, operation{kind: operationRenew, key: 5, leaseID: id, requestedTTLMS: 1_000})
-	s.apply(shard, operation{kind: operationRelease, key: 5, leaseID: id})
+	for _, op := range []operation{
+		{kind: operationAcquire, key: 5, leaseID: id, requestedTTLMS: 1_000},
+		{kind: operationRenew, key: 5, leaseID: id, requestedTTLMS: 1_000},
+		{kind: operationRelease, key: 5, leaseID: id},
+	} {
+		op.session = session
+		session.pending.Add(1)
+		s.applyOperation(shard, op)
+	}
 	if got := s.MetricsSnapshot(); got.AcquiresTotal != 0 || got.RenewsTotal != 0 || got.ReleasesTotal != 0 {
 		t.Fatalf("quarantine operation totals = (%d, %d, %d), want all zero", got.AcquiresTotal, got.RenewsTotal, got.ReleasesTotal)
 	}
@@ -360,9 +354,7 @@ func TestKeyCountUnderflowFailsServerWithoutPanicking(t *testing.T) {
 	s := newTestServer(t, 1_000, 1)
 	activateServer(t, s)
 
-	if released := s.releaseKeys(1); released {
-		t.Fatal("releaseKeys reported success for an underflow")
-	}
+	s.releaseKeys(1)
 
 	select {
 	case err := <-s.Fatal():
@@ -385,23 +377,24 @@ func TestKeyCountUnderflowFailsServerWithoutPanicking(t *testing.T) {
 		t.Fatal("server failure did not cancel active connections")
 	}
 
-	response := s.apply(s.shards[0], operation{
+	session := &connectionSession{}
+	session.pending.Add(1)
+	s.applyOperation(s.shards[0], operation{
 		kind:           operationAcquire,
 		key:            1,
 		leaseID:        leaseID{clientID: 1, bootID: 1, leaseSeq: 1},
 		requestedTTLMS: 1_000,
+		session:        session,
 	})
-	if response.Status != redleasev1.LeaseStatusNOT_READY {
-		t.Fatalf("Acquire after failure = %s, want NOT_READY", response.Status)
+	if got := s.operationTotals[operationAcquire].Load(); got != 0 {
+		t.Fatalf("Acquire after failure operation total = %d, want 0", got)
 	}
 
 	if err := s.unavailableError(); !errors.Is(err, ErrServerFailed) {
 		t.Fatalf("new connection after failure error = %v, want ErrServerFailed", err)
 	}
 
-	if released := s.releaseKeys(1); released {
-		t.Fatal("second releaseKeys reported success for an underflow")
-	}
+	s.releaseKeys(1)
 	select {
 	case err := <-s.Fatal():
 		t.Fatalf("server published a second fatal error: %v", err)

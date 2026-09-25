@@ -280,8 +280,8 @@ func (s *Server) runExpiredLeaseCleanup() {
 	for {
 		select {
 		case <-ticker.C:
-			if s.active() && !s.removeExpiredKeys(time.Now()) {
-				return
+			if s.active() {
+				s.removeExpiredKeys(time.Now())
 			}
 		case <-s.ctx.Done():
 			return
