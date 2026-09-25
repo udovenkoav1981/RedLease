@@ -22,8 +22,9 @@ var (
 )
 
 const (
-	initialAcceptRetryDelay = 5 * time.Millisecond
-	maximumAcceptRetryDelay = time.Second
+	initialAcceptRetryDelay  = 5 * time.Millisecond
+	maximumAcceptRetryDelay  = time.Second
+	maxInFlightPerConnection = 4096
 )
 
 type connectionSession struct {
@@ -100,9 +101,9 @@ func (s *Server) runConnection(conn net.Conn) {
 		server:        s,
 		conn:          conn,
 		ctx:           ctx,
-		respQueue:     mpscring.NewNotifying[*outboundResponse](),
+		respQueue:     mpscring.NewNotifying[*outboundResponse](maxInFlightPerConnection),
 		responsesDone: make(chan struct{}),
-		slots:         make(chan struct{}, mpscring.Capacity),
+		slots:         make(chan struct{}, maxInFlightPerConnection),
 		recvDone:      make(chan error, 1),
 	}
 	go session.receiveRequests()
@@ -314,8 +315,9 @@ func (s *Server) unavailableErrorUnlessClosed() error {
 func (s *Server) decodeRequest(
 	frame []byte,
 ) (decoded operation, response protocol.Response, direct bool, err error) {
-	// FlatBuffers getters view the receive buffer. Copy scalars into operation
-	// before the reader advances and reuses that buffer for another frame.
+
+	// десериализатор FlatBuffers не валидирует offset и падает в панику если в пакете мусор
+	// поэтому тут recover
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			decoded = operation{}

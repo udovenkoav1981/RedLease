@@ -184,7 +184,7 @@ func startTestConnection(t *testing.T, connection *fakeLeaseConnection, timeout 
 		cancel:          cancelClient,
 		connection:      connection.transportConnection(),
 		changed:         make(chan struct{}),
-		reqQueue:        mpscring.NewNotifying[*outboundConnectionRequest](),
+		reqQueue:        mpscring.NewNotifying[*outboundConnectionRequest](reqQueueCapacity),
 		pending:         newPendingShards(),
 	}
 	done := make(chan error, 1)
@@ -324,7 +324,7 @@ func TestConnectionFlushesAvailableRequestsAsOneBatch(t *testing.T) {
 		cancel:          cancelClient,
 		connection:      connection.transportConnection(),
 		changed:         make(chan struct{}),
-		reqQueue:        mpscring.NewNotifying[*outboundConnectionRequest](),
+		reqQueue:        mpscring.NewNotifying[*outboundConnectionRequest](reqQueueCapacity),
 		pending:         newPendingShards(),
 	}
 	for key := uint64(1); key <= 3; key++ {
@@ -459,7 +459,7 @@ func TestAcquireReturnsNotAcquiredWhenSendQueueIsFull(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("writer did not start")
 	}
-	for request := range uint64(mpscring.Capacity) {
+	for request := range uint64(reqQueueCapacity) {
 		if err := client.submitNoResponse(client.newReleaseRequest(request+2, request+2)); err != nil {
 			t.Fatalf("fill send queue at request %d: %v", request, err)
 		}

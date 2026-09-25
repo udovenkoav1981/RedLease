@@ -998,7 +998,7 @@ func TestConnectionResponseWriterFlushesAvailableResponsesAsOneBatch(t *testing.
 		server:        s,
 		conn:          countingConn,
 		ctx:           t.Context(),
-		respQueue:     mpscring.NewNotifying[*outboundResponse](),
+		respQueue:     mpscring.NewNotifying[*outboundResponse](maxInFlightPerConnection),
 		responsesDone: make(chan struct{}),
 		slots:         make(chan struct{}, 2),
 		recvDone:      make(chan error),

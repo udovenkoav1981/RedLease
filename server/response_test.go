@@ -103,7 +103,7 @@ func TestDiscardResponsesReleasesSlots(t *testing.T) {
 	s := newTestServer(t, 1_000, 1)
 	session := &connectionSession{
 		server:        s,
-		respQueue:     mpscring.NewNotifying[*outboundResponse](),
+		respQueue:     mpscring.NewNotifying[*outboundResponse](maxInFlightPerConnection),
 		responsesDone: make(chan struct{}),
 		slots:         make(chan struct{}, 2),
 	}

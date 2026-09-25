@@ -17,6 +17,8 @@ import (
 // ErrClientClosed is returned when an operation is attempted after Close.
 var ErrClientClosed = errors.New("RedLease 1/1 client closed")
 
+const reqQueueCapacity = 4096
+
 // Client owns one persistent reconnecting TCP connection to one lock-server.
 type Client struct {
 	clientID        uint32
@@ -73,7 +75,7 @@ func New(config Config) (*Client, error) {
 		ctx:      ctx,
 		cancel:   cancel,
 		changed:  make(chan struct{}),
-		reqQueue: mpscring.NewNotifying[*outboundConnectionRequest](),
+		reqQueue: mpscring.NewNotifying[*outboundConnectionRequest](reqQueueCapacity),
 		pending:  newPendingShards(),
 	}
 	if config.ResponseTimeout != 0 {

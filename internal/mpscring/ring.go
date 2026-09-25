@@ -2,18 +2,19 @@ package mpscring
 
 import "sync/atomic"
 
-// Capacity is the fixed number of elements held by a ring.
-const Capacity = 4096
+const minimumCapacity = 2
 
 // ring is a bounded multi-producer, single-consumer FIFO. A producer claims a
 // position with tail, then publishes its value through the slot sequence. The
 // consumer never reads a claimed but unpublished slot.
 type ring[T any] struct {
-	head  atomic.Uint64
-	_     [56]byte // Keep the frequently written head and tail on separate cache lines.
-	tail  atomic.Uint64
-	_     [56]byte
-	slots [Capacity]slot[T]
+	head     atomic.Uint64
+	_        [56]byte // Keep the frequently written head and tail on separate cache lines.
+	tail     atomic.Uint64
+	_        [56]byte
+	slots    []slot[T]
+	mask     uint64
+	capacity uint64
 }
 
 type slot[T any] struct {
@@ -21,9 +22,17 @@ type slot[T any] struct {
 	value    T
 }
 
-// newRing creates an empty Ring.
-func newRing[T any]() *ring[T] {
-	queue := &ring[T]{}
+// newRing creates an empty ring. Capacity must be a power of two greater than
+// one so the sequence algorithm can distinguish full and empty slots.
+func newRing[T any](capacity int) *ring[T] {
+	if capacity < minimumCapacity || capacity&(capacity-1) != 0 {
+		panic("mpscring: capacity must be a power of two greater than one")
+	}
+	queue := &ring[T]{
+		slots:    make([]slot[T], capacity),
+		mask:     uint64(capacity - 1),
+		capacity: uint64(capacity),
+	}
 	for index := range queue.slots {
 		queue.slots[index].sequence.Store(uint64(index)) //nolint:gosec // Array index is nonnegative.
 	}
@@ -34,7 +43,7 @@ func newRing[T any]() *ring[T] {
 func (q *ring[T]) tryEnqueue(value T) bool {
 	for {
 		position := q.tail.Load()
-		slot := &q.slots[position&(Capacity-1)]
+		slot := &q.slots[position&q.mask]
 		sequence := slot.sequence.Load()
 		if sequence == position {
 			if q.tail.CompareAndSwap(position, position+1) {
@@ -55,7 +64,7 @@ func (q *ring[T]) tryEnqueue(value T) bool {
 // It must be called by exactly one consumer at a time.
 func (q *ring[T]) tryDequeue() (T, bool) {
 	position := q.head.Load()
-	slot := &q.slots[position&(Capacity-1)]
+	slot := &q.slots[position&q.mask]
 	if slot.sequence.Load() != position+1 {
 		var zero T
 		return zero, false
@@ -64,7 +73,7 @@ func (q *ring[T]) tryDequeue() (T, bool) {
 	var zero T
 	slot.value = zero
 	q.head.Store(position + 1)
-	slot.sequence.Store(position + Capacity)
+	slot.sequence.Store(position + q.capacity)
 	return value, true
 }
 
@@ -82,9 +91,10 @@ type NotifyingRing[T any] struct {
 }
 
 // NewNotifying creates an empty ring with a buffered wakeup signal.
-func NewNotifying[T any]() *NotifyingRing[T] {
+// It panics if capacity is not a power of two greater than one.
+func NewNotifying[T any](capacity int) *NotifyingRing[T] {
 	return &NotifyingRing[T]{
-		ring:  newRing[T](),
+		ring:  newRing[T](capacity),
 		ready: make(chan struct{}, 1),
 	}
 }
@@ -114,4 +124,9 @@ func (q *NotifyingRing[T]) Ready() <-chan struct{} {
 // Len returns a momentary snapshot of the number of claimed queue positions.
 func (q *NotifyingRing[T]) Len() uint64 {
 	return q.ring.len()
+}
+
+// Capacity returns the maximum number of elements held by the ring.
+func (q *NotifyingRing[T]) Capacity() int {
+	return len(q.ring.slots)
 }

@@ -6,12 +6,14 @@ import (
 	"testing"
 )
 
+const testCapacity = 64
+
 func TestRingCapacityAndWrap(t *testing.T) {
-	queue := newRing[*int]()
-	values := make([]int, Capacity*2)
+	queue := newRing[*int](testCapacity)
+	values := make([]int, testCapacity*2)
 	for cycle := range 2 {
-		for index := range Capacity {
-			value := &values[cycle*Capacity+index]
+		for index := range testCapacity {
+			value := &values[cycle*testCapacity+index]
 			if !queue.tryEnqueue(value) {
 				t.Fatalf("enqueue cycle %d at %d failed", cycle, index)
 			}
@@ -19,11 +21,11 @@ func TestRingCapacityAndWrap(t *testing.T) {
 		if queue.tryEnqueue(new(int)) {
 			t.Fatal("enqueue beyond capacity succeeded")
 		}
-		if got := queue.len(); got != Capacity {
-			t.Fatalf("queue length = %d, want %d", got, Capacity)
+		if got := queue.len(); got != testCapacity {
+			t.Fatalf("queue length = %d, want %d", got, testCapacity)
 		}
-		for index := range Capacity {
-			want := &values[cycle*Capacity+index]
+		for index := range testCapacity {
+			want := &values[cycle*testCapacity+index]
 			got, ok := queue.tryDequeue()
 			if !ok || got != want {
 				t.Fatalf("dequeue = %p, %t; want %p", got, ok, want)
@@ -43,7 +45,7 @@ func TestRingConcurrentProducers(t *testing.T) {
 		producerCount = 16
 		perProducer   = 1_000
 	)
-	queue := newRing[*int]()
+	queue := newRing[*int](testCapacity)
 	values := make([]int, producerCount*perProducer)
 	var producers sync.WaitGroup
 	for producer := range producerCount {
@@ -77,7 +79,10 @@ func TestRingConcurrentProducers(t *testing.T) {
 }
 
 func TestNotifyingRingCoalescesWakeups(t *testing.T) {
-	queue := NewNotifying[*int]()
+	queue := NewNotifying[*int](testCapacity)
+	if got := queue.Capacity(); got != testCapacity {
+		t.Fatalf("queue capacity = %d, want %d", got, testCapacity)
+	}
 	first := 1
 	second := 2
 
@@ -105,5 +110,18 @@ func TestNotifyingRingCoalescesWakeups(t *testing.T) {
 	}
 	if got, ok := queue.TryDequeue(); !ok || got != &second {
 		t.Fatalf("second dequeue = %p, %t; want %p, true", got, ok, &second)
+	}
+}
+
+func TestNewNotifyingRejectsInvalidCapacity(t *testing.T) {
+	for _, capacity := range []int{-1, 0, 1, 3, 6} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("NewNotifying capacity %d did not panic", capacity)
+				}
+			}()
+			NewNotifying[int](capacity)
+		}()
 	}
 }
