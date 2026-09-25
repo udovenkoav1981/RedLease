@@ -442,7 +442,7 @@ func (s *Server) releaseKeys(count uint64) bool {
 var hashSeed = maphash.MakeSeed()
 
 func (s *Server) shardIndex(key uint64) int {
-	return int(maphash.Comparable(hashSeed, key) % uint64(len(s.shards)))
+	return int(maphash.Comparable(hashSeed, key) & s.shardMask)
 }
 
 func (s *Server) dispatch(ctxDone <-chan struct{}, op operation) bool {

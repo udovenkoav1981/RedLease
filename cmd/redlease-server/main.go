@@ -156,7 +156,7 @@ func parseFlags(args []string, output io.Writer) (launcherConfig, error) {
 		flags,
 		&config.shardCount,
 		"shard-count",
-		"server shard count (0 uses the library default)",
+		"server shard count; must be a power of two (0 uses the library default)",
 	)
 	flags.Usage = func() {
 		_, _ = fmt.Fprintf(output, "Usage: %s [flags]\n\n", flags.Name())

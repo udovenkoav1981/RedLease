@@ -39,7 +39,7 @@ var ErrServerFailed = errors.New("RedLease server failed")
 
 // Config controls one in-memory lock-server instance. MaxTTL is measured in
 // milliseconds. Zero values for MaxKeys and ShardCount select implementation
-// defaults.
+// defaults. A nonzero ShardCount must be a power of two.
 type Config struct {
 	MaxTTL  uint64
 	MaxKeys uint64
@@ -66,6 +66,8 @@ func (c Config) Validate() error {
 		return errors.New("max TTL must be positive")
 	case c.MaxTTL > uint64(ProtocolMaxTTL/time.Millisecond):
 		return fmt.Errorf("max TTL must not exceed %s", ProtocolMaxTTL)
+	case c.ShardCount != 0 && c.ShardCount&(c.ShardCount-1) != 0:
+		return errors.New("shard count must be a power of two")
 	default:
 		return nil
 	}
@@ -112,7 +114,8 @@ type Server struct {
 	timer  *time.Timer
 	fatal  chan error
 
-	shards []*leaseShard
+	shards    []*leaseShard
+	shardMask uint64
 
 	// cleanupMu prevents concurrent capacity-triggered scans of all shards.
 	cleanupMu    sync.Mutex
@@ -146,6 +149,7 @@ func New(listener net.Listener, c Config) (*Server, error) {
 		cancel:      cancel,
 		fatal:       make(chan error, 1),
 		shards:      make([]*leaseShard, config.ShardCount),
+		shardMask:   uint64(config.ShardCount - 1),
 		listener:    listener,
 		connections: make(map[net.Conn]struct{}),
 	}

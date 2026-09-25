@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"hash/maphash"
 	"sync"
 	"testing"
 	"time"
@@ -11,12 +12,46 @@ import (
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
+var benchmarkShardIndex int
+
+//go:noinline
+func benchmarkShardIndexModulo(key, shardCount uint64) int {
+	return int(maphash.Comparable(hashSeed, key) % shardCount)
+}
+
+//go:noinline
+func benchmarkShardIndexMask(key, shardMask uint64) int {
+	return int(maphash.Comparable(hashSeed, key) & shardMask)
+}
+
+func BenchmarkShardIndex(b *testing.B) {
+	b.Run("maphash_modulo", func(b *testing.B) {
+		key := uint64(1)
+		b.ReportAllocs()
+		for range b.N {
+			key = uint64(benchmarkShardIndexModulo(key, defaultShardCount)) + 1
+		}
+		benchmarkShardIndex = int(key)
+	})
+	b.Run("maphash_mask", func(b *testing.B) {
+		key := uint64(1)
+		b.ReportAllocs()
+		for range b.N {
+			key = uint64(benchmarkShardIndexMask(key, defaultShardCount-1)) + 1
+		}
+		benchmarkShardIndex = int(key)
+	})
+}
+
 // BenchmarkServerLeaseStorage isolates the sharded map, deadline heap and
 // shard mutexes from the request queue, protocol and response allocation.
 func BenchmarkServerLeaseStorage(b *testing.B) {
 	for _, workers := range []int{1, 2, 4, 8, 16, 32, 64} {
 		b.Run(fmt.Sprintf("workers=%d", workers), func(b *testing.B) {
-			server := &Server{shards: make([]*leaseShard, defaultShardCount)}
+			server := &Server{
+				shards:    make([]*leaseShard, defaultShardCount),
+				shardMask: defaultShardCount - 1,
+			}
 			deadline := time.Now().Add(time.Minute)
 			for index := range server.shards {
 				shard := &leaseShard{leases: make(map[uint64]*lease)}
@@ -55,7 +90,8 @@ func BenchmarkServerApplyAcquireRelease(b *testing.B) {
 					MaxTTL:  uint64(ProtocolMaxTTL / time.Millisecond),
 					MaxKeys: DefaultMaxKeys,
 				},
-				shards: make([]*leaseShard, defaultShardCount),
+				shards:    make([]*leaseShard, defaultShardCount),
+				shardMask: defaultShardCount - 1,
 			}
 			for index := range server.shards {
 				server.shards[index] = &leaseShard{leases: make(map[uint64]*lease)}

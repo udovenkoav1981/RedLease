@@ -192,6 +192,24 @@ func TestConfigDefaultsMaxKeys(t *testing.T) {
 	}
 }
 
+func TestConfigRejectsShardCountThatIsNotPowerOfTwo(t *testing.T) {
+	for _, shardCount := range []uint32{3, 6, 255, 257} {
+		err := (Config{MaxTTL: 1_000, Logger: testLogger, ShardCount: shardCount}).Validate()
+		if err == nil {
+			t.Errorf("ShardCount %d was accepted", shardCount)
+		}
+	}
+}
+
+func TestConfigAcceptsPowerOfTwoShardCountAndDefault(t *testing.T) {
+	for _, shardCount := range []uint32{0, 1, 2, 256, 1024} {
+		err := (Config{MaxTTL: 1_000, Logger: testLogger, ShardCount: shardCount}).Validate()
+		if err != nil {
+			t.Errorf("ShardCount %d: %v", shardCount, err)
+		}
+	}
+}
+
 func TestShardOperationRingCapacity(t *testing.T) {
 	s := newTestServer(t, 1_000, 2)
 	for index, shard := range s.shards {
