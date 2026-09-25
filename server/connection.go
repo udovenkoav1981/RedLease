@@ -218,7 +218,7 @@ func (s *connectionSession) receiveRequests() {
 			s.recvDone <- err
 			return
 		}
-		decoded, directResponse, direct, err := s.server.decodeRequest(frame)
+		decoded, directResponse, direct, err := s.decodeRequest(frame)
 		if err != nil {
 			s.recvDone <- err
 			return
@@ -291,7 +291,7 @@ func (s *Server) unavailableErrorUnlessClosed() error {
 	return s.unavailableError()
 }
 
-func (s *Server) decodeRequest(
+func (s *connectionSession) decodeRequest(
 	frame []byte,
 ) (decoded operation, response protocol.Response, direct bool, err error) {
 
@@ -371,7 +371,7 @@ func (s *Server) decodeRequest(
 			RequestID: request.RequestId(),
 			Operation: redleasev1.ClientOperationGET_TTL,
 			Status:    redleasev1.LeaseStatusOK,
-			TTLMS:     s.config.MaxTTL,
+			TTLMS:     s.server.config.MaxTTL,
 		}, true, nil
 
 	default:

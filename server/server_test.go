@@ -221,6 +221,7 @@ func TestShardOperationRingCapacity(t *testing.T) {
 
 func TestQuarantineAndGetTTL(t *testing.T) {
 	s := newTestServer(t, 2_000, 1)
+	session := &connectionSession{server: s}
 	shard := s.shards[0]
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
 
@@ -237,7 +238,7 @@ func TestQuarantineAndGetTTL(t *testing.T) {
 		t.Fatalf("Release during quarantine = %s", got)
 	}
 
-	_, getTTL, direct, err := s.decodeRequest(getTTLRequest(13).Table().Bytes)
+	_, getTTL, direct, err := session.decodeRequest(getTTLRequest(13).Table().Bytes)
 	if err != nil {
 		t.Fatalf("decode GetTTL: %v", err)
 	}
@@ -1217,13 +1218,14 @@ func finishTestClientRequest(builder *flatbuffers.Builder) *redleasev1.ClientReq
 
 func TestDecodeInvalidRequest(t *testing.T) {
 	s := newTestServer(t, 1_000, 1)
+	session := &connectionSession{server: s}
 	for _, request := range []*redleasev1.ClientRequest{
 		requestWithoutPayload(redleasev1.ClientOperationACQUIRE),
 		requestWithoutPayload(redleasev1.ClientOperationRENEW),
 		requestWithoutPayload(redleasev1.ClientOperationRELEASE),
 		requestWithoutPayload(redleasev1.ClientOperation(255)),
 	} {
-		_, _, _, err := s.decodeRequest(request.Table().Bytes)
+		_, _, _, err := session.decodeRequest(request.Table().Bytes)
 		if !errors.Is(err, transport.ErrMalformedFrame) {
 			t.Fatalf("decodeRequest(%v) error = %v, want ErrMalformedFrame", request, err)
 		}
@@ -1234,7 +1236,7 @@ func TestDecodeInvalidRequest(t *testing.T) {
 		{255, 0, 0, 0, 0, 0, 0, 0},
 		{4, 0, 0, 0, 255, 255, 255, 127},
 	} {
-		_, _, _, err := s.decodeRequest(frame)
+		_, _, _, err := session.decodeRequest(frame)
 		if !errors.Is(err, transport.ErrMalformedFrame) {
 			t.Fatalf("decodeRequest(%x) error = %v, want ErrMalformedFrame", frame, err)
 		}
@@ -1243,8 +1245,9 @@ func TestDecodeInvalidRequest(t *testing.T) {
 
 func TestDecodeRequestOwnsScalarsAfterReceiveBufferReuse(t *testing.T) {
 	s := newTestServer(t, 1_000, 1)
+	session := &connectionSession{server: s}
 	frame := acquireRequest(21, 22, 23).Table().Bytes
-	op, _, direct, err := s.decodeRequest(frame)
+	op, _, direct, err := session.decodeRequest(frame)
 	if err != nil || direct {
 		t.Fatalf("decode Acquire: operation=%+v direct=%t error=%v", op, direct, err)
 	}
