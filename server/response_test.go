@@ -103,7 +103,7 @@ func TestDiscardResponsesReleasesSlots(t *testing.T) {
 	s := newTestServer(t, 1_000, 1)
 	session := &connectionSession{
 		server:        s,
-		responses:     mpscring.NewNotifying[*outboundResponse](),
+		respQueue:     mpscring.NewNotifying[*outboundResponse](),
 		responsesDone: make(chan struct{}),
 		slots:         make(chan struct{}, 2),
 	}
@@ -117,7 +117,7 @@ func TestDiscardResponsesReleasesSlots(t *testing.T) {
 			t.Fatalf("encode response: %v", err)
 		}
 		session.slots <- struct{}{}
-		if !session.responses.TryEnqueue(outbound) {
+		if !session.respQueue.TryEnqueue(outbound) {
 			t.Fatal("enqueue response failed")
 		}
 	}

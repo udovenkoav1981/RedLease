@@ -35,7 +35,7 @@ type Client struct {
 	closed     bool
 	changed    chan struct{}
 
-	sendQueue  *mpscring.NotifyingRing[*outboundConnectionRequest]
+	reqQueue   *mpscring.NotifyingRing[*outboundConnectionRequest]
 	pending    [pendingShardCount]*pendingShard
 	futurePool sync.Pool
 
@@ -70,11 +70,11 @@ func New(config Config) (*Client, error) {
 			slog.Uint64("client_id", uint64(config.ClientID)),
 			slog.String("server_target", config.Target),
 		),
-		ctx:       ctx,
-		cancel:    cancel,
-		changed:   make(chan struct{}),
-		sendQueue: mpscring.NewNotifying[*outboundConnectionRequest](),
-		pending:   newPendingShards(),
+		ctx:      ctx,
+		cancel:   cancel,
+		changed:  make(chan struct{}),
+		reqQueue: mpscring.NewNotifying[*outboundConnectionRequest](),
+		pending:  newPendingShards(),
 	}
 	if config.ResponseTimeout != 0 {
 		client.responseTimeout = time.Duration(config.ResponseTimeout) * time.Millisecond

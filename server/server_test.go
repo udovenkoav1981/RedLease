@@ -998,7 +998,7 @@ func TestConnectionResponseWriterFlushesAvailableResponsesAsOneBatch(t *testing.
 		server:        s,
 		conn:          countingConn,
 		ctx:           t.Context(),
-		responses:     mpscring.NewNotifying[*outboundResponse](),
+		respQueue:     mpscring.NewNotifying[*outboundResponse](),
 		responsesDone: make(chan struct{}),
 		slots:         make(chan struct{}, 2),
 		recvDone:      make(chan error),
@@ -1013,13 +1013,13 @@ func TestConnectionResponseWriterFlushesAvailableResponsesAsOneBatch(t *testing.
 	if err != nil {
 		t.Fatalf("encode Release response: %v", err)
 	}
-	if !session.responses.TryEnqueue(first) || !session.responses.TryEnqueue(second) {
+	if !session.respQueue.TryEnqueue(first) || !session.respQueue.TryEnqueue(second) {
 		t.Fatal("enqueue response failed")
 	}
 
 	done := make(chan error, 1)
 	go func() {
-		done <- session.writeResponses(transport.NewFrameWriter(countingConn))
+		done <- session.sendResponses(transport.NewFrameWriter(countingConn))
 	}()
 	client := transport.NewClientConnection(clientConn)
 	for requestID := uint64(1); requestID <= 2; requestID++ {
@@ -1039,7 +1039,7 @@ func TestConnectionResponseWriterFlushesAvailableResponsesAsOneBatch(t *testing.
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("write responses: %v", err)
+			t.Fatalf("send responses: %v", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("response writer did not stop")

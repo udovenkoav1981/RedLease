@@ -184,7 +184,7 @@ func startTestConnection(t *testing.T, connection *fakeLeaseConnection, timeout 
 		cancel:          cancelClient,
 		connection:      connection.transportConnection(),
 		changed:         make(chan struct{}),
-		sendQueue:       mpscring.NewNotifying[*outboundConnectionRequest](),
+		reqQueue:        mpscring.NewNotifying[*outboundConnectionRequest](),
 		pending:         newPendingShards(),
 	}
 	done := make(chan error, 1)
@@ -324,7 +324,7 @@ func TestConnectionFlushesAvailableRequestsAsOneBatch(t *testing.T) {
 		cancel:          cancelClient,
 		connection:      connection.transportConnection(),
 		changed:         make(chan struct{}),
-		sendQueue:       mpscring.NewNotifying[*outboundConnectionRequest](),
+		reqQueue:        mpscring.NewNotifying[*outboundConnectionRequest](),
 		pending:         newPendingShards(),
 	}
 	for key := uint64(1); key <= 3; key++ {
@@ -569,7 +569,7 @@ func TestReconnectKeepsQueuedRequestAndPendingResponses(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("old reader or writer did not finish")
 	}
-	if got := client.sendQueue.Len(); got != 1 {
+	if got := client.reqQueue.Len(); got != 1 {
 		t.Fatalf("queue after disconnect = %d, want 1", got)
 	}
 	pendingCount := testPendingCount(client)
@@ -655,7 +655,7 @@ func TestClientCloseWakesPendingAndDiscardsQueue(t *testing.T) {
 			t.Fatalf("pending result after Close = %v, want ErrClientClosed", err)
 		}
 	}
-	if got := client.sendQueue.Len(); got != 0 {
+	if got := client.reqQueue.Len(); got != 0 {
 		t.Fatalf("queue after Close = %d, want 0", got)
 	}
 }

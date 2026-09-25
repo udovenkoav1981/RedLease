@@ -133,7 +133,7 @@ func (c *Client) enqueue(request *outboundConnectionRequest, result chan connect
 	if result != nil {
 		shard.pending[requestID] = result
 	}
-	if c.sendQueue.TryEnqueue(request) {
+	if c.reqQueue.TryEnqueue(request) {
 		shard.mu.Unlock()
 		return nil
 	}
@@ -165,7 +165,7 @@ func (c *Client) runConnection(connection *transport.ClientConnection) error {
 	workers.Add(2)
 	go func() {
 		defer workers.Done()
-		results <- c.send(connection.Writer, stop)
+		results <- c.sendRequests(connection.Writer, stop)
 	}()
 	go func() {
 		defer workers.Done()
@@ -184,19 +184,19 @@ func (c *Client) runConnection(connection *transport.ClientConnection) error {
 	return cause
 }
 
-func (c *Client) send(writer *transport.FrameWriter, stop <-chan struct{}) error {
+func (c *Client) sendRequests(writer *transport.FrameWriter, stop <-chan struct{}) error {
 	for {
 		select {
 		case <-stop:
 			return nil
 		default:
 		}
-		outbound, ok := c.sendQueue.TryDequeue()
+		outbound, ok := c.reqQueue.TryDequeue()
 		if !ok {
 			select {
 			case <-stop:
 				return nil
-			case <-c.sendQueue.Ready():
+			case <-c.reqQueue.Ready():
 			}
 			continue
 		}
@@ -212,7 +212,7 @@ func (c *Client) send(writer *transport.FrameWriter, stop <-chan struct{}) error
 			if err != nil {
 				return fmt.Errorf("send: %w", err)
 			}
-			outbound, ok = c.sendQueue.TryDequeue()
+			outbound, ok = c.reqQueue.TryDequeue()
 			if ok {
 				continue
 			}
@@ -240,7 +240,7 @@ func (c *Client) receive(reader *transport.FrameReader) error {
 
 func (c *Client) discardQueuedRequests() {
 	for {
-		request, ok := c.sendQueue.TryDequeue()
+		request, ok := c.reqQueue.TryDequeue()
 		if !ok {
 			return
 		}

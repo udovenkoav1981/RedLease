@@ -31,7 +31,7 @@ type connectionSession struct {
 	conn   net.Conn
 	ctx    context.Context //nolint:containedctx // Session owns this connection-scoped context.
 
-	responses     *mpscring.NotifyingRing[*outboundResponse]
+	respQueue     *mpscring.NotifyingRing[*outboundResponse]
 	responsesDone chan struct{}
 	slots         chan struct{}
 	recvDone      chan error
@@ -100,15 +100,15 @@ func (s *Server) runConnection(conn net.Conn) {
 		server:        s,
 		conn:          conn,
 		ctx:           ctx,
-		responses:     mpscring.NewNotifying[*outboundResponse](),
+		respQueue:     mpscring.NewNotifying[*outboundResponse](),
 		responsesDone: make(chan struct{}),
 		slots:         make(chan struct{}, mpscring.Capacity),
 		recvDone:      make(chan error, 1),
 	}
-	go session.receive()
+	go session.receiveRequests()
 
 	writer := transport.NewFrameWriter(conn)
-	err := session.writeResponses(writer)
+	err := session.sendResponses(writer)
 	cancel()
 	go session.discardResponses()
 	s.activeConnections.Add(-1)
@@ -128,17 +128,17 @@ func (s *Server) closeConnections() {
 	}
 }
 
-func (s *connectionSession) writeResponses(writer *transport.FrameWriter) error {
+func (s *connectionSession) sendResponses(writer *transport.FrameWriter) error {
 	recvDone := s.recvDone
 
 	for {
-		response, ok := s.responses.TryDequeue()
+		response, ok := s.respQueue.TryDequeue()
 		if !ok {
 			select {
-			case <-s.responses.Ready():
+			case <-s.respQueue.Ready():
 				continue
 			case <-s.responsesDone:
-				response, ok = s.responses.TryDequeue()
+				response, ok = s.respQueue.TryDequeue()
 				if !ok {
 					return s.server.unavailableErrorUnlessClosed()
 				}
@@ -157,7 +157,7 @@ func (s *connectionSession) writeResponses(writer *transport.FrameWriter) error 
 			if err := s.bufferResponse(writer, response); err != nil {
 				return err
 			}
-			response, ok = s.responses.TryDequeue()
+			response, ok = s.respQueue.TryDequeue()
 			if ok {
 				continue
 			}
@@ -190,7 +190,7 @@ func (s *connectionSession) bufferResponse(
 func (s *connectionSession) discardResponses() {
 	<-s.responsesDone
 	for {
-		response, ok := s.responses.TryDequeue()
+		response, ok := s.respQueue.TryDequeue()
 		if !ok {
 			return
 		}
@@ -199,7 +199,7 @@ func (s *connectionSession) discardResponses() {
 	}
 }
 
-func (s *connectionSession) receive() {
+func (s *connectionSession) receiveRequests() {
 	var pending pendingJobs
 	defer func() {
 		go func() {
@@ -240,7 +240,7 @@ func (s *connectionSession) receive() {
 				s.server.fail(fmt.Errorf("encode response: %w", err))
 				return
 			}
-			if !s.responses.TryEnqueue(outbound) {
+			if !s.respQueue.TryEnqueue(outbound) {
 				s.server.recycleOutboundResponse(outbound)
 				s.releaseSlot()
 				s.server.fail(errors.New("connection response queue full despite reserved slot"))
