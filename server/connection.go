@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/mpscring"
@@ -17,6 +19,11 @@ import (
 var (
 	errServerClosed       = errors.New("server is closed")
 	errServerNotAccepting = errors.New("server is not accepting work")
+)
+
+const (
+	initialAcceptRetryDelay = 5 * time.Millisecond
+	maximumAcceptRetryDelay = time.Second
 )
 
 type connectionSession struct {
@@ -30,104 +37,63 @@ type connectionSession struct {
 	recvDone      chan error
 }
 
-// Serve accepts persistent RedLease TCP connections on listener. Server owns
-// listener after a successful call and closes it during Close or fatal failure.
-// Serve may be called only once.
-func (s *Server) Serve(listener net.Listener) error {
-	if listener == nil {
-		return errors.New("listener must not be nil")
-	}
-	if err := s.unavailableError(); err != nil {
-		return err
-	}
+func (s *Server) runListener(listener net.Listener) {
+	defer s.wg.Done()
 
-	s.transportMu.Lock()
-	if s.serveStarted {
-		s.transportMu.Unlock()
-		return errors.New("server Serve called more than once")
-	}
-	s.serveStarted = true
-	s.listener = listener
-	s.transportMu.Unlock()
-
-	defer func() {
-		s.transportMu.Lock()
-		if s.listener == listener {
-			s.listener = nil
-		}
-		s.transportMu.Unlock()
-	}()
-
+	var retryDelay time.Duration
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			if s.ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
-				return s.unavailableErrorUnlessClosed()
-			}
-			return fmt.Errorf("accept RedLease connection: %w", err)
-		}
-		if tcpConn, ok := conn.(*net.TCPConn); ok {
-			if err := tcpConn.SetNoDelay(true); err != nil {
-				_ = conn.Close()
+			temporary, ok := err.(interface{ Temporary() bool })
+			if ok && temporary.Temporary() {
+				if retryDelay == 0 {
+					retryDelay = initialAcceptRetryDelay
+				} else {
+					retryDelay = min(retryDelay*2, maximumAcceptRetryDelay)
+				}
+				s.logger.Warn(
+					"temporary listener accept error",
+					slog.Any("error", err),
+					slog.Duration("retry_delay", retryDelay),
+				)
+				time.Sleep(retryDelay)
 				continue
 			}
+			if s.unavailableError() == nil {
+				s.fail(fmt.Errorf("accept RedLease connection: %w", err))
+			}
+			return
 		}
-		if !s.registerConnection(conn) {
+		retryDelay = 0
+
+		// register connection
+		s.connectionMu.Lock()
+		if s.unavailableError() != nil {
+			s.connectionMu.Unlock()
 			_ = conn.Close()
-			return s.unavailableErrorUnlessClosed()
+			return
 		}
+		s.connections[conn] = struct{}{}
+		s.connectionWG.Add(1)
+		s.connectionMu.Unlock()
+
 		go s.runConnection(conn)
 	}
-}
-
-func (s *Server) registerConnection(conn net.Conn) bool {
-	s.transportMu.Lock()
-	defer s.transportMu.Unlock()
-	if s.ctx.Err() != nil {
-		return false
-	}
-	s.connections[conn] = struct{}{}
-	s.connectionWG.Add(1)
-	return true
 }
 
 func (s *Server) runConnection(conn net.Conn) {
 	defer s.connectionWG.Done()
 	defer func() {
 		_ = conn.Close()
-		s.transportMu.Lock()
+		s.connectionMu.Lock()
 		delete(s.connections, conn)
-		s.transportMu.Unlock()
+		s.connectionMu.Unlock()
 	}()
 
-	if err := s.serveConnection(conn); err != nil && s.ctx.Err() == nil {
-		s.logger.Debug("connection closed", "remote_address", conn.RemoteAddr(), "error", err)
-	}
-}
-
-func (s *Server) closeTransport() {
-	s.transportMu.Lock()
-	listener := s.listener
-	connections := make([]net.Conn, 0, len(s.connections))
-	for conn := range s.connections {
-		connections = append(connections, conn)
-	}
-	s.transportMu.Unlock()
-
-	if listener != nil {
-		_ = listener.Close()
-	}
-	for _, conn := range connections {
-		_ = conn.Close()
-	}
-}
-
-func (s *Server) serveConnection(conn net.Conn) error {
-	if err := s.unavailableError(); err != nil {
-		return err
+	if s.unavailableError() != nil {
+		return
 	}
 	s.activeConnections.Add(1)
-	defer s.activeConnections.Add(-1)
 
 	ctx, cancel := context.WithCancel(s.ctx)
 	session := &connectionSession{
@@ -139,14 +105,27 @@ func (s *Server) serveConnection(conn net.Conn) error {
 		slots:         make(chan struct{}, mpscring.Capacity),
 		recvDone:      make(chan error, 1),
 	}
-	defer func() {
-		cancel()
-		go session.discardResponses()
-	}()
 	go session.receive()
 
 	writer := transport.NewFrameWriter(conn)
-	return session.writeResponses(writer)
+	err := session.writeResponses(writer)
+	cancel()
+	go session.discardResponses()
+	s.activeConnections.Add(-1)
+	if err != nil && s.ctx.Err() == nil {
+		s.logger.Debug("connection closed", "remote_address", conn.RemoteAddr(), "error", err)
+	}
+}
+
+func (s *Server) closeConnections() {
+	s.connectionMu.Lock()
+	defer s.connectionMu.Unlock()
+	if s.listener != nil {
+		_ = s.listener.Close()
+	}
+	for conn := range s.connections {
+		_ = conn.Close()
+	}
 }
 
 func (s *connectionSession) writeResponses(writer *transport.FrameWriter) error {

@@ -82,14 +82,12 @@ production-применения server можно встроить в прило
 Создание server и запуск TCP accept loop:
 
 ```go
-leaseServer, err := redleaseserver.New(redleaseserver.Config{
+listener, err := net.Listen("tcp", "127.0.0.1:50051")
+leaseServer, err := redleaseserver.New(listener, redleaseserver.Config{
 	MaxTTL:  5000,
 	MaxKeys: 10000,
 	Logger:  logger,
 })
-
-listener, err := net.Listen("tcp", "127.0.0.1:50051")
-go leaseServer.Serve(listener) // ошибку Serve нужно обработать в приложении
 ```
 
 Регистрация collector в отдельном registry и публикация `/metrics`:

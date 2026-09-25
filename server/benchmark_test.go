@@ -140,15 +140,11 @@ func runFixedWorkerBenchmark(
 }
 
 func BenchmarkServerAcquireReleaseQueue(b *testing.B) {
-	s, err := New(Config{
+	s := newTestServerWithConfig(b, Config{
 		MaxTTL: uint64(ProtocolMaxTTL / time.Millisecond),
 		Logger: testLogger,
 	})
-	if err != nil {
-		b.Fatalf("New: %v", err)
-	}
 	s.phase.Store(uint32(phaseActive))
-	b.Cleanup(func() { _ = s.Close() })
 
 	ctx := context.Background()
 	responses := make(chan protocol.Response, 1)

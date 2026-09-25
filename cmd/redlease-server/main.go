@@ -63,15 +63,11 @@ func run(args []string, flagOutput io.Writer, logger *slog.Logger) (runErr error
 	if err != nil {
 		return fmt.Errorf("listen on %q: %w", config.listenAddress, err)
 	}
-	defer func() {
-		closeErr := listener.Close()
-		if closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
-			runErr = errors.Join(runErr, fmt.Errorf("close TCP listener: %w", closeErr))
-		}
-	}()
-
-	leaseServer, err := server.New(serverConfig)
+	leaseServer, err := server.New(listener, serverConfig)
 	if err != nil {
+		if closeErr := listener.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+			err = errors.Join(err, fmt.Errorf("close TCP listener: %w", closeErr))
+		}
 		return fmt.Errorf("create RedLease server: %w", err)
 	}
 	defer func() {
@@ -98,10 +94,6 @@ func run(args []string, flagOutput io.Writer, logger *slog.Logger) (runErr error
 		slog.String("address", listener.Addr().String()),
 	)
 
-	serveErr := make(chan error, 1)
-	go func() {
-		serveErr <- leaseServer.Serve(listener)
-	}()
 	var metricsServeErr <-chan error
 	if metrics != nil {
 		metricsServeErr = metrics.serveErr
@@ -112,12 +104,6 @@ func run(args []string, flagOutput io.Writer, logger *slog.Logger) (runErr error
 	defer signal.Stop(signals)
 
 	select {
-	case err := <-serveErr:
-		if err != nil {
-			return fmt.Errorf("serve TCP: %w", err)
-		}
-		return nil
-
 	case err := <-metricsServeErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("serve Prometheus metrics: %w", err)
@@ -129,22 +115,13 @@ func run(args []string, flagOutput io.Writer, logger *slog.Logger) (runErr error
 		if err := leaseServer.Close(); err != nil {
 			return fmt.Errorf("close RedLease server: %w", err)
 		}
-		if err := <-serveErr; err != nil {
-			return fmt.Errorf("serve TCP during shutdown: %w", err)
-		}
 		logger.Info("standalone server stopped")
 		return nil
 
 	case fatalErr := <-leaseServer.Fatal():
 		logger.Error("server failure received; shutting down", slog.Any("error", fatalErr))
 		closeErr := leaseServer.Close()
-		serveResult := <-serveErr
-		if serveResult != nil {
-			serveResult = fmt.Errorf("serve TCP during failed shutdown: %w", serveResult)
-		} else {
-			serveResult = nil
-		}
-		return errors.Join(fatalErr, closeErr, serveResult)
+		return errors.Join(fatalErr, closeErr)
 	}
 }
 

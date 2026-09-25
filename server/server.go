@@ -120,20 +120,24 @@ type Server struct {
 	dispatchMu sync.RWMutex
 	// cleanupMu prevents concurrent capacity-triggered scans of all shards.
 	cleanupMu    sync.Mutex
-	transportMu  sync.Mutex
+	connectionMu sync.Mutex
 	listener     net.Listener
 	connections  map[net.Conn]struct{}
 	connectionWG sync.WaitGroup
-	serveStarted bool
 	failOnce     sync.Once
 	closeOnce    sync.Once
 	wg           sync.WaitGroup
 }
 
-// New constructs a lock-server. By default it starts in restart quarantine;
-// SkipRestartQuarantine makes it immediately active under owner-managed
-// restart safety.
-func New(c Config) (*Server, error) {
+// New constructs a lock-server and starts accepting connections from listener.
+// The Server owns listener after New succeeds and closes it during Close or a
+// fatal failure. By default the Server starts in restart quarantine;
+// SkipRestartQuarantine makes it immediately active under owner-managed restart
+// safety.
+func New(listener net.Listener, c Config) (*Server, error) {
+	if listener == nil {
+		return nil, errors.New("listener must not be nil")
+	}
 	config, err := resolveConfig(c)
 	if err != nil {
 		return nil, err
@@ -146,6 +150,7 @@ func New(c Config) (*Server, error) {
 		cancel:      cancel,
 		fatal:       make(chan error, 1),
 		shards:      make([]*leaseShard, config.ShardCount),
+		listener:    listener,
 		connections: make(map[net.Conn]struct{}),
 	}
 	if config.SkipRestartQuarantine {
@@ -194,14 +199,16 @@ func New(c Config) (*Server, error) {
 		)
 		s.logger.LogAttrs(context.Background(), slog.LevelInfo, "server started", startAttrs...)
 	}
+	s.wg.Add(1)
+	go s.runListener(listener)
 
 	return s, nil
 }
 
 // Fatal returns a channel which receives exactly one non-nil error if the
-// server detects an unrecoverable internal failure. Detection moves the server
-// to FAILED and cancels its active connections. The channel is buffered so failure
-// detection never waits for the owner, and normal Close does not send to it.
+// server detects an unrecoverable failure. Detection moves the server to FAILED
+// and cancels its active connections. The channel is buffered so failure detection
+// never waits for the owner, and normal Close does not send to it.
 // A failed Server cannot be returned to service and must be closed.
 func (s *Server) Fatal() <-chan error {
 	return s.fatal
@@ -212,12 +219,15 @@ func (s *Server) fail(cause error) {
 		failure := fmt.Errorf("%w: %w", ErrServerFailed, cause)
 		for {
 			phase := serverPhase(s.phase.Load())
-			if phase == phaseClosed || s.phase.CompareAndSwap(uint32(phase), uint32(phaseFailed)) {
+			if phase == phaseClosed {
+				return
+			}
+			if s.phase.CompareAndSwap(uint32(phase), uint32(phaseFailed)) {
 				break
 			}
 		}
 		s.cancel()
-		s.closeTransport()
+		s.closeConnections()
 		s.fatal <- failure
 		s.logger.Error(
 			"server entered failed state",
@@ -234,7 +244,7 @@ func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
 		s.phase.Store(uint32(phaseClosed))
 		s.cancel()
-		s.closeTransport()
+		s.closeConnections()
 		s.connectionWG.Wait()
 
 		// A dispatcher holds a read lock until its send to a shard succeeds or

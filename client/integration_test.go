@@ -257,7 +257,6 @@ func TestServerKeyLimitEndToEnd(t *testing.T) {
 type integrationCluster struct {
 	mu          sync.RWMutex
 	addresses   [integrationServerCount]string
-	listeners   [integrationServerCount]net.Listener
 	lockServers [integrationServerCount]*redleaseserver.Server
 	ttls        [integrationServerCount]time.Duration
 	maxKeys     uint64
@@ -345,7 +344,7 @@ func (c *integrationCluster) startReplica(t *testing.T, index int) {
 		t.Fatalf("listen for lock-server %d: %v", index, err)
 	}
 
-	lockServer, err := redleaseserver.New(redleaseserver.Config{
+	lockServer, err := redleaseserver.New(listener, redleaseserver.Config{
 		MaxTTL:          uint64(c.ttls[index] / time.Millisecond), //nolint:gosec // Test fixtures use positive TTLs.
 		MaxKeys:         c.maxKeys,
 		Logger:          slog.New(slog.DiscardHandler),
@@ -360,26 +359,18 @@ func (c *integrationCluster) startReplica(t *testing.T, index int) {
 
 	c.mu.Lock()
 	c.addresses[index] = listener.Addr().String()
-	c.listeners[index] = listener
 	c.lockServers[index] = lockServer
 	c.mu.Unlock()
-
-	go func() { _ = lockServer.Serve(listener) }()
 }
 
 func (c *integrationCluster) stopReplica(index int) {
 	c.mu.Lock()
-	listener := c.listeners[index]
 	lockServer := c.lockServers[index]
-	c.listeners[index] = nil
 	c.lockServers[index] = nil
 	c.mu.Unlock()
 
 	if lockServer != nil {
 		_ = lockServer.Close()
-	}
-	if listener != nil {
-		_ = listener.Close()
 	}
 }
 

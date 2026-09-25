@@ -7,6 +7,7 @@ import (
 	"flag"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -81,7 +82,11 @@ func TestParseFlagsHelpDescribesLocalPlaintextLauncher(t *testing.T) {
 }
 
 func TestMetricsHandlerServesPrivateRegistry(t *testing.T) {
-	leaseServer, err := server.New(server.Config{
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	leaseServer, err := server.New(listener, server.Config{
 		MaxTTL:                1000,
 		MaxKeys:               10,
 		Logger:                testLogger,
@@ -90,6 +95,7 @@ func TestMetricsHandlerServesPrivateRegistry(t *testing.T) {
 		ShardQueueDepth:       1,
 	})
 	if err != nil {
+		_ = listener.Close()
 		t.Fatalf("server.New: %v", err)
 	}
 	t.Cleanup(func() {

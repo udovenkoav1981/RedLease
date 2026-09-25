@@ -124,7 +124,7 @@ func newIntegrationServer(t *testing.T) *integrationServer {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	leaseServer, err := redleaseserver.New(redleaseserver.Config{
+	leaseServer, err := redleaseserver.New(listener, redleaseserver.Config{
 		MaxTTL:                5000,
 		MaxKeys:               256,
 		Logger:                slog.New(slog.DiscardHandler),
@@ -136,10 +136,6 @@ func newIntegrationServer(t *testing.T) *integrationServer {
 		_ = listener.Close()
 		t.Fatalf("server.New: %v", err)
 	}
-	go func() {
-		_ = leaseServer.Serve(listener)
-	}()
-
 	server := &integrationServer{
 		t:        t,
 		listener: listener,
@@ -166,7 +162,6 @@ func (s *integrationServer) newClient(t *testing.T, clientID uint32) *redleasecl
 
 func (s *integrationServer) close() {
 	_ = s.lease.Close()
-	_ = s.listener.Close()
 }
 
 func waitReady(t *testing.T, client *redleaseclient.Client) {

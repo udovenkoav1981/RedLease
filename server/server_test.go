@@ -26,15 +26,54 @@ var (
 	testLogger = slog.New(slog.DiscardHandler)
 )
 
+type temporaryAcceptError struct{}
+
+func (temporaryAcceptError) Error() string   { return "temporary accept error" }
+func (temporaryAcceptError) Temporary() bool { return true }
+
+type temporaryErrorListener struct {
+	first     bool
+	retried   chan struct{}
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func (l *temporaryErrorListener) Accept() (net.Conn, error) {
+	if l.first {
+		l.first = false
+		return nil, temporaryAcceptError{}
+	}
+	close(l.retried)
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *temporaryErrorListener) Close() error {
+	l.closeOnce.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *temporaryErrorListener) Addr() net.Addr { return &net.TCPAddr{} }
+
 func newTestServer(t *testing.T, maxTTL uint64, shardCount uint32) *Server {
 	t.Helper()
-	s, err := New(Config{
+	return newTestServerWithConfig(t, Config{
 		MaxTTL:          maxTTL,
 		Logger:          testLogger,
 		ShardCount:      shardCount,
 		ShardQueueDepth: 8,
 	})
+}
+
+func newTestServerWithConfig(t testing.TB, config Config) *Server {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	s, err := New(listener, config)
+	if err != nil {
+		_ = listener.Close()
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() {
@@ -73,6 +112,77 @@ func TestConfigValidate(t *testing.T) {
 				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestNewRejectsNilListener(t *testing.T) {
+	_, err := New(nil, Config{MaxTTL: 1_000, Logger: testLogger})
+	if err == nil || !strings.Contains(err.Error(), "listener must not be nil") {
+		t.Fatalf("New(nil) error = %v, want listener validation error", err)
+	}
+}
+
+func TestListenerFailureFailsServer(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+
+	s, err := New(listener, Config{
+		MaxTTL:                1_000,
+		Logger:                testLogger,
+		SkipRestartQuarantine: true,
+		ShardCount:            1,
+		ShardQueueDepth:       1,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	select {
+	case fatalErr := <-s.Fatal():
+		if !errors.Is(fatalErr, ErrServerFailed) || !strings.Contains(fatalErr.Error(), "accept RedLease connection") {
+			t.Fatalf("Fatal() = %v, want listener failure", fatalErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listener failure was not published")
+	}
+}
+
+func TestTemporaryListenerFailureIsRetried(t *testing.T) {
+	listener := &temporaryErrorListener{
+		first:   true,
+		retried: make(chan struct{}),
+		closed:  make(chan struct{}),
+	}
+	s, err := New(listener, Config{
+		MaxTTL:                1_000,
+		Logger:                testLogger,
+		SkipRestartQuarantine: true,
+		ShardCount:            1,
+		ShardQueueDepth:       1,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	select {
+	case <-listener.retried:
+	case <-time.After(time.Second):
+		t.Fatal("temporary listener failure was not retried")
+	}
+	if !s.active() {
+		t.Fatal("temporary listener failure changed server phase")
+	}
+	select {
+	case fatalErr := <-s.Fatal():
+		t.Fatalf("temporary listener failure published fatal error: %v", fatalErr)
+	default:
 	}
 }
 
@@ -193,17 +303,13 @@ func TestMetricsState(t *testing.T) {
 }
 
 func TestSkipRestartQuarantineStartsActiveWithoutTimer(t *testing.T) {
-	s, err := New(Config{
+	s := newTestServerWithConfig(t, Config{
 		MaxTTL:                2_000,
 		Logger:                testLogger,
 		SkipRestartQuarantine: true,
 		ShardCount:            1,
 		ShardQueueDepth:       8,
 	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
 
 	if !s.active() {
 		t.Fatal("server with skipped restart quarantine is not active")
@@ -264,12 +370,9 @@ func TestKeyCountUnderflowFailsServerWithoutPanicking(t *testing.T) {
 		t.Fatalf("Acquire after failure = %s, want NOT_READY", response.Status)
 	}
 
-	serverConn, clientConn := net.Pipe()
-	if err := s.serveConnection(serverConn); !errors.Is(err, ErrServerFailed) {
+	if err := s.unavailableError(); !errors.Is(err, ErrServerFailed) {
 		t.Fatalf("new connection after failure error = %v, want ErrServerFailed", err)
 	}
-	_ = serverConn.Close()
-	_ = clientConn.Close()
 
 	if released := s.releaseKeys(1); released {
 		t.Fatal("second releaseKeys reported success for an underflow")
@@ -335,16 +438,12 @@ func TestAcquireZeroTTLHasNoPositiveValidity(t *testing.T) {
 }
 
 func TestAcquireEnforcesKeyLimitAndRestoresCapacity(t *testing.T) {
-	s, err := New(Config{
+	s := newTestServerWithConfig(t, Config{
 		MaxTTL:     1_000,
 		MaxKeys:    1,
 		Logger:     testLogger,
 		ShardCount: 1,
 	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
 	shard := s.shards[0]
 	firstID := leaseID{clientID: 1, bootID: 1, leaseSeq: 1}
 	secondID := leaseID{clientID: 2, bootID: 2, leaseSeq: 2}
@@ -388,16 +487,12 @@ func TestAcquireEnforcesKeyLimitAndRestoresCapacity(t *testing.T) {
 }
 
 func TestCapacityCleanupUsesDeadlineOrderAfterRenew(t *testing.T) {
-	s, err := New(Config{
+	s := newTestServerWithConfig(t, Config{
 		MaxTTL:     uint64(ProtocolMaxTTL / time.Millisecond),
 		MaxKeys:    2,
 		Logger:     testLogger,
 		ShardCount: 1,
 	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
 	shard := s.shards[0]
 	firstID := leaseID{clientID: 1, bootID: 1, leaseSeq: 1}
 	secondID := leaseID{clientID: 2, bootID: 2, leaseSeq: 2}
@@ -426,16 +521,12 @@ func TestCapacityCleanupUsesDeadlineOrderAfterRenew(t *testing.T) {
 }
 
 func TestCapacityCleanupReclaimsExpiredLeaseFromAnotherShard(t *testing.T) {
-	s, err := New(Config{
+	s := newTestServerWithConfig(t, Config{
 		MaxTTL:     1_000,
 		MaxKeys:    1,
 		Logger:     testLogger,
 		ShardCount: 2,
 	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
 
 	firstKey := uint64(0)
 	firstShard := s.shardIndex(firstKey)
@@ -576,16 +667,12 @@ func TestRenewStaleAndExpiry(t *testing.T) {
 func TestMissingAndExpiredLeaseOperationsAreLogged(t *testing.T) {
 	var output bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	s, err := New(Config{
+	s := newTestServerWithConfig(t, Config{
 		MaxTTL:                1_000,
 		Logger:                logger,
 		SkipRestartQuarantine: true,
 		ShardCount:            1,
 	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
 	output.Reset() // Ignore the startup lifecycle record in this operation test.
 
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
@@ -999,27 +1086,28 @@ func keysForDifferentShards(t *testing.T, s *Server) (uint64, uint64) {
 	return 0, 0
 }
 
-func newTestConnection(t *testing.T, s *Server) (*transport.ClientConnection, <-chan error) {
+func newTestConnection(t *testing.T, s *Server) (*transport.ClientConnection, <-chan struct{}) {
 	t.Helper()
 	serverConn, clientConn := net.Pipe()
-	errDone := make(chan error, 1)
+	done := make(chan struct{})
+	s.connectionMu.Lock()
+	s.connections[serverConn] = struct{}{}
+	s.connectionWG.Add(1)
+	s.connectionMu.Unlock()
 	go func() {
-		errDone <- s.serveConnection(serverConn)
-		_ = serverConn.Close()
+		s.runConnection(serverConn)
+		close(done)
 	}()
-	return transport.NewClientConnection(clientConn), errDone
+	return transport.NewClientConnection(clientConn), done
 }
 
-func closeTestConnection(t *testing.T, connection *transport.ClientConnection, errDone <-chan error) {
+func closeTestConnection(t *testing.T, connection *transport.ClientConnection, done <-chan struct{}) {
 	t.Helper()
 	if err := connection.Conn.Close(); err != nil {
 		t.Fatalf("close test connection: %v", err)
 	}
 	select {
-	case err := <-errDone:
-		if err != nil {
-			t.Fatalf("serve connection: %v", err)
-		}
+	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("connection did not finish after close")
 	}
