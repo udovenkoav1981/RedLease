@@ -80,6 +80,7 @@ type leaseShard struct {
 	mu         sync.Mutex
 	leases     map[uint64]*lease
 	deadlines  leaseDeadlineHeap
+	leasePool  sync.Pool
 	operations *mpscring.NotifyingRing[operation]
 	stop       chan struct{}
 }
@@ -117,7 +118,11 @@ func (s *Server) applyOperation(shard *leaseShard, op operation) {
 }
 
 func (shard *leaseShard) addLease(key uint64, id leaseID, deadline time.Time) {
-	current := &lease{
+	current, _ := shard.leasePool.Get().(*lease)
+	if current == nil {
+		current = new(lease)
+	}
+	*current = lease{
 		key:       key,
 		id:        id,
 		deadline:  deadline,
@@ -130,6 +135,12 @@ func (shard *leaseShard) addLease(key uint64, id leaseID, deadline time.Time) {
 func (shard *leaseShard) removeLease(current *lease) {
 	delete(shard.leases, current.key)
 	heap.Remove(&shard.deadlines, current.heapIndex)
+	shard.recycleLease(current)
+}
+
+func (shard *leaseShard) recycleLease(current *lease) {
+	*current = lease{}
+	shard.leasePool.Put(current)
 }
 
 func (shard *leaseShard) removeExpiredLeases(now time.Time) uint64 {
@@ -137,6 +148,7 @@ func (shard *leaseShard) removeExpiredLeases(now time.Time) uint64 {
 	for len(shard.deadlines) != 0 && !shard.deadlines[0].deadline.After(now) {
 		current := heap.Pop(&shard.deadlines).(*lease)
 		delete(shard.leases, current.key)
+		shard.recycleLease(current)
 		deleted++
 	}
 	return deleted
