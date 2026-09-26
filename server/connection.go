@@ -220,28 +220,11 @@ func (s *connectionSession) receiveRequests() {
 			return
 		}
 
-		decoded, directResponse, direct, err := s.decodeRequest(frame)
-		if err != nil {
+		if err := s.processRequest(frame); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
 			s.recvDone <- err
-			return
-		}
-
-		if direct {
-			if !s.enqueueResponse(directResponse) {
-				return
-			}
-			continue
-		}
-		if serverPhase(s.server.phase.Load()) == phaseQuarantine {
-			if !s.enqueueResponse(statusResponse(decoded, redleasev1.LeaseStatusNOT_READY)) {
-				return
-			}
-			continue
-		}
-		decoded.session = s
-		s.pending.Add(1)
-		if !s.server.dispatch(s.ctx.Done(), decoded) {
-			s.pending.Done()
 			return
 		}
 	}
@@ -283,31 +266,23 @@ func (s *Server) unavailableErrorUnlessClosed() error {
 	return s.unavailableError()
 }
 
-func (s *connectionSession) decodeRequest(
-	frame []byte,
-) (decoded operation, response protocol.Response, direct bool, err error) {
-
+func (s *connectionSession) processRequest(frame []byte) (err error) {
 	// десериализатор FlatBuffers не валидирует offset и падает в панику если в пакете мусор
 	// поэтому тут recover
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			decoded = operation{}
-			response = protocol.Response{}
-			direct = false
 			err = fmt.Errorf("%w: %v", transport.ErrMalformedFrame, recovered)
 		}
 	}()
 	request := redleasev1.GetSizePrefixedRootAsClientRequest(frame, 0)
+	var decoded operation
 	switch request.Operation() {
 	case redleasev1.ClientOperationACQUIRE:
 		var acquire redleasev1.AcquireRequest
 		if request.Acquire(&acquire) == nil {
-			return operation{}, protocol.Response{}, false, fmt.Errorf(
-				"%w: Acquire payload is missing",
-				transport.ErrMalformedFrame,
-			)
+			return fmt.Errorf("%w: Acquire payload is missing", transport.ErrMalformedFrame)
 		}
-		return operation{
+		decoded = operation{
 			requestID: request.RequestId(),
 			kind:      operationAcquire,
 			key:       acquire.Key(),
@@ -317,17 +292,14 @@ func (s *connectionSession) decodeRequest(
 				leaseSeq: acquire.LeaseSeq(),
 			},
 			requestedTTLMS: acquire.RequestedTtlMs(),
-		}, protocol.Response{}, false, nil
+		}
 
 	case redleasev1.ClientOperationRENEW:
 		var renew redleasev1.RenewRequest
 		if request.Renew(&renew) == nil {
-			return operation{}, protocol.Response{}, false, fmt.Errorf(
-				"%w: Renew payload is missing",
-				transport.ErrMalformedFrame,
-			)
+			return fmt.Errorf("%w: Renew payload is missing", transport.ErrMalformedFrame)
 		}
-		return operation{
+		decoded = operation{
 			requestID: request.RequestId(),
 			kind:      operationRenew,
 			key:       renew.Key(),
@@ -337,17 +309,14 @@ func (s *connectionSession) decodeRequest(
 				leaseSeq: renew.LeaseSeq(),
 			},
 			requestedTTLMS: renew.RequestedTtlMs(),
-		}, protocol.Response{}, false, nil
+		}
 
 	case redleasev1.ClientOperationRELEASE:
 		var release redleasev1.ReleaseRequest
 		if request.Release(&release) == nil {
-			return operation{}, protocol.Response{}, false, fmt.Errorf(
-				"%w: Release payload is missing",
-				transport.ErrMalformedFrame,
-			)
+			return fmt.Errorf("%w: Release payload is missing", transport.ErrMalformedFrame)
 		}
-		return operation{
+		decoded = operation{
 			requestID: request.RequestId(),
 			kind:      operationRelease,
 			key:       release.Key(),
@@ -356,21 +325,37 @@ func (s *connectionSession) decodeRequest(
 				bootID:   release.BootId(),
 				leaseSeq: release.LeaseSeq(),
 			},
-		}, protocol.Response{}, false, nil
+		}
 
 	case redleasev1.ClientOperationGET_TTL:
-		return operation{}, protocol.Response{
+		if !s.enqueueResponse(protocol.Response{
 			RequestID: request.RequestId(),
 			Operation: redleasev1.ClientOperationGET_TTL,
 			Status:    redleasev1.LeaseStatusOK,
 			TTLMS:     s.server.config.MaxTTL,
-		}, true, nil
+		}) {
+			return context.Canceled
+		}
+		return nil
 
 	default:
-		return operation{}, protocol.Response{}, false, fmt.Errorf(
-			"%w: unsupported request operation %d",
-			transport.ErrMalformedFrame,
+		return fmt.Errorf("%w: unsupported request operation %d", transport.ErrMalformedFrame,
 			request.Operation(),
 		)
 	}
+
+	if serverPhase(s.server.phase.Load()) == phaseQuarantine {
+		if !s.enqueueResponse(statusResponse(decoded, redleasev1.LeaseStatusNOT_READY)) {
+			return context.Canceled
+		}
+		return nil
+	}
+
+	decoded.session = s
+	s.pending.Add(1)
+	if !s.server.dispatch(s.ctx.Done(), decoded) {
+		s.pending.Done()
+		return context.Canceled
+	}
+	return nil
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -221,20 +222,25 @@ func TestShardOperationRingCapacity(t *testing.T) {
 
 func TestQuarantineAndGetTTL(t *testing.T) {
 	s := newTestServer(t, 2_000, 1)
-	session := &connectionSession{server: s}
 	shard := s.shards[0]
 	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
 
-	_, getTTL, direct, err := session.decodeRequest(getTTLRequest(13).Table().Bytes)
+	connection, done := newTestConnection(t, s)
+	if err := sendClientRequest(connection, getTTLRequest(13)); err != nil {
+		t.Fatalf("send GetTTL: %v", err)
+	}
+	frame, err := connection.Reader.ReadFrame()
 	if err != nil {
-		t.Fatalf("decode GetTTL: %v", err)
+		t.Fatalf("read GetTTL response: %v", err)
 	}
-	if !direct {
-		t.Fatal("GetTTL was not decoded as a direct response")
+	getTTL, err := transport.DecodeResponse(frame)
+	if err != nil {
+		t.Fatalf("decode GetTTL response: %v", err)
 	}
-	if got := getTTL.TTLMS; got != 2000 {
-		t.Fatalf("GetTTL during quarantine = %d, want 2000", got)
+	if getTTL.RequestID != 13 || getTTL.Operation != redleasev1.ClientOperationGET_TTL || getTTL.TTLMS != 2_000 {
+		t.Fatalf("GetTTL during quarantine = %+v, want request 13 with TTL 2000", getTTL)
 	}
+	closeTestConnection(t, connection, done)
 
 	activateServer(t, s)
 	acquire := s.apply(shard, operation{requestID: 14, kind: operationAcquire, key: 1, leaseID: id, requestedTTLMS: 1000})
@@ -1218,9 +1224,9 @@ func TestDecodeInvalidRequest(t *testing.T) {
 		requestWithoutPayload(redleasev1.ClientOperationRELEASE),
 		requestWithoutPayload(redleasev1.ClientOperation(255)),
 	} {
-		_, _, _, err := session.decodeRequest(request.Table().Bytes)
+		err := session.processRequest(request.Table().Bytes)
 		if !errors.Is(err, transport.ErrMalformedFrame) {
-			t.Fatalf("decodeRequest(%v) error = %v, want ErrMalformedFrame", request, err)
+			t.Fatalf("processRequest(%v) error = %v, want ErrMalformedFrame", request, err)
 		}
 	}
 	for _, frame := range [][]byte{
@@ -1229,25 +1235,31 @@ func TestDecodeInvalidRequest(t *testing.T) {
 		{255, 0, 0, 0, 0, 0, 0, 0},
 		{4, 0, 0, 0, 255, 255, 255, 127},
 	} {
-		_, _, _, err := session.decodeRequest(frame)
+		err := session.processRequest(frame)
 		if !errors.Is(err, transport.ErrMalformedFrame) {
-			t.Fatalf("decodeRequest(%x) error = %v, want ErrMalformedFrame", frame, err)
+			t.Fatalf("processRequest(%x) error = %v, want ErrMalformedFrame", frame, err)
 		}
 	}
 }
 
 func TestDecodeRequestOwnsScalarsAfterReceiveBufferReuse(t *testing.T) {
-	s := newTestServer(t, 1_000, 1)
-	session := &connectionSession{server: s}
+	shard := &leaseShard{operations: mpscring.NewNotifying[operation](shardQueueCapacity)}
+	s := &Server{shards: []*leaseShard{shard}}
+	s.phase.Store(uint32(phaseActive))
+	session := &connectionSession{server: s, ctx: context.Background()}
 	frame := acquireRequest(21, 22, 23).Table().Bytes
-	op, _, direct, err := session.decodeRequest(frame)
-	if err != nil || direct {
-		t.Fatalf("decode Acquire: operation=%+v direct=%t error=%v", op, direct, err)
+	if err := session.processRequest(frame); err != nil {
+		t.Fatalf("process Acquire: %v", err)
 	}
+	op, ok := shard.operations.TryDequeue()
+	if !ok {
+		t.Fatal("processed Acquire was not dispatched")
+	}
+	session.pending.Done()
 	clear(frame)
 	if op.requestID != 21 || op.kind != operationAcquire || op.key != 22 ||
 		op.leaseID != (leaseID{clientID: 1, bootID: 1, leaseSeq: 23}) ||
-		op.requestedTTLMS != 1_000 {
+		op.requestedTTLMS != 1_000 || op.session != session {
 		t.Fatalf("decoded operation changed after frame reuse: %+v", op)
 	}
 }
