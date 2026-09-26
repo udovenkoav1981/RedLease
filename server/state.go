@@ -379,10 +379,6 @@ func releaseResponse(requestID uint64, status redleasev1.LeaseStatus) protocol.R
 	}
 }
 
-func notReadyResponse(op operation) protocol.Response {
-	return statusResponse(op, redleasev1.LeaseStatusNOT_READY)
-}
-
 func statusResponse(op operation, status redleasev1.LeaseStatus) protocol.Response {
 	switch op.kind {
 	case operationAcquire:

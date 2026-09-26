@@ -17,10 +17,7 @@ import (
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
-var (
-	errServerClosed       = errors.New("server is closed")
-	errServerNotAccepting = errors.New("server is not accepting work")
-)
+var errServerClosed = errors.New("server is closed")
 
 const (
 	initialAcceptRetryDelay = 5 * time.Millisecond
@@ -218,13 +215,13 @@ func (s *connectionSession) receiveRequests() {
 			s.recvDone <- err
 			return
 		}
-		decoded, directResponse, direct, err := s.decodeRequest(frame)
-		if err != nil {
+		if err := s.server.unavailableError(); err != nil {
 			s.recvDone <- err
 			return
 		}
-		phaseAtReceive := serverPhase(s.server.phase.Load())
-		if err := s.server.unavailableError(); err != nil {
+
+		decoded, directResponse, direct, err := s.decodeRequest(frame)
+		if err != nil {
 			s.recvDone <- err
 			return
 		}
@@ -235,8 +232,8 @@ func (s *connectionSession) receiveRequests() {
 			}
 			continue
 		}
-		if phaseAtReceive == phaseQuarantine {
-			if !s.enqueueResponse(notReadyResponse(decoded)) {
+		if serverPhase(s.server.phase.Load()) == phaseQuarantine {
+			if !s.enqueueResponse(statusResponse(decoded, redleasev1.LeaseStatusNOT_READY)) {
 				return
 			}
 			continue
@@ -245,11 +242,6 @@ func (s *connectionSession) receiveRequests() {
 		s.pending.Add(1)
 		if !s.server.dispatch(s.ctx.Done(), decoded) {
 			s.pending.Done()
-			if err := s.server.unavailableError(); err != nil {
-				s.recvDone <- err
-			} else {
-				s.recvDone <- errServerNotAccepting
-			}
 			return
 		}
 	}
