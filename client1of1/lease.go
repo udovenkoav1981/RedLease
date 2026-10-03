@@ -9,7 +9,6 @@ import (
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
-	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
 const safetyMarginMS uint64 = 100
@@ -88,7 +87,7 @@ func (c *Client) Acquire(
 	}
 
 	accepted := false
-	future, err := c.submit(c.newAcquireRequest(lease.key, sequence, ttlMS))
+	future, err := c.submit(redleasev1.ClientOperationACQUIRE, lease.key, sequence, ttlMS)
 	if err == nil {
 		var response protocol.Response
 		response, err = c.awaitResponse(ctx, future)
@@ -150,7 +149,7 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 	l.now = time.Now()
 
 	renewed := false
-	future, err := l.client.submit(l.client.newRenewRequest(l.key, l.sequence, ttlMS))
+	future, err := l.client.submit(redleasev1.ClientOperationRENEW, l.key, l.sequence, ttlMS)
 
 	if err == nil {
 		var response protocol.Response
@@ -202,7 +201,7 @@ func (l *Lease) Release() {
 }
 
 func (c *Client) release(key, sequence uint64) {
-	_ = c.submitNoResponse(c.newReleaseRequest(key, sequence))
+	_ = c.submitNoResponse(key, sequence)
 }
 
 func candidateValidUntil(operationStart time.Time, ttlMS uint64) time.Time {
@@ -212,76 +211,69 @@ func candidateValidUntil(operationStart time.Time, ttlMS uint64) time.Time {
 	return operationStart.Add(time.Duration(ttlMS-safetyMarginMS) * time.Millisecond)
 }
 
-func (c *Client) newAcquireRequest(key, sequence, ttlMS uint64) *outboundConnectionRequest {
-	outbound := c.newOutboundRequest()
-	builder := outbound.builder
+func (c *Client) buildOutboundRequest(
+	outbound *outboundConnectionRequest,
+	requestID uint64,
+	operation redleasev1.ClientOperation,
+	key uint64,
+	sequence uint64,
+	ttlMS uint64,
+) {
+	builder := c.acquireRequestBuilder(&outbound.buffer)
 	redleasev1.ClientRequestStart(builder)
-	redleasev1.ClientRequestAddRequestId(builder, c.nextRequestID.Add(1))
-	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationACQUIRE)
-	redleasev1.ClientRequestAddAcquire(builder, redleasev1.CreateAcquireRequest(
-		builder,
-		key,
-		c.clientID,
-		c.bootID,
-		sequence,
-		ttlMS,
-	))
-	c.finishOutboundRequest(outbound)
-	return outbound
+	redleasev1.ClientRequestAddRequestId(builder, requestID)
+	redleasev1.ClientRequestAddOperation(builder, operation)
+	switch operation {
+	case redleasev1.ClientOperationACQUIRE:
+		redleasev1.ClientRequestAddAcquire(builder, redleasev1.CreateAcquireRequest(
+			builder,
+			key,
+			c.clientID,
+			c.bootID,
+			sequence,
+			ttlMS,
+		))
+	case redleasev1.ClientOperationRENEW:
+		redleasev1.ClientRequestAddRenew(builder, redleasev1.CreateRenewRequest(
+			builder,
+			key,
+			c.clientID,
+			c.bootID,
+			sequence,
+			ttlMS,
+		))
+	case redleasev1.ClientOperationRELEASE:
+		redleasev1.ClientRequestAddRelease(builder, redleasev1.CreateReleaseRequest(
+			builder,
+			key,
+			c.clientID,
+			c.bootID,
+			sequence,
+		))
+	default:
+		panic("client1of1: unsupported request operation")
+	}
+	root := redleasev1.ClientRequestEnd(builder)
+	redleasev1.FinishSizePrefixedClientRequestBuffer(builder, root)
+	if len(builder.Bytes) != len(outbound.buffer) {
+		panic("client1of1: request exceeded its fixed FlatBuffers buffer")
+	}
+	outbound.frameStart = uint16(builder.Head()) //nolint:gosec // The fixed buffer is 88 bytes.
+	builder.Bytes = nil
+	builder.Reset()
+	c.requestBuilderPool.Put(builder)
 }
 
-func (c *Client) newRenewRequest(key, sequence, ttlMS uint64) *outboundConnectionRequest {
-	outbound := c.newOutboundRequest()
-	builder := outbound.builder
-	redleasev1.ClientRequestStart(builder)
-	redleasev1.ClientRequestAddRequestId(builder, c.nextRequestID.Add(1))
-	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationRENEW)
-	redleasev1.ClientRequestAddRenew(builder, redleasev1.CreateRenewRequest(
-		builder,
-		key,
-		c.clientID,
-		c.bootID,
-		sequence,
-		ttlMS,
-	))
-	c.finishOutboundRequest(outbound)
-	return outbound
-}
-
-func (c *Client) newReleaseRequest(key, sequence uint64) *outboundConnectionRequest {
-	outbound := c.newOutboundRequest()
-	builder := outbound.builder
-	redleasev1.ClientRequestStart(builder)
-	redleasev1.ClientRequestAddRequestId(builder, c.nextRequestID.Add(1))
-	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationRELEASE)
-	redleasev1.ClientRequestAddRelease(builder, redleasev1.CreateReleaseRequest(
-		builder,
-		key,
-		c.clientID,
-		c.bootID,
-		sequence,
-	))
-	c.finishOutboundRequest(outbound)
-	return outbound
-}
-
-func (c *Client) newOutboundRequest() *outboundConnectionRequest {
-	if pooled := c.requestPool.Get(); pooled != nil {
-		if outbound, ok := pooled.(*outboundConnectionRequest); ok {
-			outbound.builder.Reset()
-			return outbound
+func (c *Client) acquireRequestBuilder(buffer *[clientRequestBufferBytes]byte) *flatbuffers.Builder {
+	if pooled := c.requestBuilderPool.Get(); pooled != nil {
+		if builder, ok := pooled.(*flatbuffers.Builder); ok {
+			builder.Bytes = buffer[:]
+			builder.Reset()
+			return builder
 		}
 	}
-	return &outboundConnectionRequest{
-		builder: flatbuffers.NewBuilder(transport.InitialBufferSize),
-	}
-}
-
-func (*Client) finishOutboundRequest(outbound *outboundConnectionRequest) {
-	root := redleasev1.ClientRequestEnd(outbound.builder)
-	redleasev1.FinishSizePrefixedClientRequestBuffer(outbound.builder, root)
-	frame := outbound.builder.FinishedBytes()
-	rootOffset := flatbuffers.GetUOffsetT(frame[flatbuffers.SizeUint32:]) +
-		flatbuffers.UOffsetT(flatbuffers.SizeUint32)
-	outbound.request.Init(frame, rootOffset)
+	builder := flatbuffers.NewBuilder(0)
+	builder.Bytes = buffer[:]
+	builder.Reset()
+	return builder
 }

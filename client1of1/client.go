@@ -37,7 +37,7 @@ type Client struct {
 	closed     bool
 	changed    chan struct{}
 
-	reqQueue   *mpscring.NotifyingRing[*outboundConnectionRequest]
+	reqQueue   *mpscring.NotifyingRing[outboundConnectionRequest]
 	pending    [pendingShardCount]*pendingShard
 	futurePool sync.Pool
 
@@ -46,8 +46,8 @@ type Client struct {
 	closeOnce sync.Once
 	closeErr  error
 
-	requestPool       sync.Pool
-	responseTimerPool sync.Pool
+	requestBuilderPool sync.Pool
+	responseTimerPool  sync.Pool
 }
 
 // New creates a client and starts connecting to its lock-server. It does not
@@ -75,7 +75,7 @@ func New(config Config) (*Client, error) {
 		ctx:      ctx,
 		cancel:   cancel,
 		changed:  make(chan struct{}),
-		reqQueue: mpscring.NewNotifying[*outboundConnectionRequest](reqQueueCapacity),
+		reqQueue: mpscring.NewNotifying[outboundConnectionRequest](reqQueueCapacity),
 		pending:  newPendingShards(),
 	}
 	if config.ResponseTimeout != 0 {

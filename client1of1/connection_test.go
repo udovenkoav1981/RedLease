@@ -184,7 +184,7 @@ func startTestConnection(t *testing.T, connection *fakeLeaseConnection, timeout 
 		cancel:          cancelClient,
 		connection:      connection.transportConnection(),
 		changed:         make(chan struct{}),
-		reqQueue:        mpscring.NewNotifying[*outboundConnectionRequest](reqQueueCapacity),
+		reqQueue:        mpscring.NewNotifying[outboundConnectionRequest](reqQueueCapacity),
 		pending:         newPendingShards(),
 	}
 	done := make(chan error, 1)
@@ -241,6 +241,45 @@ func TestPendingShardIndex(t *testing.T) {
 	}
 }
 
+func TestRequestsAreBuiltInsideRingSlots(t *testing.T) {
+	client := &Client{
+		clientID: ^uint32(0),
+		bootID:   ^uint32(0),
+		ctx:      context.Background(),
+		reqQueue: mpscring.NewNotifying[outboundConnectionRequest](2),
+		pending:  newPendingShards(),
+	}
+	for index, operation := range []redleasev1.ClientOperation{
+		redleasev1.ClientOperationACQUIRE,
+		redleasev1.ClientOperationRENEW,
+		redleasev1.ClientOperationRELEASE,
+	} {
+		requestID := uint64(index + 1) //nolint:gosec // The test has three cases.
+		if err := client.enqueue(requestID, operation, ^uint64(0), ^uint64(0), ^uint64(0), nil); err != nil {
+			t.Fatalf("enqueue %s: %v", operation, err)
+		}
+		request := client.reqQueue.TryStartDequeue()
+		if request == nil {
+			t.Fatalf("dequeue %s failed", operation)
+		}
+		frame := request.frame()
+		if len(frame) != clientRequestFrameBytes {
+			t.Fatalf("%s frame size = %d, want %d", operation, len(frame), clientRequestFrameBytes)
+		}
+		if &frame[0] != &request.buffer[clientRequestBufferBytes-clientRequestFrameBytes] {
+			t.Fatalf("%s frame is not backed by its ring slot", operation)
+		}
+		decoded, err := observeClientRequest(redleasev1.GetSizePrefixedRootAsClientRequest(frame, 0))
+		if err != nil {
+			t.Fatalf("decode %s: %v", operation, err)
+		}
+		if decoded.RequestID != requestID || decoded.Operation != operation {
+			t.Fatalf("decoded request = %+v, want ID %d and operation %s", decoded, requestID, operation)
+		}
+		client.reqQueue.FinishDequeue()
+	}
+}
+
 func TestConnectionMultiplexesOutOfOrderResponses(t *testing.T) {
 	streamContext, cancelStream := context.WithCancel(context.Background())
 	connection := &fakeLeaseConnection{
@@ -253,11 +292,11 @@ func TestConnectionMultiplexesOutOfOrderResponses(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	first, err := client.submit(client.newReleaseRequest(1, 0))
+	first, err := client.submit(redleasev1.ClientOperationRELEASE, 1, 0, 0)
 	if err != nil {
 		t.Fatalf("submit first: %v", err)
 	}
-	second, err := client.submit(client.newReleaseRequest(2, 0))
+	second, err := client.submit(redleasev1.ClientOperationRELEASE, 2, 0, 0)
 	if err != nil {
 		t.Fatalf("submit second: %v", err)
 	}
@@ -295,7 +334,7 @@ func TestConnectionCancellationUnblocksAwait(t *testing.T) {
 	client, _ := startTestConnection(t, connection, time.Second)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	future, err := client.submit(client.newReleaseRequest(1, 0))
+	future, err := client.submit(redleasev1.ClientOperationRELEASE, 1, 0, 0)
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -324,11 +363,11 @@ func TestConnectionFlushesAvailableRequestsAsOneBatch(t *testing.T) {
 		cancel:          cancelClient,
 		connection:      connection.transportConnection(),
 		changed:         make(chan struct{}),
-		reqQueue:        mpscring.NewNotifying[*outboundConnectionRequest](reqQueueCapacity),
+		reqQueue:        mpscring.NewNotifying[outboundConnectionRequest](reqQueueCapacity),
 		pending:         newPendingShards(),
 	}
 	for key := uint64(1); key <= 3; key++ {
-		if err := client.submitNoResponse(client.newReleaseRequest(key, key)); err != nil {
+		if err := client.submitNoResponse(key, key); err != nil {
 			t.Fatalf("submit request %d: %v", key, err)
 		}
 	}
@@ -380,7 +419,7 @@ func TestConnectionWakesForRequestAfterIdle(t *testing.T) {
 		if key == 2 {
 			time.Sleep(5 * time.Millisecond)
 		}
-		if err := client.submitNoResponse(client.newReleaseRequest(key, key)); err != nil {
+		if err := client.submitNoResponse(key, key); err != nil {
 			t.Fatalf("submit request %d: %v", key, err)
 		}
 		select {
@@ -409,7 +448,7 @@ func TestConnectionFutureResponseTimeoutUnblocksAwait(t *testing.T) {
 	connection.cancel = cancelConnection
 	client, _ := startTestConnection(t, connection, time.Millisecond)
 
-	future, err := client.submit(client.newReleaseRequest(1, 0))
+	future, err := client.submit(redleasev1.ClientOperationRELEASE, 1, 0, 0)
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -424,7 +463,7 @@ func TestConnectionFutureResponseTimeoutUnblocksAwait(t *testing.T) {
 	}
 
 	client.responseTimeout = time.Second
-	second, err := client.submit(client.newReleaseRequest(2, 0))
+	second, err := client.submit(redleasev1.ClientOperationRELEASE, 2, 0, 0)
 	if err != nil {
 		t.Fatalf("submit after timeout: %v", err)
 	}
@@ -451,7 +490,7 @@ func TestAcquireReturnsNotAcquiredWhenSendQueueIsFull(t *testing.T) {
 	connection.cancel = cancelConnection
 	client, done := startTestConnection(t, connection, time.Second)
 
-	if err := client.submitNoResponse(client.newReleaseRequest(1, 1)); err != nil {
+	if err := client.submitNoResponse(1, 1); err != nil {
 		t.Fatalf("submit request blocking writer: %v", err)
 	}
 	select {
@@ -460,7 +499,7 @@ func TestAcquireReturnsNotAcquiredWhenSendQueueIsFull(t *testing.T) {
 		t.Fatal("writer did not start")
 	}
 	for request := range uint64(reqQueueCapacity) {
-		if err := client.submitNoResponse(client.newReleaseRequest(request+2, request+2)); err != nil {
+		if err := client.submitNoResponse(request+2, request+2); err != nil {
 			t.Fatalf("fill send queue at request %d: %v", request, err)
 		}
 	}
@@ -550,7 +589,7 @@ func TestReconnectKeepsQueuedRequestAndPendingResponses(t *testing.T) {
 		sendStart: make(chan struct{}, 1),
 	}
 	client, firstDone := startTestConnection(t, first, time.Second)
-	firstFuture, err := client.submit(client.newReleaseRequest(1, 1))
+	firstFuture, err := client.submit(redleasev1.ClientOperationRELEASE, 1, 1, 0)
 	if err != nil {
 		t.Fatalf("submit first: %v", err)
 	}
@@ -559,7 +598,7 @@ func TestReconnectKeepsQueuedRequestAndPendingResponses(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("first writer did not start")
 	}
-	secondFuture, err := client.submit(client.newReleaseRequest(2, 2))
+	secondFuture, err := client.submit(redleasev1.ClientOperationRELEASE, 2, 2, 0)
 	if err != nil {
 		t.Fatalf("submit queued request: %v", err)
 	}
@@ -576,7 +615,7 @@ func TestReconnectKeepsQueuedRequestAndPendingResponses(t *testing.T) {
 	if pendingCount != 2 {
 		t.Fatalf("pending after disconnect = %d, want 2", pendingCount)
 	}
-	thirdFuture, err := client.submit(client.newReleaseRequest(3, 3))
+	thirdFuture, err := client.submit(redleasev1.ClientOperationRELEASE, 3, 3, 0)
 	if err != nil {
 		t.Fatalf("submit while disconnected: %v", err)
 	}
@@ -634,7 +673,7 @@ func TestClientCloseWakesPendingAndDiscardsQueue(t *testing.T) {
 		sendStart: make(chan struct{}, 1),
 	}
 	client, _ := startTestConnection(t, connection, time.Second)
-	first, err := client.submit(client.newReleaseRequest(1, 1))
+	first, err := client.submit(redleasev1.ClientOperationRELEASE, 1, 1, 0)
 	if err != nil {
 		t.Fatalf("submit first: %v", err)
 	}
@@ -643,7 +682,7 @@ func TestClientCloseWakesPendingAndDiscardsQueue(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("writer did not start")
 	}
-	second, err := client.submit(client.newReleaseRequest(2, 2))
+	second, err := client.submit(redleasev1.ClientOperationRELEASE, 2, 2, 0)
 	if err != nil {
 		t.Fatalf("submit second: %v", err)
 	}

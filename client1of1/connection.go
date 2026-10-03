@@ -7,8 +7,6 @@ import (
 	"sync"
 	"time"
 
-	flatbuffers "github.com/google/flatbuffers/go"
-
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
@@ -18,7 +16,13 @@ import (
 // Callers may retry the operation after a delay.
 var ErrSendQueueFull = errors.New("connection send queue full")
 
-const pendingShardCount = 16
+const (
+	pendingShardCount       = 32
+	clientRequestFrameBytes = 72
+	// Builder.Prep needs at least nine unused leading bytes for this schema;
+	// round the fixed backing buffer up to the next eight-byte boundary.
+	clientRequestBufferBytes = clientRequestFrameBytes + 16
+)
 
 type connectionResult struct {
 	response protocol.Response
@@ -51,8 +55,12 @@ type connectionFuture struct {
 }
 
 type outboundConnectionRequest struct {
-	request redleasev1.ClientRequest
-	builder *flatbuffers.Builder
+	buffer     [clientRequestBufferBytes]byte
+	frameStart uint16
+}
+
+func (r *outboundConnectionRequest) frame() []byte {
+	return r.buffer[r.frameStart:]
 }
 
 func (f *connectionFuture) await(ctx context.Context, timeout <-chan time.Time) (protocol.Response, error) {
@@ -87,9 +95,15 @@ func (c *Client) awaitResponse(ctx context.Context, future *connectionFuture) (p
 
 // submit registers the waiter before putting the request into the persistent
 // FIFO. The queue insertion is the ordering barrier for a cleanup Release.
-func (c *Client) submit(request *outboundConnectionRequest) (*connectionFuture, error) {
-	future := c.acquireFuture(request.request.RequestId())
-	if err := c.enqueue(request, future.result); err != nil {
+func (c *Client) submit(
+	operation redleasev1.ClientOperation,
+	key uint64,
+	sequence uint64,
+	ttlMS uint64,
+) (*connectionFuture, error) {
+	requestID := c.nextRequestID.Add(1)
+	future := c.acquireFuture(requestID)
+	if err := c.enqueue(requestID, operation, key, sequence, ttlMS, future.result); err != nil {
 		c.releaseFuture(future)
 		return nil, err
 	}
@@ -117,29 +131,46 @@ func (c *Client) releaseFuture(future *connectionFuture) {
 	c.futurePool.Put(future)
 }
 
-func (c *Client) submitNoResponse(request *outboundConnectionRequest) error {
-	return c.enqueue(request, nil)
+func (c *Client) submitNoResponse(
+	key uint64,
+	sequence uint64,
+) error {
+	return c.enqueue(
+		c.nextRequestID.Add(1),
+		redleasev1.ClientOperationRELEASE,
+		key,
+		sequence,
+		0,
+		nil,
+	)
 }
 
-func (c *Client) enqueue(request *outboundConnectionRequest, result chan connectionResult) error {
-	requestID := request.request.RequestId()
+func (c *Client) enqueue(
+	requestID uint64,
+	operation redleasev1.ClientOperation,
+	key uint64,
+	sequence uint64,
+	ttlMS uint64,
+	result chan connectionResult,
+) error {
 	shard := c.pending[pendingShardIndex(requestID)]
 	shard.mu.Lock()
 	if c.ctx.Err() != nil {
 		shard.mu.Unlock()
-		c.recycleOutboundRequest(request)
 		return ErrClientClosed
 	}
 	if result != nil {
 		shard.pending[requestID] = result
 	}
-	if c.reqQueue.TryEnqueue(request) {
+	outbound, ticket := c.reqQueue.TryStartEnqueue()
+	if outbound != nil {
+		c.buildOutboundRequest(outbound, requestID, operation, key, sequence, ttlMS)
+		c.reqQueue.FinishEnqueue(ticket)
 		shard.mu.Unlock()
 		return nil
 	}
 	delete(shard.pending, requestID)
 	shard.mu.Unlock()
-	c.recycleOutboundRequest(request)
 	return ErrSendQueueFull
 }
 
@@ -191,8 +222,8 @@ func (c *Client) sendRequests(writer *transport.FrameWriter, stop <-chan struct{
 			return nil
 		default:
 		}
-		outbound, ok := c.reqQueue.TryDequeue()
-		if !ok {
+		outbound := c.reqQueue.TryStartDequeue()
+		if outbound == nil {
 			select {
 			case <-stop:
 				return nil
@@ -203,17 +234,17 @@ func (c *Client) sendRequests(writer *transport.FrameWriter, stop <-chan struct{
 		for {
 			select {
 			case <-stop:
-				c.recycleOutboundRequest(outbound)
+				c.reqQueue.FinishDequeue()
 				return nil
 			default:
 			}
-			err := writer.BufferFrame(outbound.request.Table().Bytes)
-			c.recycleOutboundRequest(outbound)
+			err := writer.BufferFrame(outbound.frame())
+			c.reqQueue.FinishDequeue()
 			if err != nil {
 				return fmt.Errorf("send: %w", err)
 			}
-			outbound, ok = c.reqQueue.TryDequeue()
-			if ok {
+			outbound = c.reqQueue.TryStartDequeue()
+			if outbound != nil {
 				continue
 			}
 			if err := writer.Flush(); err != nil {
@@ -240,15 +271,10 @@ func (c *Client) receive(reader *transport.FrameReader) error {
 
 func (c *Client) discardQueuedRequests() {
 	for {
-		request, ok := c.reqQueue.TryDequeue()
-		if !ok {
+		request := c.reqQueue.TryStartDequeue()
+		if request == nil {
 			return
 		}
-		c.recycleOutboundRequest(request)
+		c.reqQueue.FinishDequeue()
 	}
-}
-
-func (c *Client) recycleOutboundRequest(request *outboundConnectionRequest) {
-	request.request = redleasev1.ClientRequest{}
-	c.requestPool.Put(request)
 }
