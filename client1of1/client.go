@@ -82,6 +82,7 @@ func New(config Config) (*Client, error) {
 		client.responseTimeout = time.Duration(config.ResponseTimeout) * time.Millisecond
 	}
 
+	client.startResponseWorkers()
 	client.manager.Add(1)
 	go client.manageConnection()
 	return client, nil

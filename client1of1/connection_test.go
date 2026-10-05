@@ -187,6 +187,7 @@ func startTestConnection(t *testing.T, connection *fakeLeaseConnection, timeout 
 		reqQueue:        mpscring.NewNotifying[*outboundConnectionRequest](reqQueueCapacity),
 		pending:         newPendingShards(),
 	}
+	client.startResponseWorkers()
 	done := make(chan error, 1)
 	client.manager.Go(func() {
 		done <- client.runConnection(connection.transportConnection())

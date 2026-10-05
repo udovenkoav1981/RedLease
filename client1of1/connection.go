@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
@@ -18,7 +20,10 @@ import (
 // Callers may retry the operation after a delay.
 var ErrSendQueueFull = errors.New("connection send queue full")
 
-const pendingShardCount = 16
+const (
+	pendingShardCount     = 16
+	responseQueueCapacity = 512
+)
 
 type connectionResult struct {
 	response protocol.Response
@@ -26,14 +31,18 @@ type connectionResult struct {
 }
 
 type pendingShard struct {
-	mu      sync.Mutex
-	pending map[uint64]chan connectionResult
+	mu        sync.Mutex
+	pending   map[uint64]chan connectionResult
+	responses *mpscring.NotifyingRing[protocol.Response]
 }
 
 func newPendingShards() [pendingShardCount]*pendingShard {
 	var shards [pendingShardCount]*pendingShard
 	for index := range shards {
-		shards[index] = &pendingShard{pending: make(map[uint64]chan connectionResult)}
+		shards[index] = &pendingShard{
+			pending:   make(map[uint64]chan connectionResult),
+			responses: mpscring.NewNotifying[protocol.Response](responseQueueCapacity),
+		}
 	}
 	return shards
 }
@@ -57,13 +66,17 @@ type outboundConnectionRequest struct {
 
 func (f *connectionFuture) await(ctx context.Context, timeout <-chan time.Time) (protocol.Response, error) {
 	var result connectionResult
+	var completionErr error
 	select {
 	case result = <-f.result:
 	case <-ctx.Done():
-		f.client.complete(f.requestID, connectionResult{err: ctx.Err()})
-		result = <-f.result
+		completionErr = ctx.Err()
 	case <-timeout:
-		f.client.complete(f.requestID, connectionResult{err: context.DeadlineExceeded})
+		completionErr = context.DeadlineExceeded
+	}
+	if completionErr != nil {
+		shard := f.client.pending[pendingShardIndex(f.requestID)]
+		f.client.completeInShard(shard, f.requestID, connectionResult{err: completionErr})
 		result = <-f.result
 	}
 	f.client.releaseFuture(f)
@@ -143,8 +156,7 @@ func (c *Client) enqueue(request *outboundConnectionRequest, result chan connect
 	return ErrSendQueueFull
 }
 
-func (c *Client) complete(requestID uint64, result connectionResult) {
-	shard := c.pending[pendingShardIndex(requestID)]
+func (*Client) completeInShard(shard *pendingShard, requestID uint64, result connectionResult) {
 	shard.mu.Lock()
 	pending := shard.pending[requestID]
 	if pending != nil {
@@ -153,6 +165,29 @@ func (c *Client) complete(requestID uint64, result connectionResult) {
 	shard.mu.Unlock()
 	if pending != nil {
 		pending <- result
+	}
+}
+
+func (c *Client) startResponseWorkers() {
+	for _, shard := range c.pending {
+		c.manager.Go(func() {
+			c.completeResponses(shard)
+		})
+	}
+}
+
+func (c *Client) completeResponses(shard *pendingShard) {
+	for {
+		response, ok := shard.responses.TryDequeue()
+		if ok {
+			c.completeInShard(shard, response.RequestID, connectionResult{response: response})
+			continue
+		}
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-shard.responses.Ready():
+		}
 	}
 }
 
@@ -234,7 +269,13 @@ func (c *Client) receive(reader *transport.FrameReader) error {
 		if err != nil {
 			return fmt.Errorf("receive: %w", err)
 		}
-		c.complete(response.RequestID, connectionResult{response: response})
+		shard := c.pending[pendingShardIndex(response.RequestID)]
+		for !shard.responses.TryEnqueue(response) {
+			if c.ctx.Err() != nil {
+				return fmt.Errorf("receive: %w", ErrClientClosed)
+			}
+			runtime.Gosched()
+		}
 	}
 }
 
