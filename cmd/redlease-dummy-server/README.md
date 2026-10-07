@@ -7,13 +7,13 @@ FlatBuffers requests и возвращает корректные responses с �
 `max_ttl_ms`. Map, heap, shard queue и контроля владения здесь нет.
 
 ```bash
-go run ./cmd/redlease-dummy-server -listen 127.0.0.1:50052 -max-ttl-ms 5000
+go run ./cmd/redlease-dummy-server -listen 127.0.0.1:17379 -max-ttl-ms 5000
 ```
 
 В другой консоли:
 
 ```bash
-REDLEASE_BENCH_TARGET=127.0.0.1:50052 go test ./client1of1 \
+REDLEASE_BENCH_TARGET=127.0.0.1:17379 go test ./client1of1 \
   -run '^$' -bench '^BenchmarkClient1Of1AcquireRelease/workers=(256|512|1024|2048)$' \
   -benchtime=5s -count=1
 ```

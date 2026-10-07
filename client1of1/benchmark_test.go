@@ -19,7 +19,7 @@ import (
 
 const (
 	benchmarkTargetEnvironment = "REDLEASE_BENCH_TARGET"
-	defaultBenchmarkTarget     = "127.0.0.1:50051"
+	defaultBenchmarkTarget     = "127.0.0.1:17379"
 	benchmarkTTLMS             = uint64(1000)
 	benchmarkResponseTimeoutMS = uint32(5000)
 	benchmarkReadyTimeout      = 10 * time.Second

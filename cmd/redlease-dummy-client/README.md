@@ -16,7 +16,7 @@ TCP/server pipeline, а не бизнес-семантику lease.
 
 ```bash
 go run ./cmd/redlease-dummy-client \
-  -target 127.0.0.1:50051 \
+  -target 127.0.0.1:17379 \
   -duration 10s \
   -warmup 1s \
   -connections 1 \

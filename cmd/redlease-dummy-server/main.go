@@ -38,7 +38,7 @@ type templates struct {
 
 func main() {
 	flags := flag.NewFlagSet("redlease-dummy-server", flag.ExitOnError)
-	listen := flags.String("listen", "127.0.0.1:50052", "TCP listen address")
+	listen := flags.String("listen", "127.0.0.1:17379", "TCP listen address")
 	maxTTL := flags.Uint64("max-ttl-ms", defaultMaxTTLMS, "advertised maximum lease TTL in milliseconds")
 	_ = flags.Parse(os.Args[1:])
 	if *maxTTL == 0 {

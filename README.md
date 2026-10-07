@@ -49,7 +49,7 @@ lock-server без TLS и аутентификации:
 
 ```bash
 redlease-server \
-  -listen 127.0.0.1:50051 \
+  -listen 127.0.0.1:17379 \
   -metrics-listen 127.0.0.1:9090 \
   -configured-max-ttl-ms 5000 \
   -max-keys 10000
@@ -82,7 +82,7 @@ production-применения server можно встроить в прило
 Создание server и запуск TCP accept loop:
 
 ```go
-listener, err := net.Listen("tcp", "127.0.0.1:50051")
+listener, err := net.Listen("tcp", "127.0.0.1:17379")
 leaseServer, err := redleaseserver.New(listener, redleaseserver.Config{
 	MaxTTL:  5000,
 	MaxKeys: 10000,
@@ -126,7 +126,7 @@ Client должен быть долгоживущим объектом прил�
 ```go
 client, err := client1of1.New(client1of1.Config{
 	ClientID:        1,
-	Target:          "127.0.0.1:50051",
+	Target:          "127.0.0.1:17379",
 	Logger:          logger,
 	ResponseTimeout: 1000,
 })

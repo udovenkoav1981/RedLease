@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	defaultListenAddress    = "127.0.0.1:50051"
+	defaultListenAddress    = "127.0.0.1:17379"
 	defaultConfiguredMaxTTL = uint64(5000)
 )
 

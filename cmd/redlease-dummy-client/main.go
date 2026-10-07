@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	defaultTarget       = "127.0.0.1:50051"
+	defaultTarget       = "127.0.0.1:17379"
 	defaultKeyCount     = uint64(1024)
 	defaultTTLMS        = uint64(1000)
 	defaultDuration     = 10 * time.Second

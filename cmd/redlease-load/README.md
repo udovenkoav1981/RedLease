@@ -8,14 +8,14 @@
 Например, запустите сервер в другом терминале:
 
 ```sh
-go run ./cmd/redlease-server -listen=127.0.0.1:50051
+go run ./cmd/redlease-server -listen=127.0.0.1:17379
 ```
 
 Дождитесь выхода сервера из restart quarantine. Затем запустите матрицу для
 `client1of1` и общего `client` в топологии 1/1:
 
 ```sh
-go run ./cmd/redlease-load -targets=127.0.0.1:50051 > load-1of1.csv
+go run ./cmd/redlease-load -targets=127.0.0.1:17379 > load-1of1.csv
 ```
 
 Для топологии 3/5 запустите **пять независимых** серверов на разных адресах;
@@ -23,14 +23,14 @@ go run ./cmd/redlease-load -targets=127.0.0.1:50051 > load-1of1.csv
 
 ```sh
 go run ./cmd/redlease-load -client=client -quorum=3/5 \
-  -targets=127.0.0.1:50051,127.0.0.1:50052,127.0.0.1:50053,127.0.0.1:50054,127.0.0.1:50055 \
+  -targets=127.0.0.1:17379,127.0.0.1:17380,127.0.0.1:17381,127.0.0.1:17382,127.0.0.1:17383 \
   > load-3of5.csv
 ```
 
 Для короткой проверки можно уменьшить матрицу:
 
 ```sh
-go run ./cmd/redlease-load -targets=127.0.0.1:50051 \
+go run ./cmd/redlease-load -targets=127.0.0.1:17379 \
   -clients=2,4 -leases-per-client=16,32 -duration=2s
 ```
 

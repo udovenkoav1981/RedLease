@@ -14,7 +14,7 @@ func TestParseOptions(t *testing.T) {
 	config, err := parseOptions([]string{
 		"-client=client", "-quorum=3/5", "-clients=2, 4", "-leases-per-client=16,32",
 		"-duration=200ms", "-hold=5ms", "-ttl-ms=500",
-		"-targets=127.0.0.1:50051,127.0.0.1:50052,127.0.0.1:50053,127.0.0.1:50054,127.0.0.1:50055",
+		"-targets=127.0.0.1:17379,127.0.0.1:17380,127.0.0.1:17381,127.0.0.1:17382,127.0.0.1:17383",
 	}, &output)
 	if err != nil {
 		t.Fatalf("parseOptions: %v", err)
@@ -32,7 +32,7 @@ func TestParseOptions(t *testing.T) {
 }
 
 func TestDefaultHold(t *testing.T) {
-	config, err := parseOptions([]string{"-targets=127.0.0.1:50051"}, &bytes.Buffer{})
+	config, err := parseOptions([]string{"-targets=127.0.0.1:17379"}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("parseOptions: %v", err)
 	}
@@ -43,9 +43,9 @@ func TestDefaultHold(t *testing.T) {
 
 func TestParseOptionsRejectsInvalidValues(t *testing.T) {
 	for _, args := range [][]string{
-		{"-targets=127.0.0.1:50051,127.0.0.1:50051"},
-		{"-targets=127.0.0.1:50051,"},
-		{"-client=client", "-quorum=3/5", "-targets=127.0.0.1:50051"},
+		{"-targets=127.0.0.1:17379,127.0.0.1:17379"},
+		{"-targets=127.0.0.1:17379,"},
+		{"-client=client", "-quorum=3/5", "-targets=127.0.0.1:17379"},
 		{"-client=both", "-quorum=3/5"},
 		{"-client=client1of1", "-quorum=2/3"},
 		{"-clients=2,0"},
@@ -58,7 +58,7 @@ func TestParseOptionsRejectsInvalidValues(t *testing.T) {
 		{"-settle=-1s"},
 		{"-clients=129", "-leases-per-client=256"},
 	} {
-		args = append([]string{"-targets=127.0.0.1:50051"}, args...)
+		args = append([]string{"-targets=127.0.0.1:17379"}, args...)
 		if _, err := parseOptions(args, &bytes.Buffer{}); err == nil {
 			t.Errorf("parseOptions(%v) succeeded, want error", args)
 		}

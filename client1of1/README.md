@@ -7,13 +7,13 @@
 Сначала запустите server в отдельном терминале:
 
 ```bash
-go run ./cmd/redlease-server -listen=127.0.0.1:50051
+go run ./cmd/redlease-server -listen=127.0.0.1:17379
 ```
 
 Затем из корня репозитория запустите benchmark:
 
 ```bash
-REDLEASE_BENCH_TARGET=127.0.0.1:50051 \
+REDLEASE_BENCH_TARGET=127.0.0.1:17379 \
 go test ./client1of1 \
   -run '^$' \
   -bench '^BenchmarkClient1Of1AcquireRelease$' \
@@ -22,7 +22,7 @@ go test ./client1of1 \
   -count=3
 ```
 
-Если `REDLEASE_BENCH_TARGET` не задан, используется `127.0.0.1:50051`.
+Если `REDLEASE_BENCH_TARGET` не задан, используется `127.0.0.1:17379`.
 Benchmark сам ждёт готовности connection и выхода server из restart quarantine.
 Один `client1of1.Client` и одно TCP-соединение совместно используются 1, 2, 4,
 8, 16, 32, 64, 128, 256, 512, 1024, 2048 и 4096 параллельными workers.
