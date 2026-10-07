@@ -162,6 +162,30 @@ jobs:
           )
           cp dist/*.x86_64.rpm pages/rpm/x86_64/
           createrepo_c --quiet pages/rpm/x86_64
+          {
+            printf '%s\n' \
+              '<!doctype html>' \
+              '<html lang="en">' \
+              '<head>' \
+              '  <meta charset="utf-8">' \
+              '  <meta name="viewport" content="width=device-width, initial-scale=1">' \
+              '  <title>RedLease x86_64 RPM packages</title>' \
+              '</head>' \
+              '<body>' \
+              '  <h1>RedLease x86_64 RPM packages</h1>' \
+              '  <ul>'
+            for package_path in pages/rpm/x86_64/*.rpm; do
+              package_name="${package_path##*/}"
+              printf '    <li><a href="%s">%s</a></li>\n' \
+                "$package_name" "$package_name"
+            done
+            printf '%s\n' \
+              '  </ul>' \
+              '  <p><a href="repodata/repomd.xml">Repository metadata</a></p>' \
+              '  <p><a href="../../">Repository setup</a></p>' \
+              '</body>' \
+              '</html>'
+          } > pages/rpm/x86_64/index.html
 
       - name: Upload RPM repository for GitHub Pages
         uses: actions/upload-pages-artifact@v5
