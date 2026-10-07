@@ -114,6 +114,10 @@ func TestMetricsHandlerServesPrivateRegistry(t *testing.T) {
 		"redlease_server_state",
 		"redlease_server_resident_keys",
 		"redlease_server_acquires_total",
+		"go_goroutines",
+		"go_memstats_heap_alloc_bytes",
+		"process_cpu_seconds_total",
+		"process_resident_memory_bytes",
 	} {
 		if !bytes.Contains(response.Body.Bytes(), []byte(metric)) {
 			t.Errorf("GET /metrics does not contain %q", metric)

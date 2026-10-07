@@ -18,6 +18,7 @@ import (
 	"time"
 
 	clientprometheus "github.com/prometheus/client_golang/prometheus"
+	clientcollectors "github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/udovenkoav1981/RedLease/server"
@@ -213,13 +214,21 @@ func startMetricsEndpoint(
 }
 
 func newMetricsHandler(leaseServer *server.Server) (http.Handler, error) {
-	collector, err := redleaseprometheus.NewCollector(leaseServer)
+	redLeaseCollector, err := redleaseprometheus.NewCollector(leaseServer)
 	if err != nil {
 		return nil, fmt.Errorf("create Prometheus collector: %w", err)
 	}
 	registry := clientprometheus.NewRegistry()
-	if err := registry.Register(collector); err != nil {
+	if err := registry.Register(redLeaseCollector); err != nil {
 		return nil, fmt.Errorf("register Prometheus collector: %w", err)
+	}
+	for _, collector := range []clientprometheus.Collector{
+		clientcollectors.NewGoCollector(),
+		clientcollectors.NewProcessCollector(clientcollectors.ProcessCollectorOpts{}),
+	} {
+		if err := registry.Register(collector); err != nil {
+			return nil, fmt.Errorf("register standard Prometheus collector: %w", err)
+		}
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
