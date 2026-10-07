@@ -1,0 +1,11 @@
+Package: redlease-server
+Version: @VERSION@
+Section: net
+Priority: optional
+Architecture: amd64
+Maintainer: RedLease maintainers <udovenkoav1981@users.noreply.github.com>
+Depends: adduser, systemd
+Homepage: https://github.com/udovenkoav1981/RedLease
+Description: RedLease lock server launcher
+ Standalone plaintext RedLease lock server launcher. RedLease provides
+ distributed short-lived resource leases using a client-side quorum.

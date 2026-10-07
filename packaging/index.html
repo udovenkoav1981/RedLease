@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RedLease package repositories</title>
+</head>
+<body>
+  <h1>RedLease package repositories</h1>
+
+  <h2>RPM (x86_64)</h2>
+  <pre>sudo curl --fail --silent --show-error \
+  https://udovenkoav1981.github.io/RedLease/redlease.repo \
+  --output /etc/yum.repos.d/redlease.repo
+sudo dnf install redlease-server</pre>
+  <p><a href="rpm/x86_64/">Browse RPM packages</a>.</p>
+
+  <h2>DEB (amd64)</h2>
+  <pre>sudo curl --fail --silent --show-error \
+  https://udovenkoav1981.github.io/RedLease/redlease.list \
+  --output /etc/apt/sources.list.d/redlease.list
+sudo apt update
+sudo apt install redlease-server</pre>
+  <p><a href="deb/">Browse the APT repository</a>.</p>
+
+  <p>The repositories are currently unsigned.</p>
+</body>
+</html>

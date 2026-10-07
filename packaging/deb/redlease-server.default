@@ -1,0 +1,2 @@
+# Command-line options passed to redlease-server by the systemd unit.
+REDLEASE_SERVER_OPTIONS="-listen 0.0.0.0:17379 -metrics-listen 0.0.0.0:17380"

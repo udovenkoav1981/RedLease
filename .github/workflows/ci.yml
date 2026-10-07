@@ -63,16 +63,16 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      - name: Resolve RPM version
+      - name: Resolve package version
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          RPM_VERSION="${RELEASE_TAG#v}"
-          if [[ ! "$RPM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          RELEASE_VERSION="${RELEASE_TAG#v}"
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "release tag must have the form vMAJOR.MINOR.PATCH" >&2
             exit 1
           fi
-          echo "RPM_VERSION=$RPM_VERSION" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=$RELEASE_VERSION" >> "$GITHUB_ENV"
 
       - name: Build static redlease-server
         env:
@@ -92,10 +92,10 @@ jobs:
             exit 1
           fi
 
-      - name: Install RPM repository tools
+      - name: Install package repository tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes createrepo-c rpm
+          sudo apt-get install --yes apt-utils createrepo-c dpkg-dev rpm
 
       - name: Build RPM
         run: |
@@ -112,20 +112,54 @@ jobs:
             rpmbuild/SOURCES/redlease-server.sysconfig
           rpmbuild -bb packaging/rpm/redlease-server.spec \
             --define "_topdir $GITHUB_WORKSPACE/rpmbuild" \
-            --define "redlease_version $RPM_VERSION" \
+            --define "redlease_version $RELEASE_VERSION" \
             --target x86_64
           cp \
-            "rpmbuild/RPMS/x86_64/redlease-server-$RPM_VERSION-1.x86_64.rpm" \
+            "rpmbuild/RPMS/x86_64/redlease-server-$RELEASE_VERSION-1.x86_64.rpm" \
             dist/
-          rpm -qpl "dist/redlease-server-$RPM_VERSION-1.x86_64.rpm"
+          rpm -qpl "dist/redlease-server-$RELEASE_VERSION-1.x86_64.rpm"
+
+      - name: Build DEB
+        run: |
+          package_root="debbuild/redlease-server_${RELEASE_VERSION}-1_amd64"
+          mkdir -p \
+            "$package_root/DEBIAN" \
+            "$package_root/etc/default" \
+            "$package_root/usr/bin" \
+            "$package_root/usr/lib/systemd/system" \
+            "$package_root/usr/share/doc/redlease-server"
+          sed "s/@VERSION@/$RELEASE_VERSION-1/" \
+            packaging/deb/control > "$package_root/DEBIAN/control"
+          install -m 0644 packaging/deb/conffiles "$package_root/DEBIAN/conffiles"
+          install -m 0755 packaging/deb/postinst "$package_root/DEBIAN/postinst"
+          install -m 0755 packaging/deb/prerm "$package_root/DEBIAN/prerm"
+          install -m 0755 packaging/deb/postrm "$package_root/DEBIAN/postrm"
+          install -m 0755 \
+            dist/redlease-server-linux-amd64 \
+            "$package_root/usr/bin/redlease-server"
+          install -m 0644 \
+            packaging/deb/redlease-server.service \
+            "$package_root/usr/lib/systemd/system/redlease-server.service"
+          install -m 0644 \
+            packaging/deb/redlease-server.default \
+            "$package_root/etc/default/redlease-server"
+          install -m 0644 LICENSE "$package_root/usr/share/doc/redlease-server/copyright"
+          dpkg-deb --root-owner-group --build \
+            "$package_root" \
+            "dist/redlease-server_${RELEASE_VERSION}-1_amd64.deb"
+          dpkg-deb --info "dist/redlease-server_${RELEASE_VERSION}-1_amd64.deb"
+          dpkg-deb --contents "dist/redlease-server_${RELEASE_VERSION}-1_amd64.deb"
 
       - name: Create checksums
         working-directory: dist
         run: |
           sha256sum redlease-server-linux-amd64 > redlease-server-linux-amd64.sha256
           sha256sum \
-            "redlease-server-$RPM_VERSION-1.x86_64.rpm" \
-            > "redlease-server-$RPM_VERSION-1.x86_64.rpm.sha256"
+            "redlease-server-$RELEASE_VERSION-1.x86_64.rpm" \
+            > "redlease-server-$RELEASE_VERSION-1.x86_64.rpm.sha256"
+          sha256sum \
+            "redlease-server_${RELEASE_VERSION}-1_amd64.deb" \
+            > "redlease-server_${RELEASE_VERSION}-1_amd64.deb.sha256"
 
       - name: Publish GitHub Release
         env:
@@ -141,26 +175,44 @@ jobs:
               --generate-notes
           fi
 
-      - name: Assemble RPM repository
+      - name: Assemble package repositories
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p pages/rpm/x86_64
-          cp packaging/rpm/index.html packaging/rpm/redlease.repo pages/
+          mkdir -p \
+            pages/deb/dists/stable/main/binary-amd64 \
+            pages/deb/pool/main/r/redlease-server \
+            pages/rpm/x86_64
+          cp packaging/index.html pages/index.html
+          cp packaging/deb/index.html pages/deb/index.html
+          cp packaging/deb/redlease.list pages/redlease.list
+          cp packaging/rpm/redlease.repo pages/redlease.repo
           while IFS=$'\t' read -r asset_url asset_name; do
             if [[ -z "${asset_url:-}" ]]; then
               continue
             fi
+            case "$asset_name" in
+              redlease-server-*.x86_64.rpm)
+                destination=pages/rpm/x86_64
+                ;;
+              redlease-server_*_amd64.deb)
+                destination=pages/deb/pool/main/r/redlease-server
+                ;;
+              *)
+                continue
+                ;;
+            esac
             gh api \
               --header 'Accept: application/octet-stream' \
               "$asset_url" \
-              > "pages/rpm/x86_64/$asset_name"
+              > "$destination/$asset_name"
           done < <(
             gh api --paginate \
               "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-              --jq '.[] | select(.draft == false) | .assets[] | select(.name | startswith("redlease-server-") and endswith(".x86_64.rpm")) | [.url, .name] | @tsv'
+              --jq '.[] | select(.draft == false) | .assets[] | select((.name | startswith("redlease-server-") and endswith(".x86_64.rpm")) or (.name | startswith("redlease-server_") and endswith("_amd64.deb"))) | [.url, .name] | @tsv'
           )
           cp dist/*.x86_64.rpm pages/rpm/x86_64/
+          cp dist/*_amd64.deb pages/deb/pool/main/r/redlease-server/
           createrepo_c --quiet pages/rpm/x86_64
           {
             printf '%s\n' \
@@ -186,13 +238,51 @@ jobs:
               '</body>' \
               '</html>'
           } > pages/rpm/x86_64/index.html
+          (
+            cd pages/deb
+            dpkg-scanpackages --arch amd64 --multiversion pool/main \
+              > dists/stable/main/binary-amd64/Packages
+            gzip --best --keep dists/stable/main/binary-amd64/Packages
+            apt-ftparchive \
+              -o APT::FTPArchive::Release::Origin=RedLease \
+              -o APT::FTPArchive::Release::Label=RedLease \
+              -o APT::FTPArchive::Release::Suite=stable \
+              -o APT::FTPArchive::Release::Codename=stable \
+              -o APT::FTPArchive::Release::Architectures=amd64 \
+              -o APT::FTPArchive::Release::Components=main \
+              -o APT::FTPArchive::Release::Description='RedLease APT repository' \
+              release dists/stable > dists/stable/Release
+          )
+          {
+            printf '%s\n' \
+              '<!doctype html>' \
+              '<html lang="en">' \
+              '<head>' \
+              '  <meta charset="utf-8">' \
+              '  <meta name="viewport" content="width=device-width, initial-scale=1">' \
+              '  <title>RedLease amd64 DEB packages</title>' \
+              '</head>' \
+              '<body>' \
+              '  <h1>RedLease amd64 DEB packages</h1>' \
+              '  <ul>'
+            for package_path in pages/deb/pool/main/r/redlease-server/*.deb; do
+              package_name="${package_path##*/}"
+              printf '    <li><a href="%s">%s</a></li>\n' \
+                "$package_name" "$package_name"
+            done
+            printf '%s\n' \
+              '  </ul>' \
+              '  <p><a href="../../../../../">Repository setup</a></p>' \
+              '</body>' \
+              '</html>'
+          } > pages/deb/pool/main/r/redlease-server/index.html
 
-      - name: Upload RPM repository for GitHub Pages
+      - name: Upload package repositories for GitHub Pages
         uses: actions/upload-pages-artifact@v5
         with:
           path: pages
 
-  deploy-rpm-repository:
+  deploy-package-repositories:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: release
     runs-on: ubuntu-latest
@@ -212,6 +302,6 @@ jobs:
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v6
 
-      - name: Deploy RPM repository to GitHub Pages
+      - name: Deploy package repositories to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5

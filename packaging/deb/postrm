@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+if command -v systemctl >/dev/null && [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || :
+fi
+
+if [ "$1" = purge ]; then
+    if getent passwd redlease >/dev/null; then
+        deluser --system redlease || :
+    fi
+    if getent group redlease >/dev/null; then
+        delgroup --system redlease || :
+    fi
+fi
+
+exit 0

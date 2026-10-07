@@ -42,7 +42,7 @@ go get github.com/udovenkoav1981/RedLease/server/prometheus@latest
 go install github.com/udovenkoav1981/RedLease/cmd/redlease-server@latest
 ```
 
-Для Linux `x86_64` также доступна установка из RPM-репозитория:
+Для Linux `x86_64` доступна установка из RPM-репозитория:
 
 ```bash
 sudo curl --fail --silent --show-error \
@@ -51,10 +51,21 @@ sudo curl --fail --silent --show-error \
 sudo dnf install redlease-server
 ```
 
-RPM-репозиторий пока не подписан и публикуется в GitHub Pages при создании
-релизного тега. Пакет создаёт системного пользователя `redlease` и устанавливает
-`redlease-server.service`, но не запускает его автоматически. Параметры запуска
-задаются в `/etc/sysconfig/redlease-server`. По умолчанию RedLease слушает
+Для Debian и Ubuntu `amd64` доступен APT-репозиторий:
+
+```bash
+sudo curl --fail --silent --show-error \
+  https://udovenkoav1981.github.io/RedLease/redlease.list \
+  --output /etc/apt/sources.list.d/redlease.list
+sudo apt update
+sudo apt install redlease-server
+```
+
+Репозитории пока не подписаны и публикуются в GitHub Pages при создании
+релизного тега. Оба пакета создают системного пользователя `redlease` и
+устанавливают `redlease-server.service`, но не запускают его автоматически.
+Параметры запуска задаются в `/etc/sysconfig/redlease-server` для RPM и в
+`/etc/default/redlease-server` для DEB. По умолчанию RedLease слушает
 `0.0.0.0:17379`, а Prometheus exporter — `0.0.0.0:17380`. Ограничение доступа
 к обоим портам выполняется firewall или сетевой политикой:
 

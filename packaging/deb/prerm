@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = remove ] && command -v systemctl >/dev/null && [ -d /run/systemd/system ]; then
+    systemctl disable --now redlease-server.service || :
+fi
+
+exit 0
