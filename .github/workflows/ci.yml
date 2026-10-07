@@ -49,7 +49,7 @@ jobs:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: validate
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: write
 
@@ -62,6 +62,17 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+
+      - name: Resolve RPM version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          RPM_VERSION="${RELEASE_TAG#v}"
+          if [[ ! "$RPM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release tag must have the form vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          echo "RPM_VERSION=$RPM_VERSION" >> "$GITHUB_ENV"
 
       - name: Build static redlease-server
         env:
@@ -81,9 +92,40 @@ jobs:
             exit 1
           fi
 
-      - name: Create checksum
+      - name: Install RPM repository tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes createrepo-c rpm
+
+      - name: Build RPM
+        run: |
+          mkdir -p rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          install -Dpm 0755 \
+            dist/redlease-server-linux-amd64 \
+            rpmbuild/SOURCES/redlease-server
+          install -Dpm 0644 LICENSE rpmbuild/SOURCES/LICENSE
+          install -Dpm 0644 \
+            packaging/rpm/redlease-server.service \
+            rpmbuild/SOURCES/redlease-server.service
+          install -Dpm 0644 \
+            packaging/rpm/redlease-server.sysconfig \
+            rpmbuild/SOURCES/redlease-server.sysconfig
+          rpmbuild -bb packaging/rpm/redlease-server.spec \
+            --define "_topdir $GITHUB_WORKSPACE/rpmbuild" \
+            --define "redlease_version $RPM_VERSION" \
+            --target x86_64
+          cp \
+            "rpmbuild/RPMS/x86_64/redlease-server-$RPM_VERSION-1.x86_64.rpm" \
+            dist/
+          rpm -qpl "dist/redlease-server-$RPM_VERSION-1.x86_64.rpm"
+
+      - name: Create checksums
         working-directory: dist
-        run: sha256sum redlease-server-linux-amd64 > redlease-server-linux-amd64.sha256
+        run: |
+          sha256sum redlease-server-linux-amd64 > redlease-server-linux-amd64.sha256
+          sha256sum \
+            "redlease-server-$RPM_VERSION-1.x86_64.rpm" \
+            > "redlease-server-$RPM_VERSION-1.x86_64.rpm.sha256"
 
       - name: Publish GitHub Release
         env:
@@ -98,3 +140,54 @@ jobs:
               --title "$RELEASE_TAG" \
               --generate-notes
           fi
+
+      - name: Assemble RPM repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p pages/rpm/x86_64
+          cp packaging/rpm/index.html packaging/rpm/redlease.repo pages/
+          while IFS=$'\t' read -r asset_url asset_name; do
+            if [[ -z "${asset_url:-}" ]]; then
+              continue
+            fi
+            gh api \
+              --header 'Accept: application/octet-stream' \
+              "$asset_url" \
+              > "pages/rpm/x86_64/$asset_name"
+          done < <(
+            gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq '.[] | select(.draft == false) | .assets[] | select(.name | startswith("redlease-server-") and endswith(".x86_64.rpm")) | [.url, .name] | @tsv'
+          )
+          cp dist/*.x86_64.rpm pages/rpm/x86_64/
+          createrepo_c --quiet pages/rpm/x86_64
+
+      - name: Upload RPM repository for GitHub Pages
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: pages
+
+  deploy-rpm-repository:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v6
+
+      - name: Deploy RPM repository to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

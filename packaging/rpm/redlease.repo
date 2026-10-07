@@ -1,0 +1,6 @@
+[redlease]
+name=RedLease
+baseurl=https://udovenkoav1981.github.io/RedLease/rpm/$basearch
+enabled=1
+gpgcheck=0
+repo_gpgcheck=0

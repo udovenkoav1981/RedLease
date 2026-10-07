@@ -42,6 +42,26 @@ go get github.com/udovenkoav1981/RedLease/server/prometheus@latest
 go install github.com/udovenkoav1981/RedLease/cmd/redlease-server@latest
 ```
 
+Для Linux `x86_64` также доступна установка из RPM-репозитория:
+
+```bash
+sudo curl --fail --silent --show-error \
+  https://udovenkoav1981.github.io/RedLease/redlease.repo \
+  --output /etc/yum.repos.d/redlease.repo
+sudo dnf install redlease-server
+```
+
+RPM-репозиторий пока не подписан и публикуется в GitHub Pages при создании
+релизного тега. Пакет создаёт системного пользователя `redlease` и устанавливает
+`redlease-server.service`, но не запускает его автоматически. Параметры запуска
+задаются в `/etc/sysconfig/redlease-server`. По умолчанию RedLease слушает
+`0.0.0.0:17379`, а Prometheus exporter — `0.0.0.0:17380`. Ограничение доступа
+к обоим портам выполняется firewall или сетевой политикой:
+
+```bash
+sudo systemctl enable --now redlease-server
+```
+
 ## Быстрый запуск сервера
 
 Готовый launcher предназначен для локального тестирования. Он запускает один
@@ -50,13 +70,13 @@ lock-server без TLS и аутентификации:
 ```bash
 redlease-server \
   -listen 127.0.0.1:17379 \
-  -metrics-listen 127.0.0.1:9090 \
+  -metrics-listen 127.0.0.1:17380 \
   -configured-max-ttl-ms 5000 \
   -max-keys 10000
 ```
 
 Prometheus exporter после этого доступен на
-`http://127.0.0.1:9090/metrics`:
+`http://127.0.0.1:17380/metrics`:
 
 Если `-metrics-listen` не задан, HTTP endpoint не запускается.
 
@@ -101,7 +121,7 @@ registry.Register(collector)
 metricsMux := http.NewServeMux()
 metricsMux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
 metricsServer := &http.Server{
-	Addr:              "127.0.0.1:9090",
+	Addr:              "127.0.0.1:17380",
 	Handler:           metricsMux,
 	ReadHeaderTimeout: 5 * time.Second,
 }

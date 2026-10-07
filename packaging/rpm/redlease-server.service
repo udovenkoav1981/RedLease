@@ -1,0 +1,30 @@
+[Unit]
+Description=RedLease lock server
+Documentation=https://github.com/udovenkoav1981/RedLease
+After=network.target
+
+[Service]
+Type=simple
+User=redlease
+Group=redlease
+EnvironmentFile=-/etc/sysconfig/redlease-server
+ExecStart=/usr/bin/redlease-server $REDLEASE_SERVER_OPTIONS
+Restart=on-failure
+RestartSec=1s
+TimeoutStopSec=10s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
