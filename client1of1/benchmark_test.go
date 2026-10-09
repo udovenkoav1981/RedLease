@@ -38,7 +38,8 @@ type benchmarkWorkerStats struct {
 }
 
 // BenchmarkClient1Of1AcquireRelease uses one real TCP connection to an
-// externally started RedLease server.
+// externally started RedLease server. Each worker acquires a fresh key on
+// every iteration, matching the key lifecycle used by cmd/redlease-load.
 func BenchmarkClient1Of1AcquireRelease(b *testing.B) {
 	target := os.Getenv(benchmarkTargetEnvironment)
 	if target == "" {
@@ -108,6 +109,7 @@ func waitForBenchmarkServer(b *testing.B, client *redleaseclient.Client, key uin
 func runClientWorkers(b *testing.B, client *redleaseclient.Client, keys []uint64) {
 	b.Helper()
 	workers := len(keys)
+	keyStep := uint64(workers) //nolint:gosec // workers is positive and bounded by the benchmark table.
 	workerStats := make([]benchmarkWorkerStats, workers)
 	var ready sync.WaitGroup
 	var done sync.WaitGroup
@@ -125,10 +127,14 @@ func runClientWorkers(b *testing.B, client *redleaseclient.Client, keys []uint64
 		}
 
 		go func() {
-			defer done.Done()
+			defer func() {
+				keys[worker] = key
+				done.Done()
+			}()
 			ready.Done()
 			<-start
 			for range operationCount {
+				key += keyStep
 				started := time.Now()
 				for {
 					if failed.Load() {
@@ -212,9 +218,10 @@ func (s *benchmarkWorkerStats) percentile(percentage uint64) time.Duration {
 
 func drainBenchmarkReleases(b *testing.B, client *redleaseclient.Client, keys []uint64) {
 	b.Helper()
-	// Release has no client-visible acknowledgement. A subsequent zero-TTL
-	// Acquire for the same key is ordered behind it on the same server shard;
-	// its response proves the Release was processed without leaving a new lease.
+	// Release has no client-visible acknowledgement. keys contains each worker's
+	// final key; a subsequent zero-TTL Acquire for that key is ordered behind its
+	// Release on the same server shard and proves that final Release was processed
+	// without leaving a new lease.
 	var drains sync.WaitGroup
 	errorsSeen := make(chan error, len(keys))
 	for _, key := range keys {

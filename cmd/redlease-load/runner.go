@@ -141,10 +141,9 @@ func runCase(
 
 func measure(ctx context.Context, clients []loadClient, leaseCount int, config *options, keySeed uint64) caseResult {
 	stats := make([]workerStats, len(clients)*leaseCount)
+	workerCancels := make([]context.CancelFunc, len(stats))
 	keyStep := uint64(len(stats))
 	startSignal := make(chan struct{})
-	measurementCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	var ready, workers sync.WaitGroup
 	workerKey := keySeed
 	for clientIndex, instance := range clients {
@@ -152,12 +151,14 @@ func measure(ctx context.Context, clients []loadClient, leaseCount int, config *
 			position := clientIndex*leaseCount + workerIndex
 			initialKey := workerKey
 			workerKey++
+			workerCtx, cancelWorker := context.WithCancel(ctx)
+			workerCancels[position] = cancelWorker
 			ready.Add(1)
 			workers.Go(func() {
 				ready.Done()
 				<-startSignal
 				work(
-					measurementCtx,
+					workerCtx,
 					instance,
 					initialKey,
 					keyStep,
@@ -177,7 +178,9 @@ func measure(ctx context.Context, clients []loadClient, leaseCount int, config *
 	case <-ctx.Done():
 	}
 	elapsed := time.Since(started)
-	cancel()
+	for _, cancelWorker := range workerCancels {
+		cancelWorker()
+	}
 	workers.Wait()
 	return summarize(stats, len(clients), leaseCount, elapsed)
 }
