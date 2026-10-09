@@ -38,7 +38,9 @@ type Client struct {
 	closeOnce sync.Once
 	closeErr  error
 
-	requestBuilderPool sync.Pool
+	requestPool       sync.Pool
+	futurePool        sync.Pool
+	responseTimerPool sync.Pool
 }
 
 // New creates a client and starts connecting to all configured servers. It
@@ -81,6 +83,7 @@ func New(config Config) (*Client, error) {
 
 	for index, server := range client.servers {
 		client.replicas[index] = newReplicaConn(
+			client,
 			newTCPConnectionFactory(server.Target),
 			client.logger.With(
 				slog.Uint64("replica_index", uint64(index)),

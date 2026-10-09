@@ -4,19 +4,32 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
+	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
-var errConnectionClosed = errors.New("connection generation closed")
+var (
+	errConnectionClosed = errors.New("connection generation closed")
 
-const initialSendBatchCapacity = 64
+	// ErrSendQueueFull means a request could not be queued for transmission.
+	// Callers may retry the operation after a delay.
+	ErrSendQueueFull = errors.New("connection send queue full")
+)
+
+const (
+	reqQueueCapacity      = 4096
+	pendingShardCount     = 16
+	responseQueueCapacity = 512
+)
 
 type connectionTransportError struct {
 	cause error
@@ -35,71 +48,91 @@ type connectionCallResult struct {
 	err      error
 }
 
-type pendingConnectionCall struct {
-	result chan connectionCallResult
+type pendingShard struct {
+	mu        sync.Mutex
+	pending   map[uint64]chan connectionCallResult
+	responses *mpscring.NotifyingRing[protocol.Response]
+}
+
+func newPendingShards() [pendingShardCount]*pendingShard {
+	var shards [pendingShardCount]*pendingShard
+	for index := range shards {
+		shards[index] = &pendingShard{
+			pending:   make(map[uint64]chan connectionCallResult),
+			responses: mpscring.NewNotifying[protocol.Response](responseQueueCapacity),
+		}
+	}
+	return shards
+}
+
+// Request IDs grow sequentially, so their low bits spread neighboring
+// requests evenly across the configured shards without hashing.
+func pendingShardIndex(requestID uint64) uint8 {
+	return uint8(requestID & (pendingShardCount - 1)) //nolint:gosec // The mask bounds the index.
 }
 
 type connectionFuture struct {
 	generation *connectionGeneration
 	requestID  uint64
-	pending    *pendingConnectionCall
-	outbound   *outboundConnectionRequest
+	result     chan connectionCallResult
 }
 
 func (f *connectionFuture) await(ctx context.Context) (protocol.Response, error) {
-	select {
-	case result := <-f.pending.result:
-		return result.response, result.err
-	case <-ctx.Done():
-		// A response deadline may be earlier than the submission deadline. An
-		// ordinary cancellation only abandons this response; the independent
-		// submission-deadline watchdog still breaks a genuinely stuck Send.
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) && !f.outbound.sendComplete() {
-			f.generation.terminate(fmt.Errorf("send deadline: %w", ctx.Err()))
-		}
-		f.generation.complete(f.requestID, connectionCallResult{err: ctx.Err()})
-		result := <-f.pending.result
-		return result.response, result.err
-	}
+	return f.awaitUntil(ctx, nil)
 }
 
-type outboundRequestState uint8
+func (f *connectionFuture) awaitUntil(
+	ctx context.Context,
+	timeout <-chan time.Time,
+) (protocol.Response, error) {
+	var result connectionCallResult
+	var completionErr error
+	select {
+	case result = <-f.result:
+	case <-ctx.Done():
+		completionErr = ctx.Err()
+	case <-timeout:
+		completionErr = context.DeadlineExceeded
+	}
+	if completionErr != nil {
+		f.generation.complete(f.requestID, connectionCallResult{err: completionErr})
+		result = <-f.result
+	}
+	f.generation.client.releaseFuture(f)
+	return result.response, result.err
+}
 
-const (
-	outboundRequestQueued outboundRequestState = iota
-	outboundRequestAccepted
-	outboundRequestCanceled
-)
+func (c *Client) awaitResponse(
+	ctx context.Context,
+	future *connectionFuture,
+) (protocol.Response, error) {
+	timer, ok := c.responseTimerPool.Get().(*time.Timer)
+	if ok {
+		timer.Reset(c.responseTimeout)
+	} else {
+		timer = time.NewTimer(c.responseTimeout)
+	}
+
+	response, err := future.awaitUntil(ctx, timer.C)
+	timer.Stop()
+	c.responseTimerPool.Put(timer)
+	return response, err
+}
 
 type outboundConnectionRequest struct {
-	request     redleasev1.ClientRequest
-	builder     *flatbuffers.Builder
-	builderPool *sync.Pool
-
-	mu       sync.Mutex
-	state    outboundRequestState
-	accepted chan struct{}
-	sent     chan struct{}
-	deadline time.Time
+	request redleasev1.ClientRequest
+	builder *flatbuffers.Builder
 }
 
 func (c *Client) newOutboundRequest() *outboundConnectionRequest {
-	var builder *flatbuffers.Builder
-	if pooled := c.requestBuilderPool.Get(); pooled != nil {
-		if reusable, ok := pooled.(*flatbuffers.Builder); ok {
-			builder = reusable
-			builder.Reset()
+	if pooled := c.requestPool.Get(); pooled != nil {
+		if outbound, ok := pooled.(*outboundConnectionRequest); ok {
+			outbound.builder.Reset()
+			return outbound
 		}
 	}
-	if builder == nil {
-		builder = flatbuffers.NewBuilder(transport.InitialBufferSize)
-	}
 	return &outboundConnectionRequest{
-		builder:     builder,
-		builderPool: &c.requestBuilderPool,
-		state:       outboundRequestQueued,
-		accepted:    make(chan struct{}),
-		sent:        make(chan struct{}),
+		builder: flatbuffers.NewBuilder(transport.InitialBufferSize),
 	}
 }
 
@@ -112,69 +145,42 @@ func (*Client) finishOutboundRequest(outbound *outboundConnectionRequest) {
 	outbound.request.Init(frame, rootOffset)
 }
 
-func (r *outboundConnectionRequest) releaseRequest() {
-	r.request = redleasev1.ClientRequest{}
-	if r.builder == nil {
-		return
-	}
-	builder := r.builder
-	r.builder = nil
-	if r.builderPool != nil {
-		r.builderPool.Put(builder)
-	}
+func (c *Client) recycleOutboundRequest(outbound *outboundConnectionRequest) {
+	outbound.request = redleasev1.ClientRequest{}
+	c.requestPool.Put(outbound)
 }
 
-func (r *outboundConnectionRequest) finishSend() {
-	close(r.sent)
-}
-
-func (r *outboundConnectionRequest) sendComplete() bool {
-	select {
-	case <-r.sent:
-		return true
-	default:
-		return false
+func (c *Client) acquireFuture(generation *connectionGeneration, requestID uint64) *connectionFuture {
+	if pooled := c.futurePool.Get(); pooled != nil {
+		if future, ok := pooled.(*connectionFuture); ok {
+			future.generation = generation
+			future.requestID = requestID
+			return future
+		}
+	}
+	return &connectionFuture{
+		generation: generation,
+		requestID:  requestID,
+		result:     make(chan connectionCallResult, 1),
 	}
 }
 
-func (r *outboundConnectionRequest) beginSend() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.state == outboundRequestCanceled {
-		return false
-	}
-	r.state = outboundRequestAccepted
-	// Closing accepted is the submission barrier: the single writer has accepted
-	// this request into connection order before it buffers the FlatBuffer frame.
-	close(r.accepted)
-	return true
-}
-
-func (r *outboundConnectionRequest) cancelBeforeSend() outboundRequestState {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.state == outboundRequestQueued {
-		r.state = outboundRequestCanceled
-	}
-	return r.state
-}
-
-func (r *outboundConnectionRequest) currentState() outboundRequestState {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.state
+func (c *Client) releaseFuture(future *connectionFuture) {
+	future.generation = nil
+	future.requestID = 0
+	c.futurePool.Put(future)
 }
 
 type connectionGeneration struct {
+	client     *Client
 	connection *transport.ClientConnection
 	cancel     context.CancelFunc
 
-	sendQueue chan *outboundConnectionRequest
-	done      chan struct{}
+	reqQueue *mpscring.NotifyingRing[*outboundConnectionRequest]
+	pending  [pendingShardCount]*pendingShard
+	done     chan struct{}
 
-	pendingMu   sync.Mutex
-	pending     map[uint64]*pendingConnectionCall
-	terminalErr error
+	terminal atomic.Pointer[connectionTransportError]
 
 	terminateOnce      sync.Once
 	closeOnce          sync.Once
@@ -183,21 +189,26 @@ type connectionGeneration struct {
 }
 
 func newConnectionGeneration(
+	client *Client,
 	connection *transport.ClientConnection,
 	cancel context.CancelFunc,
 ) *connectionGeneration {
 	generation := &connectionGeneration{
+		client:     client,
 		connection: connection,
 		cancel:     cancel,
-		sendQueue:  make(chan *outboundConnectionRequest),
+		reqQueue:   mpscring.NewNotifying[*outboundConnectionRequest](reqQueueCapacity),
+		pending:    newPendingShards(),
 		done:       make(chan struct{}),
-		pending:    make(map[uint64]*pendingConnectionCall),
 	}
 
-	generation.workers.Add(2)
-	go generation.sendLoop()
-	go generation.recvLoop()
-
+	for _, shard := range generation.pending {
+		generation.workers.Go(func() {
+			generation.completeResponses(shard)
+		})
+	}
+	generation.workers.Go(generation.sendRequests)
+	generation.workers.Go(generation.receiveResponses)
 	return generation
 }
 
@@ -212,187 +223,118 @@ func (g *connectionGeneration) call(
 	return future.await(ctx)
 }
 
+// submit registers the waiter before putting the request into the bounded
+// connection FIFO. Successful enqueue is the submission ordering barrier.
 func (g *connectionGeneration) submit(
 	ctx context.Context,
 	outbound *outboundConnectionRequest,
 ) (*connectionFuture, error) {
-	requestID := outbound.request.RequestId()
-
-	call := &pendingConnectionCall{result: make(chan connectionCallResult, 1)}
-	if err := g.register(requestID, call); err != nil {
-		outbound.releaseRequest()
-		return nil, err
-	}
-	outbound.deadline, _ = ctx.Deadline()
-	future := &connectionFuture{
-		generation: g,
-		requestID:  requestID,
-		pending:    call,
-		outbound:   outbound,
-	}
-
 	if err := ctx.Err(); err != nil {
-		g.complete(requestID, connectionCallResult{err: err})
-		outbound.releaseRequest()
+		g.client.recycleOutboundRequest(outbound)
 		return nil, err
 	}
 
-	select {
-	case g.sendQueue <- outbound:
-	case <-ctx.Done():
-		g.complete(requestID, connectionCallResult{err: ctx.Err()})
-		outbound.releaseRequest()
-		return nil, ctx.Err()
-	case <-g.done:
-		outbound.releaseRequest()
-		return nil, g.err()
-	}
-
-	select {
-	case <-outbound.accepted:
-		return g.submissionOutcome(future, outbound)
-	case <-ctx.Done():
-		return g.cancelSubmission(ctx.Err(), future, outbound)
-	case <-g.done:
-		return g.cancelSubmission(g.err(), future, outbound)
-	}
-}
-
-func (g *connectionGeneration) submissionOutcome(
-	future *connectionFuture,
-	outbound *outboundConnectionRequest,
-) (*connectionFuture, error) {
-	if outbound.currentState() == outboundRequestAccepted {
-		return future, nil
-	}
-	if terminalErr := g.err(); terminalErr != nil {
+	requestID := outbound.request.RequestId()
+	future := g.client.acquireFuture(g, requestID)
+	shard := g.pending[pendingShardIndex(requestID)]
+	shard.mu.Lock()
+	if terminalErr := g.terminal.Load(); terminalErr != nil {
+		shard.mu.Unlock()
+		g.client.releaseFuture(future)
+		g.client.recycleOutboundRequest(outbound)
 		return nil, terminalErr
 	}
-	return nil, &connectionTransportError{cause: errConnectionClosed}
-}
-
-func (g *connectionGeneration) cancelSubmission(
-	cause error,
-	future *connectionFuture,
-	outbound *outboundConnectionRequest,
-) (*connectionFuture, error) {
-	state := outbound.cancelBeforeSend()
-	switch state {
-	case outboundRequestCanceled:
-		g.complete(future.requestID, connectionCallResult{err: cause})
-		return nil, cause
-	case outboundRequestAccepted:
+	shard.pending[requestID] = future.result
+	if g.reqQueue.TryEnqueue(outbound) {
+		shard.mu.Unlock()
 		return future, nil
-	default:
-		panic("unexpected outbound request state")
 	}
-}
-
-func (g *connectionGeneration) Close() error {
-	g.terminate(errConnectionClosed)
-	g.workers.Wait()
-	return g.closeConnectionErr
-}
-
-func (g *connectionGeneration) register(requestID uint64, call *pendingConnectionCall) error {
-	g.pendingMu.Lock()
-	defer g.pendingMu.Unlock()
-
-	if g.terminalErr != nil {
-		return g.terminalErr
-	}
-	g.pending[requestID] = call
-	return nil
+	delete(shard.pending, requestID)
+	shard.mu.Unlock()
+	g.client.releaseFuture(future)
+	g.client.recycleOutboundRequest(outbound)
+	return nil, ErrSendQueueFull
 }
 
 func (g *connectionGeneration) complete(requestID uint64, result connectionCallResult) {
-	g.pendingMu.Lock()
-	call := g.pending[requestID]
-	if call != nil {
-		delete(g.pending, requestID)
-	}
-	g.pendingMu.Unlock()
-
-	if call == nil {
-		return
-	}
-	call.result <- result
+	shard := g.pending[pendingShardIndex(requestID)]
+	g.completeInShard(shard, requestID, result)
 }
 
-func (g *connectionGeneration) sendLoop() {
-	defer g.workers.Done()
-	batch := make([]*outboundConnectionRequest, 0, initialSendBatchCapacity)
+func (*connectionGeneration) completeInShard(
+	shard *pendingShard,
+	requestID uint64,
+	result connectionCallResult,
+) {
+	shard.mu.Lock()
+	pending := shard.pending[requestID]
+	if pending != nil {
+		delete(shard.pending, requestID)
+	}
+	shard.mu.Unlock()
+	if pending != nil {
+		pending <- result
+	}
+}
 
+func (g *connectionGeneration) completeResponses(shard *pendingShard) {
 	for {
-		var outbound *outboundConnectionRequest
+		response, ok := shard.responses.TryDequeue()
+		if ok {
+			g.completeInShard(shard, response.RequestID, connectionCallResult{response: response})
+			continue
+		}
 		select {
 		case <-g.done:
 			return
-		case outbound = <-g.sendQueue:
+		case <-shard.responses.Ready():
 		}
+	}
+}
 
-		batch = batch[:0]
-		for {
-			if outbound.beginSend() {
-				if !outbound.deadline.IsZero() {
-					go g.watchSendDeadline(outbound)
-				}
-				batch = append(batch, outbound)
-
-				err := g.connection.Writer.BufferFrame(outbound.request.Table().Bytes)
-				outbound.releaseRequest()
-				if err != nil {
-					finishSendBatch(batch)
-					g.terminate(fmt.Errorf("send: %w", err))
-					return
-				}
-			} else {
-				outbound.releaseRequest()
-			}
-
+func (g *connectionGeneration) sendRequests() {
+	for {
+		select {
+		case <-g.done:
+			return
+		default:
+		}
+		outbound, ok := g.reqQueue.TryDequeue()
+		if !ok {
 			select {
-			case outbound = <-g.sendQueue:
-				continue
+			case <-g.done:
+				return
+			case <-g.reqQueue.Ready():
+			}
+			continue
+		}
+		for {
+			select {
+			case <-g.done:
+				g.client.recycleOutboundRequest(outbound)
+				return
 			default:
 			}
-			if len(batch) == 0 {
-				break
+			err := g.connection.Writer.BufferFrame(outbound.request.Table().Bytes)
+			g.client.recycleOutboundRequest(outbound)
+			if err != nil {
+				g.terminate(fmt.Errorf("send: %w", err))
+				return
+			}
+			outbound, ok = g.reqQueue.TryDequeue()
+			if ok {
+				continue
 			}
 			if err := g.connection.Writer.Flush(); err != nil {
-				finishSendBatch(batch)
 				g.terminate(fmt.Errorf("flush send batch: %w", err))
 				return
 			}
-			finishSendBatch(batch)
 			break
 		}
 	}
 }
 
-func finishSendBatch(batch []*outboundConnectionRequest) {
-	for _, outbound := range batch {
-		outbound.finishSend()
-	}
-}
-
-func (g *connectionGeneration) watchSendDeadline(outbound *outboundConnectionRequest) {
-	delay := max(time.Until(outbound.deadline), 0)
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-
-	select {
-	case <-outbound.sent:
-	case <-g.done:
-	case <-timer.C:
-		if !outbound.sendComplete() {
-			g.terminate(fmt.Errorf("send deadline: %w", context.DeadlineExceeded))
-		}
-	}
-}
-
-func (g *connectionGeneration) recvLoop() {
-	defer g.workers.Done()
-
+func (g *connectionGeneration) receiveResponses() {
 	for {
 		frame, err := g.connection.Reader.ReadFrame()
 		if err != nil {
@@ -404,29 +346,54 @@ func (g *connectionGeneration) recvLoop() {
 			g.terminate(fmt.Errorf("receive: %w", err))
 			return
 		}
-		g.complete(response.RequestID, connectionCallResult{response: response})
+		shard := g.pending[pendingShardIndex(response.RequestID)]
+		for !shard.responses.TryEnqueue(response) {
+			select {
+			case <-g.done:
+				return
+			default:
+				runtime.Gosched()
+			}
+		}
 	}
+}
+
+func (g *connectionGeneration) Close() error {
+	g.terminate(errConnectionClosed)
+	g.workers.Wait()
+	g.discardQueuedRequests()
+	return g.closeConnectionErr
 }
 
 func (g *connectionGeneration) terminate(cause error) {
 	g.terminateOnce.Do(func() {
 		transportErr := &connectionTransportError{cause: cause}
-
-		g.pendingMu.Lock()
-		g.terminalErr = transportErr
-		pending := g.pending
-		g.pending = make(map[uint64]*pendingConnectionCall)
-		g.pendingMu.Unlock()
-
+		g.terminal.Store(transportErr)
 		close(g.done)
 		g.cancel()
 		g.closeConnection()
 
 		result := connectionCallResult{err: transportErr}
-		for _, call := range pending {
-			call.result <- result
+		for _, shard := range g.pending {
+			shard.mu.Lock()
+			pending := shard.pending
+			shard.pending = nil
+			shard.mu.Unlock()
+			for _, completion := range pending {
+				completion <- result
+			}
 		}
 	})
+}
+
+func (g *connectionGeneration) discardQueuedRequests() {
+	for {
+		outbound, ok := g.reqQueue.TryDequeue()
+		if !ok {
+			return
+		}
+		g.client.recycleOutboundRequest(outbound)
+	}
 }
 
 func (g *connectionGeneration) closeConnection() {
@@ -436,7 +403,8 @@ func (g *connectionGeneration) closeConnection() {
 }
 
 func (g *connectionGeneration) err() error {
-	g.pendingMu.Lock()
-	defer g.pendingMu.Unlock()
-	return g.terminalErr
+	if terminalErr := g.terminal.Load(); terminalErr != nil {
+		return terminalErr
+	}
+	return nil
 }

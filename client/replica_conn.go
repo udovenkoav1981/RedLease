@@ -51,6 +51,7 @@ func (f *tcpConnectionFactory) close() error {
 }
 
 type replicaConn struct {
+	client  *Client
 	factory connectionFactory
 	backoff backoff.Exponential
 	logger  *slog.Logger
@@ -70,9 +71,10 @@ type replicaConn struct {
 	closeErr  error
 }
 
-func newReplicaConn(factory connectionFactory, logger *slog.Logger) *replicaConn {
+func newReplicaConn(client *Client, factory connectionFactory, logger *slog.Logger) *replicaConn {
 	ctx, cancel := context.WithCancel(context.Background())
 	connection := &replicaConn{
+		client:  client,
 		factory: factory,
 		backoff: backoff.Default(),
 		logger:  logger,
@@ -111,7 +113,7 @@ func (c *replicaConn) submit(
 	c.stateMu.Unlock()
 
 	if generation == nil {
-		request.releaseRequest()
+		c.client.recycleOutboundRequest(request)
 		return nil, &replicaUnavailableError{cause: cause}
 	}
 
@@ -165,7 +167,7 @@ func (c *replicaConn) manage() {
 			continue
 		}
 
-		generation := newConnectionGeneration(connection, func() {})
+		generation := newConnectionGeneration(c.client, connection, func() {})
 		if !c.publish(generation) {
 			_ = generation.Close()
 			return

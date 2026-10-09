@@ -57,21 +57,14 @@ func (c *Client) Acquire(
 	key uint64,
 	ttlMS uint64,
 ) (*Lease, error) {
-	if c.ctx.Err() != nil {
-		return nil, &notAcquiredError{cause: ErrClientClosed}
+	if err := c.acquireCancellationError(ctx); err != nil {
+		return nil, &notAcquiredError{cause: err}
 	}
 	sequence := c.nextSequence.Add(1)
 	lease := newLease(c, sequence, key, ttlMS)
 	operationStart := lease.now
 	serverCount := len(c.replicas)
 	quorumSize := c.quorum.size()
-
-	operationContext, cancelOperation := context.WithTimeout(c.ctx, c.responseTimeout)
-	stopCallerCancellation := context.AfterFunc(ctx, cancelOperation)
-	defer func() {
-		stopCallerCancellation()
-		cancelOperation()
-	}()
 
 	collectionContext, cancelCollection := context.WithCancel(lease.ctx)
 	submissions := make(chan acquireSubmission, serverCount)
@@ -81,7 +74,7 @@ func (c *Client) Acquire(
 		request := c.newAcquireRequest(lease.key, sequence, ttlMS)
 		//nolint:contextcheck // Submission and response collection intentionally have different lifetimes.
 		go c.submitAcquire(
-			operationContext,
+			lease.ctx,
 			collectionContext,
 			replica,
 			request,
@@ -215,9 +208,7 @@ func (c *Client) submitAcquire(
 		return
 	}
 
-	responseContext, cancelResponse := context.WithTimeout(collectionContext, c.responseTimeout)
-	response, err := future.await(responseContext)
-	cancelResponse()
+	response, err := c.awaitResponse(collectionContext, future)
 	if err != nil {
 		results <- acquireReplicaResult{replica: replica, err: err}
 		return

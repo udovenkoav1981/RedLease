@@ -1,7 +1,6 @@
 package client
 
 import (
-	"context"
 	"time"
 
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
@@ -65,14 +64,13 @@ func (l *Lease) healReplicas(replicas []int) int {
 		}
 	}()
 
-	submitContext, cancelSubmissions := context.WithTimeout(l.ctx, l.client.responseTimeout)
 	results := make(chan acquireReplicaResult, len(replicas))
 	submissions := make(chan acquireSubmission, len(replicas))
 
 	for _, replica := range replicas {
 		request := l.client.newAcquireRequest(l.key, l.sequence, l.requestedTTLMS)
 		go l.client.submitAcquire(
-			submitContext,
+			l.ctx,
 			l.ctx,
 			replica,
 			request,
@@ -84,7 +82,6 @@ func (l *Lease) healReplicas(replicas []int) int {
 	for range replicas {
 		<-submissions
 	}
-	cancelSubmissions()
 	l.endSubmitBatch()
 	batchActive = false
 

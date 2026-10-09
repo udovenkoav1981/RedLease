@@ -39,13 +39,12 @@ func (c *Client) releaseAll(key, sequence uint64) {
 	serverCount := len(c.replicas)
 	retryTimeout := time.Duration(protocol.MaxTTLMS)*time.Millisecond + c.responseTimeout
 	retryContext, cancelRetries := context.WithTimeout(c.ctx, retryTimeout)
-	initialContext, cancelInitial := context.WithTimeout(retryContext, c.responseTimeout)
 
 	submissions := make(chan releaseSubmission, serverCount)
 	for replica := range c.replicas {
 		request := c.newReleaseRequest(key, sequence)
 		go func() {
-			future, _ := c.replicas[replica].submit(initialContext, request)
+			future, _ := c.replicas[replica].submit(retryContext, request)
 			submissions <- releaseSubmission{replica: replica, future: future}
 		}()
 	}
@@ -54,8 +53,6 @@ func (c *Client) releaseAll(key, sequence uint64) {
 	for range serverCount {
 		initial = append(initial, <-submissions)
 	}
-	cancelInitial()
-
 	var retries releaseRetries
 	retries.Add(serverCount)
 	for _, submission := range initial {
@@ -119,17 +116,12 @@ func (c *Client) retryReleaseReplica(
 		}
 		attempt++
 
-		submitContext, cancelSubmit := context.WithTimeout(ctx, c.responseTimeout)
-		future, _ = c.replicas[replica].submit(submitContext, c.newReleaseRequest(key, sequence))
-		cancelSubmit()
+		future, _ = c.replicas[replica].submit(ctx, c.newReleaseRequest(key, sequence))
 	}
 }
 
 func (c *Client) releaseResponseOK(ctx context.Context, future *connectionFuture) bool {
-	responseContext, cancelResponse := context.WithTimeout(ctx, c.responseTimeout)
-	defer cancelResponse()
-
-	response, err := future.await(responseContext)
+	response, err := c.awaitResponse(ctx, future)
 	if err != nil || response.Operation != redleasev1.ClientOperationRELEASE {
 		return false
 	}

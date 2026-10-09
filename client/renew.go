@@ -62,13 +62,6 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 		}
 	}()
 
-	operationContext, cancelOperation := context.WithTimeout(l.ctx, l.client.responseTimeout)
-	stopCallerCancellation := context.AfterFunc(ctx, cancelOperation)
-	defer func() {
-		stopCallerCancellation()
-		cancelOperation()
-	}()
-
 	collectionContext, cancelCollection := context.WithCancel(l.ctx)
 	submissions := make(chan acquireSubmission, serverCount)
 	results := make(chan renewReplicaResult, serverCount)
@@ -77,7 +70,7 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 		request := l.client.newRenewRequest(l.key, l.sequence, ttlMS)
 		//nolint:contextcheck // Submission and response collection intentionally have different lifetimes.
 		go l.submitRenew(
-			operationContext,
+			l.ctx,
 			collectionContext,
 			replica,
 			request,
@@ -207,9 +200,7 @@ func (l *Lease) submitRenew(
 		return
 	}
 
-	responseContext, cancelResponse := context.WithTimeout(collectionContext, l.client.responseTimeout)
-	response, err := future.await(responseContext)
-	cancelResponse()
+	response, err := l.client.awaitResponse(collectionContext, future)
 	if err != nil {
 		results <- renewReplicaResult{replica: replica, err: err}
 		return

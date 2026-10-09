@@ -38,7 +38,9 @@ Client TCP write batching  block for first request, drain available queue, flush
 Server TCP write batching  block for first response, drain available queue, flush
 TCP read buffering         64 KiB per connection on client and server
 TCP write buffering        64 KiB per connection on client and server
+client send queue          4096 requests per connection, discarded on reconnect
 client1of1 send queue      4096 requests per client, persistent across reconnect
+Client pending shards      16, each with a 512-response completion queue
 Initial ownership          >= Q/N
 Steady-state target        N/N
 Restart protection         built-in quarantine by default; explicit owner-managed opt-out
@@ -584,8 +586,8 @@ Writer каждого client connection блокируется в ожидани
 заполнения write buffer. Искусственной задержки для накопления batch нет.
 Поэтому одиночный request отправляется сразу, а burst из нескольких requests
 требует меньше TCP `Write` calls и установок write deadline. Оба client package
-используют общий `internal/transport.LeaseConnection`; различается только
-управление request lifecycle и quorum поверх transport. Оба client package
+используют общий `internal/transport.ClientConnection`; различаются управление
+request lifecycle, reconnect и quorum поверх transport. Оба client package
 также сразу строят generated FlatBuffers `ClientRequest`, без промежуточного
 owned request. Server разбирает generated FlatBuffers view и до чтения
 следующего frame сразу копирует нужные скаляры в `server.operation`, не
@@ -609,10 +611,10 @@ connection-scoped MPSC ring, а не промежуточная структур
 уступает процессор через `runtime.Gosched()` и повторяет enqueue, пока writer не
 освободит место либо connection не будет закрыт. Отдельное уведомление будит
 writer, а сигнал завершения закрывается после всех pending jobs.
-Send queue `client1of1`, response ring server и очереди операций shard
-используют одну generic реализацию fixed-capacity MPSC FIFO из
-`internal/mpscring`; у каждой очереди несколько producers и ровно один
-consumer.
+Send queues обоих client packages, client response-completion rings, response
+ring server и очереди операций shard используют одну generic реализацию
+fixed-capacity MPSC FIFO из `internal/mpscring`; у каждой очереди несколько
+producers и ровно один consumer.
 Server response writer блокируется до первого response, копирует его и остальные уже доступные responses в
 connection write buffer, выполняет промежуточные `Flush()` только при заполнении
 64 KiB и финальный `Flush()` перед возвратом к блокирующему ожиданию. Builder
@@ -626,6 +628,10 @@ connection write buffer, выполняет промежуточные `Flush()`
 Для `Acquire` это возвращается приложению как `ErrNotAcquired`. Если причиной
 переполнения был зависший socket writer, соединение будет закрыто самим writer
 по TCP write timeout; переполнение очереди отдельно не запускает reconnect.
+Универсальный `client` использует ту же неблокирующую постановку в очередь для
+каждого connection generation. Переполнение считается ошибкой только этой
+replica; Acquire или Renew всё ещё может собрать quorum по остальным replicas,
+а Release использует существующий bounded retry.
 
 Каждый запрос содержит `requestID`, уникальный в пределах одного соединения
 (у `client1of1` — в течение жизни client). Server
@@ -654,7 +660,11 @@ Server принимает запросы одного соединения по 
 Завершённые операции поступают в connection-scoped `respQueue` и отправляются
 одним TCP writer. Поэтому ответы для разных ключей могут возвращаться не в
 порядке запросов. Client сопоставляет их через `requestID` и не ждёт предыдущий
-ответ перед отправкой следующего запроса.
+ответ перед отправкой следующего запроса. В обоих client packages pending map
+разделена на 16 независимых shards. Reader распределяет ответы по 16 bounded
+completion rings ёмкостью 512, а отдельный consumer каждого shard завершает
+соответствующее ожидание; поэтому reader не конкурирует с producers всех
+requests за один общий mutex.
 
 Для каждого ожидаемого ответа client хранит отдельный deadline. После timeout
 запрос перестаёт участвовать в quorum, а возможный поздний ответ игнорируется.

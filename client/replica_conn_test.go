@@ -28,7 +28,7 @@ func TestReplicaConnLogsStateTransitionsWithoutRetrySpam(t *testing.T) {
 	stream := newReplicaFakeStream()
 	factory.results <- streamFactoryResult{stream: stream}
 
-	connection := newReplicaConn(factory, logger)
+	connection := newReplicaConn(&Client{}, factory, logger)
 	waitForReplicaState(t, connection, true, false)
 	secondStream := newReplicaFakeStream()
 	factory.results <- streamFactoryResult{stream: secondStream}
@@ -104,15 +104,13 @@ func TestReplicaConnReconnectsAfterGenerationFailure(t *testing.T) {
 	}
 }
 
-func TestReplicaConnReconnectsWhenRequestDeadlineBreaksBlockedSend(t *testing.T) {
+func TestReplicaConnRequestDeadlineDoesNotBreakConnection(t *testing.T) {
 	factory := newScriptedStreamFactory()
 	firstStream := newReplicaFakeStream()
 	factory.results <- streamFactoryResult{stream: firstStream}
 	connection := newTestReplicaConn(t, factory)
 	waitForReplicaState(t, connection, true, false)
 
-	secondStream := newReplicaFakeStream()
-	factory.results <- streamFactoryResult{stream: secondStream}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	result := make(chan connectionCallResult, 1)
@@ -124,12 +122,18 @@ func TestReplicaConnReconnectsWhenRequestDeadlineBreaksBlockedSend(t *testing.T)
 	if err := receiveCallResult(t, result).err; !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("blocked call error = %v, want deadline exceeded", err)
 	}
-	waitForReplicaState(t, connection, false, false)
-	waitForReplicaState(t, connection, true, false)
+
+	// A response timeout only removes this request's waiter. The connection is
+	// still healthy and its writer may complete the already queued request.
+	_ = receiveSentRequest(t, firstStream)
+	ready, closed, _ := connection.readiness()
+	if !ready || closed {
+		t.Fatalf("replica state after request timeout: ready=%t closed=%t", ready, closed)
+	}
 
 	secondResult := startReplicaCall(connection, acquireStreamRequest(2))
-	request := receiveSentRequest(t, secondStream)
-	secondStream.receive <- fakeReceive{
+	request := receiveSentRequest(t, firstStream)
+	firstStream.receive <- fakeReceive{
 		response: streamResponse(request.RequestID, redleasev1.LeaseStatusOK),
 	}
 	if received := receiveCallResult(t, secondResult); received.err != nil {
@@ -255,7 +259,7 @@ func newTestReplicaConn(
 }
 
 func newTestReplicaConnWithoutCleanup(factory connectionFactory) *replicaConn {
-	return newReplicaConn(factory, testLogger)
+	return newReplicaConn(&Client{}, factory, testLogger)
 }
 
 func newReplicaFakeStream() *fakeLeaseClientStream {

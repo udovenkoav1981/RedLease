@@ -125,7 +125,7 @@ func newClientWithScriptedReplicasWithoutCleanup() (*Client, [testServerCount]*s
 	for index := range client.replicas {
 		factory := newScriptedStreamFactory()
 		factories[index] = factory
-		client.replicas[index] = newReplicaConn(factory, testLogger)
+		client.replicas[index] = newReplicaConn(client, factory, testLogger)
 	}
 	return client, factories
 }
@@ -144,7 +144,7 @@ func newClientForQuorum(quorum Quorum) (*Client, []*scriptedStreamFactory) {
 	for index := range client.replicas {
 		factory := newScriptedStreamFactory()
 		factories[index] = factory
-		client.replicas[index] = newReplicaConn(factory, testLogger)
+		client.replicas[index] = newReplicaConn(client, factory, testLogger)
 	}
 	return client, factories
 }

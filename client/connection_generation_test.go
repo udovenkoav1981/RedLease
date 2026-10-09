@@ -84,11 +84,11 @@ func TestStreamFutureBuffersResponseBeforeAwait(t *testing.T) {
 	// then put the result back for the real await call.
 	var buffered connectionCallResult
 	select {
-	case buffered = <-future.pending.result:
+	case buffered = <-future.result:
 	case <-time.After(time.Second):
 		t.Fatal("response was not buffered before await")
 	}
-	future.pending.result <- buffered
+	future.result <- buffered
 
 	response, err := future.await(context.Background())
 	if err != nil {
@@ -144,32 +144,53 @@ func TestStreamSubmitSendFailureCompletesAcceptedFuture(t *testing.T) {
 	assertTransportCause(t, err, sendFailure)
 }
 
-func TestStreamSubmitCancellationBeforeWriterAcceptanceDoesNotSend(t *testing.T) {
+func TestStreamSubmitReturnsQueueFullWithoutTerminatingGeneration(t *testing.T) {
 	generation, stream := newTestStreamGeneration(t)
 
-	first, err := generation.submit(context.Background(), acquireStreamRequest(1))
-	if err != nil {
-		t.Fatalf("first submit: %v", err)
+	if _, err := generation.submit(context.Background(), acquireStreamRequest(1)); err != nil {
+		t.Fatalf("submit request blocking writer: %v", err)
 	}
 	stream.waitForSendAttempt(t)
 
-	secondContext, cancelSecond := context.WithCancel(context.Background())
-	secondSubmission := startStreamSubmit(generation, secondContext, acquireStreamRequest(2))
-	cancelSecond()
-	second := receiveSubmitResult(t, secondSubmission)
-	if !errors.Is(second.err, context.Canceled) {
-		t.Fatalf("second submit error = %v, want context canceled", second.err)
-	}
-	if second.future != nil {
-		t.Fatal("unaccepted canceled submit returned a future")
+	for request := range uint64(reqQueueCapacity) {
+		if _, err := generation.submit(
+			context.Background(),
+			acquireStreamRequest(request+2),
+		); err != nil {
+			t.Fatalf("fill request queue at request %d: %v", request, err)
+		}
 	}
 
-	firstRequest := receiveSentRequest(t, stream)
-	stream.receive <- fakeReceive{
-		response: streamResponse(firstRequest.RequestID, redleasev1.LeaseStatusOK),
+	future, err := generation.submit(
+		context.Background(),
+		acquireStreamRequest(reqQueueCapacity+2),
+	)
+	if !errors.Is(err, ErrSendQueueFull) {
+		t.Fatalf("submit error = %v, want ErrSendQueueFull", err)
 	}
-	if _, err := first.await(context.Background()); err != nil {
-		t.Fatalf("first await: %v", err)
+	if future != nil {
+		t.Fatal("full request queue returned a future")
+	}
+	select {
+	case <-generation.done:
+		t.Fatal("full request queue terminated the connection generation")
+	default:
+	}
+
+	_ = receiveSentRequest(t, stream)
+}
+
+func TestStreamSubmitRejectsAlreadyCanceledContext(t *testing.T) {
+	generation, stream := newTestStreamGeneration(t)
+
+	canceledContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	future, err := generation.submit(canceledContext, acquireStreamRequest(1))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("submit error = %v, want context canceled", err)
+	}
+	if future != nil {
+		t.Fatal("canceled submit returned a future")
 	}
 
 	select {
@@ -204,7 +225,7 @@ func TestStreamSubmitCancellationAfterWriterAcceptanceReturnsFuture(t *testing.T
 	}
 }
 
-func TestStreamResponseTimeoutTerminatesBlockedSend(t *testing.T) {
+func TestStreamResponseTimeoutDoesNotTerminateBlockedSend(t *testing.T) {
 	generation, stream := newTestStreamGeneration(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
@@ -218,9 +239,13 @@ func TestStreamResponseTimeoutTerminatesBlockedSend(t *testing.T) {
 
 	select {
 	case <-generation.done:
-	case <-time.After(time.Second):
-		t.Fatal("response timeout did not terminate blocked generation")
+		t.Fatal("response timeout terminated the connection generation")
+	default:
 	}
+
+	// Let the writer finish the timed-out request. A possible late response is
+	// ignored because await already removed the waiter.
+	_ = receiveSentRequest(t, stream)
 }
 
 func TestStreamGenerationTimeoutAndLateResponseDoNotBlockAnotherCall(t *testing.T) {
@@ -527,7 +552,7 @@ func newTestStreamGenerationWithOptions(
 		sendErr:     options.sendErr,
 		closeErr:    options.closeErr,
 	}
-	generation := newConnectionGeneration(transport.NewClientConnection(stream), cancel)
+	generation := newConnectionGeneration(&Client{}, transport.NewClientConnection(stream), cancel)
 	t.Cleanup(func() { _ = generation.Close() })
 	return generation, stream
 }

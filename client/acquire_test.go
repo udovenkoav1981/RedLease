@@ -242,7 +242,7 @@ func TestClientAcquireCallerCancellationStillSubmitsCleanup(t *testing.T) {
 	harness.receiveAndRespondToCleanup(t, &requests)
 }
 
-func TestClientAcquireWaitsForAllFiveSubmissionBarriers(t *testing.T) {
+func TestClientAcquireDoesNotWaitForSocketWriteAfterSubmission(t *testing.T) {
 	harness := newAcquireHarness(t)
 
 	fifthGeneration := currentReplicaGeneration(t, harness.client.replicas[4])
@@ -262,20 +262,18 @@ func TestClientAcquireWaitsForAllFiveSubmissionBarriers(t *testing.T) {
 	}
 
 	select {
-	case early := <-result:
-		t.Fatalf("Acquire returned before fifth submission barrier: %+v", early)
-	case <-time.After(20 * time.Millisecond):
+	case acquired := <-result:
+		if acquired.err != nil {
+			t.Fatalf("Acquire after all requests were enqueued: %v", acquired.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Acquire waited for the fifth request to reach the socket")
 	}
 
 	blockerRequest := receiveSentRequest(t, harness.streams[4])
 	harness.respondAcquire(4, blockerRequest, redleasev1.LeaseStatusBUSY, 0)
 	if _, err := blocker.await(context.Background()); err != nil {
 		t.Fatalf("await blocker: %v", err)
-	}
-
-	acquired := receiveAcquireCallResult(t, result)
-	if acquired.err != nil {
-		t.Fatalf("Acquire after fifth barrier: %v", acquired.err)
 	}
 
 	requests[4] = receiveAcquireRequest(t, harness.streams[4])
@@ -563,9 +561,12 @@ func waitForNoPendingStreamCalls(t *testing.T, client *Client) {
 		pending := 0
 		for _, replica := range client.replicas {
 			generation := currentReplicaGeneration(t, replica)
-			generation.pendingMu.Lock()
-			pending += len(generation.pending)
-			generation.pendingMu.Unlock()
+			for shardIndex := range generation.pending {
+				shard := generation.pending[shardIndex]
+				shard.mu.Lock()
+				pending += len(shard.pending)
+				shard.mu.Unlock()
+			}
 		}
 		if pending == 0 {
 			return
