@@ -29,7 +29,7 @@ const (
 	safetyMargin = 100 * time.Millisecond
 
 	defaultShardCount           = 256
-	shardQueueCapacity          = 16
+	shardQueueCapacity          = 256
 	expiredLeaseCleanupInterval = time.Minute
 )
 
