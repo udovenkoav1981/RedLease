@@ -3,11 +3,11 @@ package client
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"sync"
 
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
+	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
@@ -61,11 +61,14 @@ type replicaConn struct {
 
 	stateMu    sync.Mutex
 	generation *connectionGeneration
-	lastErr    error
 	closed     bool
 	changed    chan struct{}
 
-	manager sync.WaitGroup
+	reqQueue *mpscring.NotifyingRing[*outboundConnectionRequest]
+	pending  [pendingShardCount]*pendingShard
+
+	manager           sync.WaitGroup
+	completionWorkers sync.WaitGroup
 
 	closeOnce sync.Once
 	closeErr  error
@@ -74,15 +77,22 @@ type replicaConn struct {
 func newReplicaConn(client *Client, factory connectionFactory, logger *slog.Logger) *replicaConn {
 	ctx, cancel := context.WithCancel(context.Background())
 	connection := &replicaConn{
-		client:  client,
-		factory: factory,
-		backoff: backoff.Default(),
-		logger:  logger,
-		ctx:     ctx,
-		cancel:  cancel,
-		changed: make(chan struct{}),
+		client:   client,
+		factory:  factory,
+		backoff:  backoff.Default(),
+		logger:   logger,
+		ctx:      ctx,
+		cancel:   cancel,
+		changed:  make(chan struct{}),
+		reqQueue: mpscring.NewNotifying[*outboundConnectionRequest](reqQueueCapacity),
+		pending:  newPendingShards(),
 	}
 
+	for _, shard := range connection.pending {
+		connection.completionWorkers.Go(func() {
+			connection.completeResponses(shard)
+		})
+	}
 	connection.manager.Add(1)
 	go connection.manage()
 	return connection
@@ -103,23 +113,45 @@ func (c *replicaConn) submit(
 	ctx context.Context,
 	request *outboundConnectionRequest,
 ) (*connectionFuture, error) {
-	c.stateMu.Lock()
-	generation := c.generation
-	cause := c.lastErr
-	if c.closed {
-		cause = errReplicaClosed
-		generation = nil
-	}
-	c.stateMu.Unlock()
+	return c.submitForOperation(ctx, request, 0, nil)
+}
 
-	if generation == nil {
+func (c *replicaConn) submitForOperation(
+	ctx context.Context,
+	request *outboundConnectionRequest,
+	replicaIndex int,
+	operation chan<- replicaResponse,
+) (*connectionFuture, error) {
+	if err := ctx.Err(); err != nil {
 		c.client.recycleOutboundRequest(request)
-		return nil, &replicaUnavailableError{cause: cause}
+		return nil, err
 	}
 
-	// A failed call is deliberately not retried on a newer generation: the
-	// server may already have applied the operation before transport failure.
-	return generation.submit(ctx, request)
+	requestID := request.request.RequestId()
+	var future *connectionFuture
+	if operation == nil {
+		future = c.client.acquireFuture(c, requestID)
+	} else {
+		future = c.client.acquireOperationFuture(c, requestID, replicaIndex, operation)
+	}
+	shard := c.pending[pendingShardIndex(requestID)]
+	shard.mu.Lock()
+	if c.ctx.Err() != nil {
+		shard.mu.Unlock()
+		c.client.releaseFuture(future)
+		c.client.recycleOutboundRequest(request)
+		return nil, &replicaUnavailableError{cause: errReplicaClosed}
+	}
+	shard.pending[requestID] = future
+	if c.reqQueue.TryEnqueue(request) {
+		shard.mu.Unlock()
+		return future, nil
+	}
+	delete(shard.pending, requestID)
+	shard.mu.Unlock()
+	c.client.releaseFuture(future)
+	c.client.recycleOutboundRequest(request)
+	return nil, ErrSendQueueFull
 }
 
 // readiness returns a level-triggered snapshot plus a channel closed on the
@@ -132,12 +164,15 @@ func (c *replicaConn) readiness() (ready, closed bool, changed <-chan struct{}) 
 
 func (c *replicaConn) Close() error {
 	c.closeOnce.Do(func() {
-		generation := c.markClosed()
 		c.cancel()
+		generation := c.markClosed()
 		if generation != nil {
 			_ = generation.Close()
 		}
 		c.manager.Wait()
+		c.failPending(&replicaUnavailableError{cause: errReplicaClosed})
+		c.completionWorkers.Wait()
+		c.discardQueuedRequests()
 		c.closeErr = c.factory.close()
 	})
 	return c.closeErr
@@ -151,7 +186,6 @@ func (c *replicaConn) manage() {
 	for {
 		connection, err := c.factory.open(c.ctx)
 		if err != nil {
-			c.recordFailure(fmt.Errorf("open connection: %w", err))
 			if !unavailable && c.ctx.Err() == nil {
 				c.logger.Warn(
 					"replica connection unavailable",
@@ -167,7 +201,7 @@ func (c *replicaConn) manage() {
 			continue
 		}
 
-		generation := newConnectionGeneration(c.client, connection, func() {})
+		generation := newConnectionGeneration(c, connection)
 		if !c.publish(generation) {
 			_ = generation.Close()
 			return
@@ -185,7 +219,7 @@ func (c *replicaConn) manage() {
 		}
 
 		cause := generation.err()
-		c.clear(generation, cause)
+		c.clear(generation)
 		_ = generation.Close()
 		if c.ctx.Err() != nil {
 			return
@@ -215,28 +249,18 @@ func (c *replicaConn) publish(generation *connectionGeneration) bool {
 		return false
 	}
 	c.generation = generation
-	c.lastErr = nil
 	c.notifyStateChangeLocked()
 	return true
 }
 
-func (c *replicaConn) clear(generation *connectionGeneration, cause error) {
+func (c *replicaConn) clear(generation *connectionGeneration) {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	if c.generation != generation {
 		return
 	}
 	c.generation = nil
-	c.lastErr = cause
 	c.notifyStateChangeLocked()
-}
-
-func (c *replicaConn) recordFailure(cause error) {
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
-	if !c.closed {
-		c.lastErr = cause
-	}
 }
 
 func (c *replicaConn) markClosed() *connectionGeneration {
@@ -245,7 +269,6 @@ func (c *replicaConn) markClosed() *connectionGeneration {
 	c.closed = true
 	generation := c.generation
 	c.generation = nil
-	c.lastErr = errReplicaClosed
 	c.notifyStateChangeLocked()
 	return generation
 }

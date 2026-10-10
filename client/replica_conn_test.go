@@ -66,14 +66,19 @@ func TestReplicaConnRetriesOpenFailure(t *testing.T) {
 	factory := newScriptedStreamFactory()
 	factory.results <- streamFactoryResult{err: openFailure}
 	connection := newTestReplicaConn(t, factory)
-	waitForReplicaError(t, connection, openFailure)
 
-	_, err := connection.call(context.Background(), acquireStreamRequest(1))
-	assertReplicaUnavailableCause(t, err, openFailure)
+	result := startReplicaCall(connection, acquireStreamRequest(1))
 
 	stream := newReplicaFakeStream()
 	factory.results <- streamFactoryResult{stream: stream}
 	waitForReplicaState(t, connection, true, false)
+	request := receiveSentRequest(t, stream)
+	stream.receive <- fakeReceive{
+		response: streamResponse(request.RequestID, redleasev1.LeaseStatusOK),
+	}
+	if received := receiveCallResult(t, result); received.err != nil {
+		t.Fatalf("queued call after reconnect failed: %v", received.err)
+	}
 
 	if opens := factory.openCalls.Load(); opens != 2 {
 		t.Fatalf("factory open calls = %d, want 2", opens)
@@ -101,6 +106,48 @@ func TestReplicaConnReconnectsAfterGenerationFailure(t *testing.T) {
 	}
 	if received := receiveCallResult(t, result); received.err != nil {
 		t.Fatalf("call after reconnect failed: %v", received.err)
+	}
+}
+
+func TestReplicaConnKeepsQueuedRequestAcrossReconnect(t *testing.T) {
+	factory := newScriptedStreamFactory()
+	firstStream := newReplicaFakeStream()
+	factory.results <- streamFactoryResult{stream: firstStream}
+	connection := newTestReplicaConn(t, factory)
+	waitForReplicaState(t, connection, true, false)
+
+	firstContext, cancelFirst := context.WithCancel(context.Background())
+	firstResult := make(chan connectionCallResult, 1)
+	go func() {
+		response, err := connection.call(firstContext, acquireStreamRequest(1))
+		firstResult <- connectionCallResult{response: response, err: err}
+	}()
+	firstStream.waitForSendAttempt(t)
+
+	// The first request has already left the persistent queue and is blocked in
+	// the old socket write. The second request remains queued for the next
+	// connection generation.
+	secondResult := startReplicaCall(connection, acquireStreamRequest(2))
+	secondStream := newReplicaFakeStream()
+	factory.results <- streamFactoryResult{stream: secondStream}
+	firstStream.receive <- fakeReceive{err: errors.New("stream disconnected")}
+	waitForReplicaState(t, connection, false, false)
+	waitForReplicaState(t, connection, true, false)
+
+	secondRequest := receiveSentRequest(t, secondStream)
+	if secondRequest.Key != 2 {
+		t.Fatalf("request sent after reconnect has key %d, want 2", secondRequest.Key)
+	}
+	secondStream.receive <- fakeReceive{
+		response: streamResponse(secondRequest.RequestID, redleasev1.LeaseStatusOK),
+	}
+	if received := receiveCallResult(t, secondResult); received.err != nil {
+		t.Fatalf("queued call after reconnect failed: %v", received.err)
+	}
+
+	cancelFirst()
+	if err := receiveCallResult(t, firstResult).err; !errors.Is(err, context.Canceled) {
+		t.Fatalf("request extracted by old writer error = %v, want context canceled", err)
 	}
 }
 
@@ -141,13 +188,26 @@ func TestReplicaConnRequestDeadlineDoesNotBreakConnection(t *testing.T) {
 	}
 }
 
-func TestReplicaConnCallWhenUnavailable(t *testing.T) {
+func TestReplicaConnQueuesCallWhileUnavailable(t *testing.T) {
 	factory := newScriptedStreamFactory()
 	connection := newTestReplicaConn(t, factory)
 
-	_, err := connection.call(context.Background(), acquireStreamRequest(1))
-	if _, ok := errors.AsType[*replicaUnavailableError](err); !ok {
-		t.Fatalf("error %v is not replicaUnavailableError", err)
+	result := startReplicaCall(connection, acquireStreamRequest(1))
+	select {
+	case completed := <-result:
+		t.Fatalf("call completed while disconnected: %+v", completed)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	stream := newReplicaFakeStream()
+	factory.results <- streamFactoryResult{stream: stream}
+	waitForReplicaState(t, connection, true, false)
+	request := receiveSentRequest(t, stream)
+	stream.receive <- fakeReceive{
+		response: streamResponse(request.RequestID, redleasev1.LeaseStatusOK),
+	}
+	if received := receiveCallResult(t, result); received.err != nil {
+		t.Fatalf("queued call after connect failed: %v", received.err)
 	}
 }
 
@@ -166,7 +226,7 @@ func TestReplicaConnCloseStopsPendingCallAndFactory(t *testing.T) {
 	if err := connection.Close(); !errors.Is(err, closeFailure) {
 		t.Fatalf("Close error = %v, want %v", err, closeFailure)
 	}
-	assertTransportCause(t, receiveCallResult(t, result).err, errConnectionClosed)
+	assertReplicaUnavailableCause(t, receiveCallResult(t, result).err, errReplicaClosed)
 	waitForReplicaState(t, connection, false, true)
 
 	if err := connection.Close(); !errors.Is(err, closeFailure) {
@@ -302,23 +362,6 @@ func waitForReplicaState(t *testing.T, connection *replicaConn, wantReady, wantC
 				closed,
 			)
 		}
-	}
-}
-
-func waitForReplicaError(t *testing.T, connection *replicaConn, want error) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for {
-		connection.stateMu.Lock()
-		got := connection.lastErr
-		connection.stateMu.Unlock()
-		if errors.Is(got, want) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for replica error %v; got %v", want, got)
-		}
-		time.Sleep(time.Millisecond)
 	}
 }
 

@@ -1,8 +1,10 @@
 package client
 
 import (
+	"context"
 	"time"
 
+	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
 )
 
@@ -64,31 +66,25 @@ func (l *Lease) healReplicas(replicas []int) int {
 		}
 	}()
 
-	results := make(chan acquireReplicaResult, len(replicas))
-	submissions := make(chan acquireSubmission, len(replicas))
+	responses := newReplicaResponses(l.client, len(replicas))
 
 	for _, replica := range replicas {
 		request := l.client.newAcquireRequest(l.key, l.sequence, l.requestedTTLMS)
-		go l.client.submitAcquire(
-			l.ctx,
-			l.ctx,
-			replica,
-			request,
-			submissions,
-			results,
-		)
-	}
-
-	for range replicas {
-		<-submissions
+		_ = responses.submit(l.ctx, replica, request)
 	}
 	l.endSubmitBatch()
 	batchActive = false
 
 	confirmed := 0
-	for range replicas {
-		result := <-results
+	for responses.remaining != 0 {
+		completed, event := responses.next(l.ctx.Done(), nil)
+		if event == lifecycleCanceled {
+			responses.abort(context.Canceled)
+			return confirmed
+		}
+		result := completed.result
 		if result.err != nil ||
+			result.response.Operation != redleasev1.ClientOperationACQUIRE ||
 			!isSuccessfulAcquire(result.response.Status) {
 			continue
 		}
@@ -98,7 +94,7 @@ func (l *Lease) healReplicas(replicas []int) int {
 			result.response.TTLMS,
 		)
 		if time.Now().Before(candidate) {
-			l.markConfirmed(result.replica, candidate)
+			l.markConfirmed(completed.replica, candidate)
 			confirmed++
 		}
 	}

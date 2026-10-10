@@ -38,7 +38,7 @@ Client TCP write batching  block for first request, drain available queue, flush
 Server TCP write batching  block for first response, drain available queue, flush
 TCP read buffering         64 KiB per connection on client and server
 TCP write buffering        64 KiB per connection on client and server
-client send queue          4096 requests per connection, discarded on reconnect
+client send queue          4096 requests per replica, persistent across reconnect
 client1of1 send queue      4096 requests per client, persistent across reconnect
 Client pending shards      16, each with a 512-response completion queue
 Initial ownership          >= Q/N
@@ -82,6 +82,13 @@ client       -> S1
 
 Критический путь заканчивается после `Q`-го успешного ответа, поэтому latency
 примерно равна RTT до `Q`-го по скорости сервера.
+
+Универсальный client последовательно выполняет неблокирующий enqueue request в
+FIFO каждой replica. После enqueue независимые TCP writers отправляют requests,
+а responses независимо поступают в общий collector операции. Отдельные
+submission/response-wait goroutine и channels на каждую replica не создаются.
+Collector одним переиспользуемым timer обслуживает ближайший из индивидуальных
+response deadlines и прекращает критический путь после получения quorum.
 
 ## 3. Состояние lock-server
 
@@ -572,10 +579,10 @@ connection write buffer. Если следующий frame не помещает
 deadline, а затем копирует frame в освободившийся буфер. Поэтому `bufio.Writer`
 никогда не начинает неявную socket write со старым deadline. Timeout делает
 соединение непригодным: оно закрывается, а client запускает reconnect. У
-`client1of1` очередь принадлежит client и сохраняется между TCP-сессиями.
-Запросы, уже извлечённые writer из очереди к моменту ошибки, могут потеряться:
-автоматически повторно они не отправляются. У общего `client` очередь остаётся
-привязанной к соединению и при его закрытии отбрасывается.
+`client1of1` очередь принадлежит client, а у универсального `client` каждая
+replica имеет собственную очередь. В обоих случаях очередь сохраняется между
+TCP-сессиями. Запросы, уже извлечённые writer из очереди к моменту ошибки,
+могут потеряться: автоматически повторно они не отправляются.
 
 Writer каждого client connection блокируется в ожидании первого request.
 Получив его, writer копирует frame в connection write buffer и затем забирает
@@ -628,13 +635,12 @@ connection write buffer, выполняет промежуточные `Flush()`
 Для `Acquire` это возвращается приложению как `ErrNotAcquired`. Если причиной
 переполнения был зависший socket writer, соединение будет закрыто самим writer
 по TCP write timeout; переполнение очереди отдельно не запускает reconnect.
-Универсальный `client` использует ту же неблокирующую постановку в очередь для
-каждого connection generation. Переполнение считается ошибкой только этой
-replica; Acquire или Renew всё ещё может собрать quorum по остальным replicas,
-а Release использует существующий bounded retry.
+Универсальный `client` использует ту же неблокирующую постановку в постоянную
+очередь каждой replica, включая интервалы между TCP-сессиями. Переполнение
+считается ошибкой только этой replica; Acquire или Renew всё ещё может собрать
+quorum по остальным replicas, а Release использует существующий bounded retry.
 
-Каждый запрос содержит `requestID`, уникальный в пределах одного соединения
-(у `client1of1` — в течение жизни client). Server
+Каждый запрос содержит `requestID`, уникальный в течение жизни client. Server
 возвращает тот же `requestID` в ответе. Это correlation identifier, а не номер
 операции: он не задаёт порядок применения, не сохраняется server после reconnect
 и не обеспечивает дедупликацию.
@@ -668,25 +674,27 @@ requests за один общий mutex.
 
 Для каждого ожидаемого ответа client хранит отдельный deadline. После timeout
 запрос перестаёт участвовать в quorum, а возможный поздний ответ игнорируется.
-У общего `client` разрыв соединения завершает все его незавершённые запросы
-transport error. У `client1of1` ожидающие ответы сохраняются: после reconnect
-ответ может прийти для запроса, оставшегося в очереди. Уже отправленный или
-извлечённый старым writer запрос может остаться без ответа и завершится по
-своему timeout. При `Close()` все ожидания завершаются сразу, очередь очищается.
+В обоих client packages ожидающие ответы сохраняются при reconnect: ответ может
+прийти для запроса, оставшегося в очереди и отправленного новой TCP-сессией. Уже
+отправленный или извлечённый старым writer запрос может остаться без ответа и
+завершится по своему timeout. При `Close()` все ожидания завершаются сразу,
+очередь очищается.
 Перед подключением следующей TCP-сессии reader и writer предыдущей полностью
 завершаются, поэтому общую очередь никогда не читают два writer одновременно.
 Между запросами, попавшими на разные TCP-сессии, серверный порядок обработки
 не гарантирован. `requestID` не устраняет неопределённость результата при разрыве
 соединения: повторная отправка опирается на идемпотентность операций по `leaseID`.
 
-У универсального `client` после transport error отдельный Acquire на реплике повторяется background
-healing с тем же `leaseID` и исходным `requestedTTL`. Перед каждой новой
-отправкой client повторно проверяет общее состояние `Lease`: retry разрешён
-только пока lease остаётся активным и локально действительным. Lease мог уже
-собрать quorum, вернуться приложению, использоваться бизнес-логикой и перейти в
-Release до восстановления соединения. В таком случае новый Acquire после
-reconnect не отправляется, а уже принятые send queue попытки Acquire завершают
-submission barrier до отправки Release.
+У универсального `client` запрос Acquire, остававшийся в очереди replica, после
+reconnect отправляется с прежним `leaseID` и исходным `requestedTTL`. Если он уже
+был извлечён старым writer и не получил ответа, после response timeout
+background healing может повторить Acquire с теми же значениями. Перед каждой
+новой healing-отправкой client повторно проверяет общее состояние `Lease`: retry
+разрешён только пока lease остаётся активным и локально действительным. Lease
+мог уже собрать quorum, вернуться приложению, использоваться бизнес-логикой и
+перейти в Release до восстановления соединения. В таком случае новая healing-
+попытка Acquire после reconnect не создаётся, а уже принятые send queue попытки
+Acquire предшествуют Release в постоянной FIFO этой replica.
 
 ### 7.1. Логирование client library
 

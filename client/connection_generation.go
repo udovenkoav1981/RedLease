@@ -50,7 +50,7 @@ type connectionCallResult struct {
 
 type pendingShard struct {
 	mu        sync.Mutex
-	pending   map[uint64]chan connectionCallResult
+	pending   map[uint64]*connectionFuture
 	responses *mpscring.NotifyingRing[protocol.Response]
 }
 
@@ -58,7 +58,7 @@ func newPendingShards() [pendingShardCount]*pendingShard {
 	var shards [pendingShardCount]*pendingShard
 	for index := range shards {
 		shards[index] = &pendingShard{
-			pending:   make(map[uint64]chan connectionCallResult),
+			pending:   make(map[uint64]*connectionFuture),
 			responses: mpscring.NewNotifying[protocol.Response](responseQueueCapacity),
 		}
 	}
@@ -72,9 +72,18 @@ func pendingShardIndex(requestID uint64) uint8 {
 }
 
 type connectionFuture struct {
-	generation *connectionGeneration
-	requestID  uint64
-	result     chan connectionCallResult
+	replica        *replicaConn
+	requestID      uint64
+	result         chan connectionCallResult
+	operation      chan<- replicaResponse
+	replicaIndex   int
+	responseExpiry time.Time
+}
+
+type replicaResponse struct {
+	replica int
+	future  *connectionFuture
+	result  connectionCallResult
 }
 
 func (f *connectionFuture) await(ctx context.Context) (protocol.Response, error) {
@@ -95,10 +104,10 @@ func (f *connectionFuture) awaitUntil(
 		completionErr = context.DeadlineExceeded
 	}
 	if completionErr != nil {
-		f.generation.complete(f.requestID, connectionCallResult{err: completionErr})
+		f.replica.complete(f.requestID, connectionCallResult{err: completionErr})
 		result = <-f.result
 	}
-	f.generation.client.releaseFuture(f)
+	f.replica.client.releaseFuture(f)
 	return result.response, result.err
 }
 
@@ -150,35 +159,59 @@ func (c *Client) recycleOutboundRequest(outbound *outboundConnectionRequest) {
 	c.requestPool.Put(outbound)
 }
 
-func (c *Client) acquireFuture(generation *connectionGeneration, requestID uint64) *connectionFuture {
+func (c *Client) acquireFuture(replica *replicaConn, requestID uint64) *connectionFuture {
 	if pooled := c.futurePool.Get(); pooled != nil {
 		if future, ok := pooled.(*connectionFuture); ok {
-			future.generation = generation
+			future.replica = replica
 			future.requestID = requestID
 			return future
 		}
 	}
 	return &connectionFuture{
-		generation: generation,
-		requestID:  requestID,
-		result:     make(chan connectionCallResult, 1),
+		replica:   replica,
+		requestID: requestID,
+		result:    make(chan connectionCallResult, 1),
 	}
 }
 
+func (c *Client) acquireOperationFuture(
+	replica *replicaConn,
+	requestID uint64,
+	replicaIndex int,
+	operation chan<- replicaResponse,
+) *connectionFuture {
+	future := c.acquireFuture(replica, requestID)
+	future.operation = operation
+	future.replicaIndex = replicaIndex
+	future.responseExpiry = time.Now().Add(c.responseTimeout)
+	return future
+}
+
 func (c *Client) releaseFuture(future *connectionFuture) {
-	future.generation = nil
+	future.replica = nil
 	future.requestID = 0
+	future.operation = nil
+	future.replicaIndex = 0
+	future.responseExpiry = time.Time{}
 	c.futurePool.Put(future)
 }
 
-type connectionGeneration struct {
-	client     *Client
-	connection *transport.ClientConnection
-	cancel     context.CancelFunc
+func (f *connectionFuture) complete(result connectionCallResult) {
+	if f.operation != nil {
+		f.operation <- replicaResponse{
+			replica: f.replicaIndex,
+			future:  f,
+			result:  result,
+		}
+		return
+	}
+	f.result <- result
+}
 
-	reqQueue *mpscring.NotifyingRing[*outboundConnectionRequest]
-	pending  [pendingShardCount]*pendingShard
-	done     chan struct{}
+type connectionGeneration struct {
+	replica    *replicaConn
+	connection *transport.ClientConnection
+	done       chan struct{}
 
 	terminal atomic.Pointer[connectionTransportError]
 
@@ -189,79 +222,26 @@ type connectionGeneration struct {
 }
 
 func newConnectionGeneration(
-	client *Client,
+	replica *replicaConn,
 	connection *transport.ClientConnection,
-	cancel context.CancelFunc,
 ) *connectionGeneration {
 	generation := &connectionGeneration{
-		client:     client,
+		replica:    replica,
 		connection: connection,
-		cancel:     cancel,
-		reqQueue:   mpscring.NewNotifying[*outboundConnectionRequest](reqQueueCapacity),
-		pending:    newPendingShards(),
 		done:       make(chan struct{}),
 	}
 
-	for _, shard := range generation.pending {
-		generation.workers.Go(func() {
-			generation.completeResponses(shard)
-		})
-	}
 	generation.workers.Go(generation.sendRequests)
 	generation.workers.Go(generation.receiveResponses)
 	return generation
 }
 
-func (g *connectionGeneration) call(
-	ctx context.Context,
-	request *outboundConnectionRequest,
-) (protocol.Response, error) {
-	future, err := g.submit(ctx, request)
-	if err != nil {
-		return protocol.Response{}, err
-	}
-	return future.await(ctx)
+func (c *replicaConn) complete(requestID uint64, result connectionCallResult) {
+	shard := c.pending[pendingShardIndex(requestID)]
+	c.completeInShard(shard, requestID, result)
 }
 
-// submit registers the waiter before putting the request into the bounded
-// connection FIFO. Successful enqueue is the submission ordering barrier.
-func (g *connectionGeneration) submit(
-	ctx context.Context,
-	outbound *outboundConnectionRequest,
-) (*connectionFuture, error) {
-	if err := ctx.Err(); err != nil {
-		g.client.recycleOutboundRequest(outbound)
-		return nil, err
-	}
-
-	requestID := outbound.request.RequestId()
-	future := g.client.acquireFuture(g, requestID)
-	shard := g.pending[pendingShardIndex(requestID)]
-	shard.mu.Lock()
-	if terminalErr := g.terminal.Load(); terminalErr != nil {
-		shard.mu.Unlock()
-		g.client.releaseFuture(future)
-		g.client.recycleOutboundRequest(outbound)
-		return nil, terminalErr
-	}
-	shard.pending[requestID] = future.result
-	if g.reqQueue.TryEnqueue(outbound) {
-		shard.mu.Unlock()
-		return future, nil
-	}
-	delete(shard.pending, requestID)
-	shard.mu.Unlock()
-	g.client.releaseFuture(future)
-	g.client.recycleOutboundRequest(outbound)
-	return nil, ErrSendQueueFull
-}
-
-func (g *connectionGeneration) complete(requestID uint64, result connectionCallResult) {
-	shard := g.pending[pendingShardIndex(requestID)]
-	g.completeInShard(shard, requestID, result)
-}
-
-func (*connectionGeneration) completeInShard(
+func (*replicaConn) completeInShard(
 	shard *pendingShard,
 	requestID uint64,
 	result connectionCallResult,
@@ -273,19 +253,19 @@ func (*connectionGeneration) completeInShard(
 	}
 	shard.mu.Unlock()
 	if pending != nil {
-		pending <- result
+		pending.complete(result)
 	}
 }
 
-func (g *connectionGeneration) completeResponses(shard *pendingShard) {
+func (c *replicaConn) completeResponses(shard *pendingShard) {
 	for {
 		response, ok := shard.responses.TryDequeue()
 		if ok {
-			g.completeInShard(shard, response.RequestID, connectionCallResult{response: response})
+			c.completeInShard(shard, response.RequestID, connectionCallResult{response: response})
 			continue
 		}
 		select {
-		case <-g.done:
+		case <-c.ctx.Done():
 			return
 		case <-shard.responses.Ready():
 		}
@@ -299,29 +279,29 @@ func (g *connectionGeneration) sendRequests() {
 			return
 		default:
 		}
-		outbound, ok := g.reqQueue.TryDequeue()
+		outbound, ok := g.replica.reqQueue.TryDequeue()
 		if !ok {
 			select {
 			case <-g.done:
 				return
-			case <-g.reqQueue.Ready():
+			case <-g.replica.reqQueue.Ready():
 			}
 			continue
 		}
 		for {
 			select {
 			case <-g.done:
-				g.client.recycleOutboundRequest(outbound)
+				g.replica.client.recycleOutboundRequest(outbound)
 				return
 			default:
 			}
 			err := g.connection.Writer.BufferFrame(outbound.request.Table().Bytes)
-			g.client.recycleOutboundRequest(outbound)
+			g.replica.client.recycleOutboundRequest(outbound)
 			if err != nil {
 				g.terminate(fmt.Errorf("send: %w", err))
 				return
 			}
-			outbound, ok = g.reqQueue.TryDequeue()
+			outbound, ok = g.replica.reqQueue.TryDequeue()
 			if ok {
 				continue
 			}
@@ -346,7 +326,7 @@ func (g *connectionGeneration) receiveResponses() {
 			g.terminate(fmt.Errorf("receive: %w", err))
 			return
 		}
-		shard := g.pending[pendingShardIndex(response.RequestID)]
+		shard := g.replica.pending[pendingShardIndex(response.RequestID)]
 		for !shard.responses.TryEnqueue(response) {
 			select {
 			case <-g.done:
@@ -361,7 +341,6 @@ func (g *connectionGeneration) receiveResponses() {
 func (g *connectionGeneration) Close() error {
 	g.terminate(errConnectionClosed)
 	g.workers.Wait()
-	g.discardQueuedRequests()
 	return g.closeConnectionErr
 }
 
@@ -370,29 +349,30 @@ func (g *connectionGeneration) terminate(cause error) {
 		transportErr := &connectionTransportError{cause: cause}
 		g.terminal.Store(transportErr)
 		close(g.done)
-		g.cancel()
 		g.closeConnection()
-
-		result := connectionCallResult{err: transportErr}
-		for _, shard := range g.pending {
-			shard.mu.Lock()
-			pending := shard.pending
-			shard.pending = nil
-			shard.mu.Unlock()
-			for _, completion := range pending {
-				completion <- result
-			}
-		}
 	})
 }
 
-func (g *connectionGeneration) discardQueuedRequests() {
+func (c *replicaConn) discardQueuedRequests() {
 	for {
-		outbound, ok := g.reqQueue.TryDequeue()
+		outbound, ok := c.reqQueue.TryDequeue()
 		if !ok {
 			return
 		}
-		g.client.recycleOutboundRequest(outbound)
+		c.client.recycleOutboundRequest(outbound)
+	}
+}
+
+func (c *replicaConn) failPending(err error) {
+	result := connectionCallResult{err: err}
+	for _, shard := range c.pending {
+		shard.mu.Lock()
+		pending := shard.pending
+		shard.pending = nil
+		shard.mu.Unlock()
+		for _, future := range pending {
+			future.complete(result)
+		}
 	}
 }
 

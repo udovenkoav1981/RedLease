@@ -18,6 +18,7 @@ const (
 	// Quorum3Of5 selects three required responses from five servers.
 	Quorum3Of5
 
+	maxServerCount        = 5
 	safetyMarginMS uint64 = 100
 )
 

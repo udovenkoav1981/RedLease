@@ -246,7 +246,7 @@ func TestClientAcquireDoesNotWaitForSocketWriteAfterSubmission(t *testing.T) {
 	harness := newAcquireHarness(t)
 
 	fifthGeneration := currentReplicaGeneration(t, harness.client.replicas[4])
-	blocker, err := fifthGeneration.submit(context.Background(), acquireStreamRequest(1))
+	blocker, err := fifthGeneration.replica.submit(context.Background(), acquireStreamRequest(1))
 	if err != nil {
 		t.Fatalf("submit blocker: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestClientAcquireCanUseQuorumAfterUnacceptedSubmitTimesOut(t *testing.T) {
 	harness.client.responseTimeout = 30 * time.Millisecond
 
 	fifthGeneration := currentReplicaGeneration(t, harness.client.replicas[4])
-	blocker, err := fifthGeneration.submit(context.Background(), acquireStreamRequest(1))
+	blocker, err := fifthGeneration.replica.submit(context.Background(), acquireStreamRequest(1))
 	if err != nil {
 		t.Fatalf("submit blocker: %v", err)
 	}
@@ -560,9 +560,8 @@ func waitForNoPendingStreamCalls(t *testing.T, client *Client) {
 	for {
 		pending := 0
 		for _, replica := range client.replicas {
-			generation := currentReplicaGeneration(t, replica)
-			for shardIndex := range generation.pending {
-				shard := generation.pending[shardIndex]
+			for shardIndex := range replica.pending {
+				shard := replica.pending[shardIndex]
 				shard.mu.Lock()
 				pending += len(shard.pending)
 				shard.mu.Unlock()

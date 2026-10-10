@@ -40,18 +40,11 @@ func (c *Client) releaseAll(key, sequence uint64) {
 	retryTimeout := time.Duration(protocol.MaxTTLMS)*time.Millisecond + c.responseTimeout
 	retryContext, cancelRetries := context.WithTimeout(c.ctx, retryTimeout)
 
-	submissions := make(chan releaseSubmission, serverCount)
+	initial := make([]releaseSubmission, 0, serverCount)
 	for replica := range c.replicas {
 		request := c.newReleaseRequest(key, sequence)
-		go func() {
-			future, _ := c.replicas[replica].submit(retryContext, request)
-			submissions <- releaseSubmission{replica: replica, future: future}
-		}()
-	}
-
-	initial := make([]releaseSubmission, 0, serverCount)
-	for range serverCount {
-		initial = append(initial, <-submissions)
+		future, _ := c.replicas[replica].submit(retryContext, request)
+		initial = append(initial, releaseSubmission{replica: replica, future: future})
 	}
 	var retries releaseRetries
 	retries.Add(serverCount)
