@@ -27,10 +27,22 @@ type releaseRetries struct {
 // an idempotent best-effort Release to all configured replicas. Repeated calls
 // do nothing.
 func (l *Lease) Release() {
-	l.releaseOnce.Do(func() {
-		l.startRelease()
-		go l.finishRelease()
-	})
+	l.stateMu.Lock()
+	if l.lifecycle != leaseActive {
+		l.stateMu.Unlock()
+		return
+	}
+	l.lifecycle = leaseReleased
+	l.validUntil = time.Time{}
+	clear(l.confirmedUntil)
+	l.stateMu.Unlock()
+	l.cancel()
+
+	go func() {
+		l.submitBatches.Wait()
+		l.client.releaseAll(l.key, l.sequence)
+		close(l.releaseDone)
+	}()
 }
 
 // releaseAll waits for one submission attempt on every replica, then leaves

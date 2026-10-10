@@ -10,7 +10,6 @@ type leaseLifecycle uint8
 
 const (
 	leaseActive leaseLifecycle = iota
-	leaseReleasing
 	leaseReleased
 )
 
@@ -33,7 +32,6 @@ type Lease struct {
 
 	renewMu sync.Mutex
 
-	releaseOnce sync.Once
 	releaseDone chan struct{}
 }
 
@@ -150,23 +148,4 @@ func (l *Lease) applyRenewValidity(validUntil time.Time) bool {
 		l.validUntil = validUntil
 	}
 	return true
-}
-
-func (l *Lease) startRelease() {
-	l.stateMu.Lock()
-	l.lifecycle = leaseReleasing
-	l.validUntil = time.Time{}
-	clear(l.confirmedUntil)
-	l.stateMu.Unlock()
-	l.cancel()
-}
-
-func (l *Lease) finishRelease() {
-	l.submitBatches.Wait()
-	l.client.releaseAll(l.key, l.sequence)
-
-	l.stateMu.Lock()
-	l.lifecycle = leaseReleased
-	l.stateMu.Unlock()
-	close(l.releaseDone)
 }
