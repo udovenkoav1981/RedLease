@@ -8,7 +8,6 @@ import (
 
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
 	"github.com/udovenkoav1981/RedLease/internal/mpscring"
-	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
@@ -52,6 +51,7 @@ func (f *tcpConnectionFactory) close() error {
 
 type replicaConn struct {
 	client  *Client
+	index   int
 	factory connectionFactory
 	backoff backoff.Exponential
 	logger  *slog.Logger
@@ -74,10 +74,16 @@ type replicaConn struct {
 	closeErr  error
 }
 
-func newReplicaConn(client *Client, factory connectionFactory, logger *slog.Logger) *replicaConn {
+func newReplicaConn(
+	client *Client,
+	index int,
+	factory connectionFactory,
+	logger *slog.Logger,
+) *replicaConn {
 	ctx, cancel := context.WithCancel(context.Background())
 	connection := &replicaConn{
 		client:   client,
+		index:    index,
 		factory:  factory,
 		backoff:  backoff.Default(),
 		logger:   logger,
@@ -96,24 +102,6 @@ func newReplicaConn(client *Client, factory connectionFactory, logger *slog.Logg
 	connection.manager.Add(1)
 	go connection.manage()
 	return connection
-}
-
-func (c *replicaConn) call(
-	ctx context.Context,
-	request *outboundConnectionRequest,
-) (protocol.Response, error) {
-	future, err := c.submit(ctx, request)
-	if err != nil {
-		return protocol.Response{}, err
-	}
-	return future.await(ctx)
-}
-
-func (c *replicaConn) submit(
-	ctx context.Context,
-	request *outboundConnectionRequest,
-) (*connectionFuture, error) {
-	return c.submitForOperation(ctx, request, 0, nil)
 }
 
 func (c *replicaConn) submitNoResponse(request *outboundConnectionRequest) error {
@@ -137,39 +125,30 @@ func (c *replicaConn) submitNoResponse(request *outboundConnectionRequest) error
 func (c *replicaConn) submitForOperation(
 	ctx context.Context,
 	request *outboundConnectionRequest,
-	replicaIndex int,
 	operation chan<- replicaResponse,
-) (*connectionFuture, error) {
+) error {
 	if err := ctx.Err(); err != nil {
 		c.client.recycleOutboundRequest(request)
-		return nil, err
+		return err
 	}
 
 	requestID := request.request.RequestId()
-	var future *connectionFuture
-	if operation == nil {
-		future = c.client.acquireFuture(c, requestID)
-	} else {
-		future = c.client.acquireOperationFuture(c, requestID, replicaIndex, operation)
-	}
 	shard := c.pending[pendingShardIndex(requestID)]
 	shard.mu.Lock()
 	if c.ctx.Err() != nil {
 		shard.mu.Unlock()
-		c.client.releaseFuture(future)
 		c.client.recycleOutboundRequest(request)
-		return nil, &replicaUnavailableError{cause: errReplicaClosed}
+		return &replicaUnavailableError{cause: errReplicaClosed}
 	}
-	shard.pending[requestID] = future
+	shard.pending[requestID] = operation
 	if c.reqQueue.TryEnqueue(request) {
 		shard.mu.Unlock()
-		return future, nil
+		return nil
 	}
 	delete(shard.pending, requestID)
 	shard.mu.Unlock()
-	c.client.releaseFuture(future)
 	c.client.recycleOutboundRequest(request)
-	return nil, ErrSendQueueFull
+	return ErrSendQueueFull
 }
 
 // readiness returns a level-triggered snapshot plus a channel closed on the

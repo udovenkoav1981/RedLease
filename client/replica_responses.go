@@ -13,22 +13,45 @@ const (
 	lifecycleCanceled
 )
 
-// replicaResponses joins the independently completed replica futures without
-// starting one waiting goroutine per replica. Each future retains its own
+type replicaWait struct {
+	requestID      uint64
+	responseExpiry time.Duration
+}
+
+// replicaResponses joins independently completed replica requests without
+// starting one waiting goroutine per replica. Each request retains its own
 // response deadline; one timer is reset to the nearest outstanding deadline.
 type replicaResponses struct {
 	client    *Client
 	results   chan replicaResponse
-	futures   [maxServerCount]*connectionFuture
+	waits     [maxServerCount]replicaWait
+	timeBase  time.Time
 	remaining int
 	timer     *time.Timer
 }
 
-func newReplicaResponses(client *Client, capacity int) replicaResponses {
-	return replicaResponses{
-		client:  client,
-		results: make(chan replicaResponse, capacity),
+func (c *Client) acquireReplicaResponses() *replicaResponses {
+	if pooled := c.replicaResponsesPool.Get(); pooled != nil {
+		if responses, ok := pooled.(*replicaResponses); ok {
+			responses.client = c
+			return responses
+		}
 	}
+	return &replicaResponses{
+		client:  c,
+		results: make(chan replicaResponse, maxServerCount),
+	}
+}
+
+func (r *replicaResponses) release() {
+	if r.remaining != 0 || len(r.results) != 0 || r.timer != nil {
+		panic("client: releasing active replica responses")
+	}
+	client := r.client
+	r.client = nil
+	r.waits = [maxServerCount]replicaWait{}
+	r.timeBase = time.Time{}
+	client.replicaResponsesPool.Put(r)
 }
 
 func (r *replicaResponses) submit(
@@ -36,16 +59,19 @@ func (r *replicaResponses) submit(
 	replica int,
 	request *outboundConnectionRequest,
 ) error {
-	future, err := r.client.replicas[replica].submitForOperation(
-		ctx,
-		request,
-		replica,
-		r.results,
-	)
-	if err != nil {
+	requestID := request.request.RequestId()
+	now := time.Now()
+	if r.timeBase.IsZero() {
+		r.timeBase = now
+	}
+	responseExpiry := now.Sub(r.timeBase) + r.client.responseTimeout
+	if err := r.client.replicas[replica].submitForOperation(ctx, request, r.results); err != nil {
 		return err
 	}
-	r.futures[replica] = future
+	r.waits[replica] = replicaWait{
+		requestID:      requestID,
+		responseExpiry: responseExpiry,
+	}
 	r.remaining++
 	return nil
 }
@@ -75,9 +101,12 @@ func (r *replicaResponses) next(
 }
 
 func (r *replicaResponses) abort(err error) {
-	for _, future := range r.futures {
-		if future != nil {
-			future.replica.complete(future.requestID, connectionCallResult{err: err})
+	for replica, wait := range r.waits {
+		if wait.requestID != 0 {
+			r.client.replicas[replica].complete(
+				wait.requestID,
+				connectionCallResult{err: err},
+			)
 		}
 	}
 	for r.remaining != 0 {
@@ -86,25 +115,25 @@ func (r *replicaResponses) abort(err error) {
 }
 
 func (r *replicaResponses) consume(result replicaResponse) {
-	if r.futures[result.replica] != result.future {
-		panic("client: unexpected replica response future")
+	wait := &r.waits[result.replica]
+	if wait.requestID != result.requestID {
+		panic("client: unexpected replica response")
 	}
-	r.futures[result.replica] = nil
+	*wait = replicaWait{}
 	r.remaining--
-	r.client.releaseFuture(result.future)
 	if r.remaining == 0 {
 		r.stopTimer()
 	}
 }
 
 func (r *replicaResponses) nextTimeout() <-chan time.Time {
-	var next time.Time
-	for _, future := range r.futures {
-		if future != nil && (next.IsZero() || future.responseExpiry.Before(next)) {
-			next = future.responseExpiry
+	var next time.Duration
+	for _, wait := range r.waits {
+		if wait.requestID != 0 && (next == 0 || wait.responseExpiry < next) {
+			next = wait.responseExpiry
 		}
 	}
-	if next.IsZero() {
+	if next == 0 {
 		return nil
 	}
 
@@ -115,7 +144,7 @@ func (r *replicaResponses) nextTimeout() <-chan time.Time {
 			r.timer = time.NewTimer(time.Hour)
 		}
 	}
-	delay := time.Until(next)
+	delay := next - time.Since(r.timeBase)
 	if delay < 0 {
 		delay = 0
 	}
@@ -124,13 +153,13 @@ func (r *replicaResponses) nextTimeout() <-chan time.Time {
 }
 
 func (r *replicaResponses) expireResponses() bool {
-	now := time.Now()
+	now := time.Since(r.timeBase)
 	expired := false
-	for _, future := range r.futures {
-		if future != nil && !now.Before(future.responseExpiry) {
+	for replica, wait := range r.waits {
+		if wait.requestID != 0 && now >= wait.responseExpiry {
 			expired = true
-			future.replica.complete(
-				future.requestID,
+			r.client.replicas[replica].complete(
+				wait.requestID,
 				connectionCallResult{err: context.DeadlineExceeded},
 			)
 		}

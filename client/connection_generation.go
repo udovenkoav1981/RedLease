@@ -1,13 +1,11 @@
 package client
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
@@ -50,7 +48,7 @@ type connectionCallResult struct {
 
 type pendingShard struct {
 	mu        sync.Mutex
-	pending   map[uint64]*connectionFuture
+	pending   map[uint64]chan<- replicaResponse
 	responses *mpscring.NotifyingRing[protocol.Response]
 }
 
@@ -58,7 +56,7 @@ func newPendingShards() [pendingShardCount]*pendingShard {
 	var shards [pendingShardCount]*pendingShard
 	for index := range shards {
 		shards[index] = &pendingShard{
-			pending:   make(map[uint64]*connectionFuture),
+			pending:   make(map[uint64]chan<- replicaResponse),
 			responses: mpscring.NewNotifying[protocol.Response](responseQueueCapacity),
 		}
 	}
@@ -71,61 +69,10 @@ func pendingShardIndex(requestID uint64) uint8 {
 	return uint8(requestID & (pendingShardCount - 1)) //nolint:gosec // The mask bounds the index.
 }
 
-type connectionFuture struct {
-	replica        *replicaConn
-	requestID      uint64
-	result         chan connectionCallResult
-	operation      chan<- replicaResponse
-	replicaIndex   int
-	responseExpiry time.Time
-}
-
 type replicaResponse struct {
-	replica int
-	future  *connectionFuture
-	result  connectionCallResult
-}
-
-func (f *connectionFuture) await(ctx context.Context) (protocol.Response, error) {
-	return f.awaitUntil(ctx, nil)
-}
-
-func (f *connectionFuture) awaitUntil(
-	ctx context.Context,
-	timeout <-chan time.Time,
-) (protocol.Response, error) {
-	var result connectionCallResult
-	var completionErr error
-	select {
-	case result = <-f.result:
-	case <-ctx.Done():
-		completionErr = ctx.Err()
-	case <-timeout:
-		completionErr = context.DeadlineExceeded
-	}
-	if completionErr != nil {
-		f.replica.complete(f.requestID, connectionCallResult{err: completionErr})
-		result = <-f.result
-	}
-	f.replica.client.releaseFuture(f)
-	return result.response, result.err
-}
-
-func (c *Client) awaitResponse(
-	ctx context.Context,
-	future *connectionFuture,
-) (protocol.Response, error) {
-	timer, ok := c.responseTimerPool.Get().(*time.Timer)
-	if ok {
-		timer.Reset(c.responseTimeout)
-	} else {
-		timer = time.NewTimer(c.responseTimeout)
-	}
-
-	response, err := future.awaitUntil(ctx, timer.C)
-	timer.Stop()
-	c.responseTimerPool.Put(timer)
-	return response, err
+	replica   int
+	requestID uint64
+	result    connectionCallResult
 }
 
 type outboundConnectionRequest struct {
@@ -157,55 +104,6 @@ func (*Client) finishOutboundRequest(outbound *outboundConnectionRequest) {
 func (c *Client) recycleOutboundRequest(outbound *outboundConnectionRequest) {
 	outbound.request = redleasev1.ClientRequest{}
 	c.requestPool.Put(outbound)
-}
-
-func (c *Client) acquireFuture(replica *replicaConn, requestID uint64) *connectionFuture {
-	if pooled := c.futurePool.Get(); pooled != nil {
-		if future, ok := pooled.(*connectionFuture); ok {
-			future.replica = replica
-			future.requestID = requestID
-			return future
-		}
-	}
-	return &connectionFuture{
-		replica:   replica,
-		requestID: requestID,
-		result:    make(chan connectionCallResult, 1),
-	}
-}
-
-func (c *Client) acquireOperationFuture(
-	replica *replicaConn,
-	requestID uint64,
-	replicaIndex int,
-	operation chan<- replicaResponse,
-) *connectionFuture {
-	future := c.acquireFuture(replica, requestID)
-	future.operation = operation
-	future.replicaIndex = replicaIndex
-	future.responseExpiry = time.Now().Add(c.responseTimeout)
-	return future
-}
-
-func (c *Client) releaseFuture(future *connectionFuture) {
-	future.replica = nil
-	future.requestID = 0
-	future.operation = nil
-	future.replicaIndex = 0
-	future.responseExpiry = time.Time{}
-	c.futurePool.Put(future)
-}
-
-func (f *connectionFuture) complete(result connectionCallResult) {
-	if f.operation != nil {
-		f.operation <- replicaResponse{
-			replica: f.replicaIndex,
-			future:  f,
-			result:  result,
-		}
-		return
-	}
-	f.result <- result
 }
 
 type connectionGeneration struct {
@@ -241,19 +139,23 @@ func (c *replicaConn) complete(requestID uint64, result connectionCallResult) {
 	c.completeInShard(shard, requestID, result)
 }
 
-func (*replicaConn) completeInShard(
+func (c *replicaConn) completeInShard(
 	shard *pendingShard,
 	requestID uint64,
 	result connectionCallResult,
 ) {
 	shard.mu.Lock()
-	pending := shard.pending[requestID]
-	if pending != nil {
+	pending, ok := shard.pending[requestID]
+	if ok {
 		delete(shard.pending, requestID)
 	}
 	shard.mu.Unlock()
-	if pending != nil {
-		pending.complete(result)
+	if ok {
+		pending <- replicaResponse{
+			replica:   c.index,
+			requestID: requestID,
+			result:    result,
+		}
 	}
 }
 
@@ -370,8 +272,12 @@ func (c *replicaConn) failPending(err error) {
 		pending := shard.pending
 		shard.pending = nil
 		shard.mu.Unlock()
-		for _, future := range pending {
-			future.complete(result)
+		for requestID, destination := range pending {
+			destination <- replicaResponse{
+				replica:   c.index,
+				requestID: requestID,
+				result:    result,
+			}
 		}
 	}
 }

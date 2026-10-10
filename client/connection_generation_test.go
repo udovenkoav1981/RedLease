@@ -69,10 +69,10 @@ func TestStreamGenerationCallRemainsSubmitAndAwaitWrapper(t *testing.T) {
 	}
 }
 
-func TestStreamFutureBuffersResponseBeforeAwait(t *testing.T) {
+func TestStreamPendingRequestBuffersResponseBeforeAwait(t *testing.T) {
 	generation, stream := newTestStreamGeneration(t)
 
-	future, err := generation.replica.submit(context.Background(), acquireStreamRequest(1))
+	pending, err := submitTestRequest(generation.replica, context.Background(), acquireStreamRequest(1))
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -81,17 +81,17 @@ func TestStreamFutureBuffersResponseBeforeAwait(t *testing.T) {
 		response: streamResponse(request.RequestID, redleasev1.LeaseStatusOK),
 	}
 
-	// Observe that Recv completed the buffered future before await is invoked,
+	// Observe that Recv completed the buffered request before await is invoked,
 	// then put the result back for the real await call.
-	var buffered connectionCallResult
+	var buffered replicaResponse
 	select {
-	case buffered = <-future.result:
+	case buffered = <-pending.result:
 	case <-time.After(time.Second):
 		t.Fatal("response was not buffered before await")
 	}
-	future.result <- buffered
+	pending.result <- buffered
 
-	response, err := future.await(context.Background())
+	response, err := pending.await(context.Background())
 	if err != nil {
 		t.Fatalf("await: %v", err)
 	}
@@ -114,20 +114,20 @@ func TestStreamSubmitReturnsAfterWriterAcceptanceBeforeSendCompletes(t *testing.
 	if submitted.err != nil {
 		t.Fatalf("submit: %v", submitted.err)
 	}
-	if submitted.future == nil {
-		t.Fatal("submit returned a nil future")
+	if submitted.pending == nil {
+		t.Fatal("submit returned a nil pending request")
 	}
 
 	request := receiveSentRequest(t, stream)
 	stream.receive <- fakeReceive{
 		response: streamResponse(request.RequestID, redleasev1.LeaseStatusOK),
 	}
-	if _, err := submitted.future.await(context.Background()); err != nil {
+	if _, err := submitted.pending.await(context.Background()); err != nil {
 		t.Fatalf("await: %v", err)
 	}
 }
 
-func TestStreamSubmitSendFailureLeavesAcceptedFuturePending(t *testing.T) {
+func TestStreamSubmitSendFailureLeavesAcceptedRequestPending(t *testing.T) {
 	sendFailure := errors.New("send failure")
 	generation, stream := newTestStreamGenerationWithOptions(t, fakeStreamOptions{sendErr: sendFailure})
 
@@ -137,8 +137,8 @@ func TestStreamSubmitSendFailureLeavesAcceptedFuturePending(t *testing.T) {
 	if submitted.err != nil {
 		t.Fatalf("accepted submit returned error: %v", submitted.err)
 	}
-	if submitted.future == nil {
-		t.Fatal("accepted submit returned nil future")
+	if submitted.pending == nil {
+		t.Fatal("accepted submit returned nil pending request")
 	}
 
 	select {
@@ -150,21 +150,22 @@ func TestStreamSubmitSendFailureLeavesAcceptedFuturePending(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if _, err := submitted.future.await(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("pending future error = %v, want context deadline exceeded", err)
+	if _, err := submitted.pending.await(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("pending request error = %v, want context deadline exceeded", err)
 	}
 }
 
 func TestStreamSubmitReturnsQueueFullWithoutTerminatingGeneration(t *testing.T) {
 	generation, stream := newTestStreamGeneration(t)
 
-	if _, err := generation.replica.submit(context.Background(), acquireStreamRequest(1)); err != nil {
+	if _, err := submitTestRequest(generation.replica, context.Background(), acquireStreamRequest(1)); err != nil {
 		t.Fatalf("submit request blocking writer: %v", err)
 	}
 	stream.waitForSendAttempt(t)
 
 	for request := range uint64(reqQueueCapacity) {
-		if _, err := generation.replica.submit(
+		if _, err := submitTestRequest(
+			generation.replica,
 			context.Background(),
 			acquireStreamRequest(request+2),
 		); err != nil {
@@ -172,15 +173,16 @@ func TestStreamSubmitReturnsQueueFullWithoutTerminatingGeneration(t *testing.T) 
 		}
 	}
 
-	future, err := generation.replica.submit(
+	pending, err := submitTestRequest(
+		generation.replica,
 		context.Background(),
 		acquireStreamRequest(reqQueueCapacity+2),
 	)
 	if !errors.Is(err, ErrSendQueueFull) {
 		t.Fatalf("submit error = %v, want ErrSendQueueFull", err)
 	}
-	if future != nil {
-		t.Fatal("full request queue returned a future")
+	if pending != nil {
+		t.Fatal("full request queue returned a pending request")
 	}
 	select {
 	case <-generation.done:
@@ -196,12 +198,12 @@ func TestStreamSubmitRejectsAlreadyCanceledContext(t *testing.T) {
 
 	canceledContext, cancel := context.WithCancel(context.Background())
 	cancel()
-	future, err := generation.replica.submit(canceledContext, acquireStreamRequest(1))
+	pending, err := submitTestRequest(generation.replica, canceledContext, acquireStreamRequest(1))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("submit error = %v, want context canceled", err)
 	}
-	if future != nil {
-		t.Fatal("canceled submit returned a future")
+	if pending != nil {
+		t.Fatal("canceled submit returned a pending request")
 	}
 
 	select {
@@ -211,7 +213,7 @@ func TestStreamSubmitRejectsAlreadyCanceledContext(t *testing.T) {
 	}
 }
 
-func TestStreamSubmitCancellationAfterWriterAcceptanceReturnsFuture(t *testing.T) {
+func TestStreamSubmitCancellationAfterWriterAcceptanceReturnsPendingRequest(t *testing.T) {
 	generation, stream := newTestStreamGeneration(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -223,15 +225,15 @@ func TestStreamSubmitCancellationAfterWriterAcceptanceReturnsFuture(t *testing.T
 	if submitted.err != nil {
 		t.Fatalf("accepted submit returned error after cancellation: %v", submitted.err)
 	}
-	if submitted.future == nil {
-		t.Fatal("accepted submit returned nil future after cancellation")
+	if submitted.pending == nil {
+		t.Fatal("accepted submit returned nil pending request after cancellation")
 	}
 
 	request := receiveSentRequest(t, stream)
 	stream.receive <- fakeReceive{
 		response: streamResponse(request.RequestID, redleasev1.LeaseStatusOK),
 	}
-	if _, err := submitted.future.await(context.Background()); err != nil {
+	if _, err := submitted.pending.await(context.Background()); err != nil {
 		t.Fatalf("await: %v", err)
 	}
 }
@@ -289,12 +291,12 @@ func TestStreamGenerationTimeoutAndLateResponseDoNotBlockAnotherCall(t *testing.
 func TestStreamGenerationReceiveFailureLeavesPendingCallsForReconnect(t *testing.T) {
 	generation, stream := newTestStreamGeneration(t)
 
-	first, err := generation.replica.submit(context.Background(), acquireStreamRequest(1))
+	first, err := submitTestRequest(generation.replica, context.Background(), acquireStreamRequest(1))
 	if err != nil {
 		t.Fatalf("submit first request: %v", err)
 	}
 	receiveSentRequest(t, stream)
-	second, err := generation.replica.submit(context.Background(), acquireStreamRequest(2))
+	second, err := submitTestRequest(generation.replica, context.Background(), acquireStreamRequest(2))
 	if err != nil {
 		t.Fatalf("submit second request: %v", err)
 	}
@@ -309,17 +311,17 @@ func TestStreamGenerationReceiveFailureLeavesPendingCallsForReconnect(t *testing
 		t.Fatal("receive failure did not terminate the TCP generation")
 	}
 	assertTransportCause(t, generation.err(), receiveFailure)
-	for index, future := range []*connectionFuture{first, second} {
+	for index, pending := range []*testPendingRequest{first, second} {
 		select {
-		case result := <-future.result:
-			t.Fatalf("pending future %d completed on reconnectable failure: %+v", index, result)
+		case result := <-pending.result:
+			t.Fatalf("pending request %d completed on reconnectable failure: %+v", index, result)
 		default:
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-		_, awaitErr := future.await(ctx)
+		_, awaitErr := pending.await(ctx)
 		cancel()
 		if !errors.Is(awaitErr, context.DeadlineExceeded) {
-			t.Fatalf("pending future %d error = %v, want deadline exceeded", index, awaitErr)
+			t.Fatalf("pending request %d error = %v, want deadline exceeded", index, awaitErr)
 		}
 	}
 }
@@ -328,7 +330,7 @@ func TestStreamGenerationSendFailureIsSessionTransportError(t *testing.T) {
 	sendFailure := errors.New("send failure")
 	generation, stream := newTestStreamGenerationWithOptions(t, fakeStreamOptions{sendErr: sendFailure})
 
-	future, err := generation.replica.submit(context.Background(), acquireStreamRequest(1))
+	pending, err := submitTestRequest(generation.replica, context.Background(), acquireStreamRequest(1))
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -342,8 +344,8 @@ func TestStreamGenerationSendFailureIsSessionTransportError(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if _, err := future.await(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("pending future error = %v, want deadline exceeded", err)
+	if _, err := pending.await(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("pending request error = %v, want context deadline exceeded", err)
 	}
 }
 
@@ -351,7 +353,7 @@ func TestStreamGenerationCloseFailureLeavesPendingAndIsIdempotent(t *testing.T) 
 	closeFailure := errors.New("close failure")
 	generation, stream := newTestStreamGenerationWithOptions(t, fakeStreamOptions{closeErr: closeFailure})
 
-	future, err := generation.replica.submit(context.Background(), acquireStreamRequest(1))
+	pending, err := submitTestRequest(generation.replica, context.Background(), acquireStreamRequest(1))
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -361,8 +363,8 @@ func TestStreamGenerationCloseFailureLeavesPendingAndIsIdempotent(t *testing.T) 
 		t.Fatalf("Close error = %v, want %v", err, closeFailure)
 	}
 	select {
-	case result := <-future.result:
-		t.Fatalf("generation Close completed persistent future: %+v", result)
+	case result := <-pending.result:
+		t.Fatalf("generation Close completed persistent request: %+v", result)
 	default:
 	}
 	if err := generation.Close(); !errors.Is(err, closeFailure) {
@@ -373,8 +375,8 @@ func TestStreamGenerationCloseFailureLeavesPendingAndIsIdempotent(t *testing.T) 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if _, err := future.await(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("persistent future error = %v, want deadline exceeded", err)
+	if _, err := pending.await(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("persistent request error = %v, want deadline exceeded", err)
 	}
 }
 
@@ -410,8 +412,54 @@ type fakeReceive struct {
 }
 
 type streamSubmitResult struct {
-	future *connectionFuture
-	err    error
+	pending *testPendingRequest
+	err     error
+}
+
+type testPendingRequest struct {
+	replica   *replicaConn
+	requestID uint64
+	result    chan replicaResponse
+}
+
+func submitTestRequest(
+	replica *replicaConn,
+	ctx context.Context,
+	request *outboundConnectionRequest,
+) (*testPendingRequest, error) {
+	requestID := request.request.RequestId()
+	result := make(chan replicaResponse, 1)
+	if err := replica.submitForOperation(ctx, request, result); err != nil {
+		return nil, err
+	}
+	return &testPendingRequest{
+		replica:   replica,
+		requestID: requestID,
+		result:    result,
+	}, nil
+}
+
+func (f *testPendingRequest) await(ctx context.Context) (protocol.Response, error) {
+	var completed replicaResponse
+	select {
+	case completed = <-f.result:
+	case <-ctx.Done():
+		f.replica.complete(f.requestID, connectionCallResult{err: ctx.Err()})
+		completed = <-f.result
+	}
+	return completed.result.response, completed.result.err
+}
+
+func callTestRequest(
+	replica *replicaConn,
+	ctx context.Context,
+	request *outboundConnectionRequest,
+) (protocol.Response, error) {
+	pending, err := submitTestRequest(replica, ctx, request)
+	if err != nil {
+		return protocol.Response{}, err
+	}
+	return pending.await(ctx)
 }
 
 type fakeStreamOptions struct {
@@ -611,6 +659,7 @@ func newTestStreamGenerationWithOptions(
 	}
 	replica := &replicaConn{
 		client:   &Client{},
+		index:    0,
 		ctx:      replicaContext,
 		cancel:   cancelReplica,
 		reqQueue: mpscring.NewNotifying[*outboundConnectionRequest](reqQueueCapacity),
@@ -646,7 +695,7 @@ func startStreamCallWithContext(
 ) <-chan connectionCallResult {
 	result := make(chan connectionCallResult, 1)
 	go func() {
-		response, err := generation.replica.call(ctx, request)
+		response, err := callTestRequest(generation.replica, ctx, request)
 		result <- connectionCallResult{response: response, err: err}
 	}()
 	return result
@@ -659,8 +708,8 @@ func startStreamSubmit(
 ) <-chan streamSubmitResult {
 	result := make(chan streamSubmitResult, 1)
 	go func() {
-		future, err := generation.replica.submit(ctx, request)
-		result <- streamSubmitResult{future: future, err: err}
+		pending, err := submitTestRequest(generation.replica, ctx, request)
+		result <- streamSubmitResult{pending: pending, err: err}
 	}()
 	return result
 }

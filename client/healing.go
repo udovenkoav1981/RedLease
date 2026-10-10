@@ -66,7 +66,8 @@ func (l *Lease) healReplicas(replicas []int) int {
 		}
 	}()
 
-	responses := newReplicaResponses(l.client, len(replicas))
+	responses := l.client.acquireReplicaResponses()
+	defer responses.release()
 
 	for _, replica := range replicas {
 		request := l.client.newAcquireRequest(l.key, l.sequence, l.requestedTTLMS)

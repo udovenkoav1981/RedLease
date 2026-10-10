@@ -246,7 +246,7 @@ func TestClientAcquireDoesNotWaitForSocketWriteAfterSubmission(t *testing.T) {
 	harness := newAcquireHarness(t)
 
 	fifthGeneration := currentReplicaGeneration(t, harness.client.replicas[4])
-	blocker, err := fifthGeneration.replica.submit(context.Background(), acquireStreamRequest(1))
+	blocker, err := submitTestRequest(fifthGeneration.replica, context.Background(), acquireStreamRequest(1))
 	if err != nil {
 		t.Fatalf("submit blocker: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestClientAcquireCanUseQuorumAfterUnacceptedSubmitTimesOut(t *testing.T) {
 	harness.client.responseTimeout = 30 * time.Millisecond
 
 	fifthGeneration := currentReplicaGeneration(t, harness.client.replicas[4])
-	blocker, err := fifthGeneration.replica.submit(context.Background(), acquireStreamRequest(1))
+	blocker, err := submitTestRequest(fifthGeneration.replica, context.Background(), acquireStreamRequest(1))
 	if err != nil {
 		t.Fatalf("submit blocker: %v", err)
 	}

@@ -28,7 +28,7 @@ func TestReplicaConnLogsStateTransitionsWithoutRetrySpam(t *testing.T) {
 	stream := newReplicaFakeStream()
 	factory.results <- streamFactoryResult{stream: stream}
 
-	connection := newReplicaConn(&Client{}, factory, logger)
+	connection := newReplicaConn(&Client{}, 0, factory, logger)
 	waitForReplicaState(t, connection, true, false)
 	secondStream := newReplicaFakeStream()
 	factory.results <- streamFactoryResult{stream: secondStream}
@@ -119,7 +119,7 @@ func TestReplicaConnKeepsQueuedRequestAcrossReconnect(t *testing.T) {
 	firstContext, cancelFirst := context.WithCancel(context.Background())
 	firstResult := make(chan connectionCallResult, 1)
 	go func() {
-		response, err := connection.call(firstContext, acquireStreamRequest(1))
+		response, err := callTestRequest(connection, firstContext, acquireStreamRequest(1))
 		firstResult <- connectionCallResult{response: response, err: err}
 	}()
 	firstStream.waitForSendAttempt(t)
@@ -162,7 +162,7 @@ func TestReplicaConnRequestDeadlineDoesNotBreakConnection(t *testing.T) {
 	defer cancel()
 	result := make(chan connectionCallResult, 1)
 	go func() {
-		response, err := connection.call(ctx, acquireStreamRequest(1))
+		response, err := callTestRequest(connection, ctx, acquireStreamRequest(1))
 		result <- connectionCallResult{response: response, err: err}
 	}()
 	firstStream.waitForSendAttempt(t)
@@ -239,7 +239,7 @@ func TestReplicaConnCloseStopsPendingCallAndFactory(t *testing.T) {
 		t.Fatalf("connection Close calls = %d, want 1", calls)
 	}
 
-	_, err := connection.call(context.Background(), acquireStreamRequest(1))
+	_, err := callTestRequest(connection, context.Background(), acquireStreamRequest(1))
 	assertReplicaUnavailableCause(t, err, errReplicaClosed)
 }
 
@@ -319,7 +319,7 @@ func newTestReplicaConn(
 }
 
 func newTestReplicaConnWithoutCleanup(factory connectionFactory) *replicaConn {
-	return newReplicaConn(&Client{}, factory, testLogger)
+	return newReplicaConn(&Client{}, 0, factory, testLogger)
 }
 
 func newReplicaFakeStream() *fakeLeaseClientStream {
@@ -337,7 +337,7 @@ func startReplicaCall(
 ) <-chan connectionCallResult {
 	result := make(chan connectionCallResult, 1)
 	go func() {
-		response, err := connection.call(context.Background(), request)
+		response, err := callTestRequest(connection, context.Background(), request)
 		result <- connectionCallResult{response: response, err: err}
 	}()
 	return result

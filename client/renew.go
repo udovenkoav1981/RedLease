@@ -55,7 +55,13 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 		}
 	}()
 
-	responses := newReplicaResponses(l.client, serverCount)
+	responses := l.client.acquireReplicaResponses()
+	responsesOwned := true
+	defer func() {
+		if responsesOwned {
+			responses.release()
+		}
+	}()
 	var firstFailure error
 	received := 0
 
@@ -74,6 +80,7 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 
 	if err := l.renewCancellationError(ctx); err != nil {
 		if responses.remaining != 0 {
+			responsesOwned = false
 			go l.collectRemainingRenewResults(operationStart, responses)
 		}
 		return &notRenewedError{cause: err}
@@ -133,6 +140,7 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 					}
 
 					if responses.remaining != 0 {
+						responsesOwned = false
 						go l.collectRemainingRenewResults(operationStart, responses)
 					}
 					return nil
@@ -160,6 +168,7 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 	}
 
 	if responses.remaining != 0 {
+		responsesOwned = false
 		go l.collectRemainingRenewResults(operationStart, responses)
 	}
 	return &notRenewedError{cause: firstFailure}
@@ -167,8 +176,9 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 
 func (l *Lease) collectRemainingRenewResults(
 	operationStart time.Time,
-	responses replicaResponses,
+	responses *replicaResponses,
 ) {
+	defer responses.release()
 	for responses.remaining != 0 {
 		completed, event := responses.next(l.ctx.Done(), nil)
 		if event == lifecycleCanceled {

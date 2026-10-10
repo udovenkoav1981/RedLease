@@ -53,7 +53,13 @@ func (c *Client) Acquire(
 	serverCount := len(c.replicas)
 	quorumSize := c.quorum.size()
 
-	responses := newReplicaResponses(c, serverCount)
+	responses := c.acquireReplicaResponses()
+	responsesOwned := true
+	defer func() {
+		if responsesOwned {
+			responses.release()
+		}
+	}()
 	var firstFailure error
 	received := 0
 
@@ -118,6 +124,7 @@ func (c *Client) Acquire(
 					}
 
 					lease.setAcquireValidity(validUntil)
+					responsesOwned = false
 					go c.collectRemainingAcquireResults(
 						lease,
 						operationStart,
@@ -175,12 +182,13 @@ func (c *Client) acquireCancellationError(callerContext context.Context) error {
 func (c *Client) collectRemainingAcquireResults(
 	lease *Lease,
 	operationStart time.Time,
-	responses replicaResponses,
+	responses *replicaResponses,
 ) {
 	for responses.remaining != 0 {
 		completed, event := responses.next(lease.ctx.Done(), nil)
 		if event == lifecycleCanceled {
 			responses.abort(context.Canceled)
+			responses.release()
 			return
 		}
 		result := completed.result
@@ -196,6 +204,7 @@ func (c *Client) collectRemainingAcquireResults(
 			}
 		}
 	}
+	responses.release()
 	lease.backgroundHeal()
 }
 
