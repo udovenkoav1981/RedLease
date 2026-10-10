@@ -70,7 +70,7 @@ func (c *Client) Acquire(
 	if err := c.acquireCancellationError(ctx); err != nil {
 		responses.abort(err)
 		lease.cancel()
-		c.cleanupFailedAcquire(lease.key, sequence) //nolint:contextcheck // Cleanup must outlive caller cancellation.
+		c.releaseAll(lease.key, sequence)
 		return nil, &notAcquiredError{cause: err}
 	}
 
@@ -155,7 +155,7 @@ func (c *Client) Acquire(
 
 	responses.abort(context.Canceled)
 	lease.cancel()
-	c.cleanupFailedAcquire(lease.key, sequence) //nolint:contextcheck // Cleanup must outlive caller cancellation.
+	c.releaseAll(lease.key, sequence)
 	if keyLimitSeen {
 		firstFailure = errors.Join(firstFailure, ErrKeyLimitReached)
 	}
@@ -213,10 +213,6 @@ func acquireQuorumStillPossible(
 		}
 	}
 	return usable+remaining >= quorumSize
-}
-
-func (c *Client) cleanupFailedAcquire(key, sequence uint64) {
-	c.releaseAll(key, sequence)
 }
 
 func bestAcquireQuorum(

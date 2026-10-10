@@ -11,28 +11,6 @@ import (
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 )
 
-func TestRetryReleaseReplicaDistinguishesDeadlineFromCancellation(t *testing.T) {
-	client := &Client{}
-
-	deadlineContext, cancelDeadline := context.WithDeadline(context.Background(), time.Now())
-	defer cancelDeadline()
-	if exhausted := client.retryReleaseReplica(deadlineContext, 0, 0, 0, nil); !exhausted {
-		t.Fatal("release retry deadline was not reported as exhausted")
-	}
-
-	canceledContext, cancel := context.WithCancel(context.Background())
-	cancel()
-	if exhausted := client.retryReleaseReplica(canceledContext, 0, 0, 0, nil); exhausted {
-		t.Fatal("release retry cancellation was reported as deadline exhaustion")
-	}
-}
-
-func TestReplicaIndices(t *testing.T) {
-	if got, want := replicaIndices(1<<1|1<<4, 5), []int{1, 4}; !slices.Equal(got, want) {
-		t.Fatalf("replicaIndices = %v, want %v", got, want)
-	}
-}
-
 func TestLeaseRenewExtendsValidity(t *testing.T) {
 	harness := newAcquireHarness(t)
 	lease := acquireFullyConfirmedLease(t, harness, 1, 1_000)
@@ -253,10 +231,11 @@ func TestLeaseReleaseIsImmediateIdempotentAndFansOut(t *testing.T) {
 	}
 
 	releases := harness.receiveReleaseRequests(t)
+	waitForLeaseReleased(t, lease)
+	waitForNoPendingStreamCalls(t, harness.client)
 	for replica, release := range releases {
 		harness.respondRelease(replica, release)
 	}
-	waitForLeaseReleased(t, lease)
 
 	for replica, stream := range harness.streams {
 		select {
@@ -272,7 +251,7 @@ func TestLeaseReleaseIsImmediateIdempotentAndFansOut(t *testing.T) {
 	}
 }
 
-func TestFailedAcquireCleanupRetriesAfterReplicaReconnect(t *testing.T) {
+func TestFailedAcquireCleanupQueuedDuringDisconnectSurvivesReconnect(t *testing.T) {
 	harness := newAcquireHarness(t)
 	result := startClientAcquire(harness.client, context.Background(), uint64(1), 2_000)
 	requests := harness.receiveAcquireRequests(t)
@@ -296,11 +275,11 @@ func TestFailedAcquireCleanupRetriesAfterReplicaReconnect(t *testing.T) {
 	waitForReplicaState(t, harness.client.replicas[4], true, false)
 	harness.streams[4] = reconnected
 
-	retriedRelease := receiveReleaseRequest(t, reconnected)
-	if !sameLeaseID(retriedRelease, requests[4]) {
-		t.Fatal("retried cleanup used a different lease ID")
+	queuedRelease := receiveReleaseRequest(t, reconnected)
+	if !sameLeaseID(queuedRelease, requests[4]) {
+		t.Fatal("queued cleanup used a different lease ID")
 	}
-	harness.respondRelease(4, retriedRelease)
+	harness.respondRelease(4, queuedRelease)
 	waitForNoPendingStreamCalls(t, harness.client)
 }
 

@@ -116,6 +116,24 @@ func (c *replicaConn) submit(
 	return c.submitForOperation(ctx, request, 0, nil)
 }
 
+func (c *replicaConn) submitNoResponse(request *outboundConnectionRequest) error {
+	requestID := request.request.RequestId()
+	shard := c.pending[pendingShardIndex(requestID)]
+	shard.mu.Lock()
+	if c.ctx.Err() != nil {
+		shard.mu.Unlock()
+		c.client.recycleOutboundRequest(request)
+		return &replicaUnavailableError{cause: errReplicaClosed}
+	}
+	if c.reqQueue.TryEnqueue(request) {
+		shard.mu.Unlock()
+		return nil
+	}
+	shard.mu.Unlock()
+	c.client.recycleOutboundRequest(request)
+	return ErrSendQueueFull
+}
+
 func (c *replicaConn) submitForOperation(
 	ctx context.Context,
 	request *outboundConnectionRequest,
