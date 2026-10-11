@@ -168,8 +168,8 @@ standalone launcher выполняет этот lifecycle автоматичес
 RedLease не закрывает их и не выполняет flush.
 
 Server пишет lifecycle-события запуска, перехода из `QUARANTINE` в `ACTIVE`,
-перехода в `FAILED` и завершения. Запуск с `SkipRestartQuarantine` имеет уровень
-`WARN`; обычные lifecycle-события — `INFO`, а controlled fail-stop — `ERROR`.
+перехода в `FAILED` и завершения. Обычные lifecycle-события имеют уровень
+`INFO`, а controlled fail-stop — `ERROR`.
 Лог не является управляющим сигналом: владелец по-прежнему обязан следить за
 `Server.Fatal()`.
 
@@ -207,9 +207,7 @@ registry и не запускает собственный HTTP endpoint.
 - `redlease_server_resident_keys` — физически хранящиеся записи, включая
   истёкшие записи до lazy или background cleanup;
 - `redlease_server_queued_operations` — сумма текущих длин shard queues;
-- `redlease_server_active_connections` — число активных TCP-соединений;
-- `redlease_server_restart_quarantine_skipped` — owner-managed quarantine
-  включён (1) или выключен (0).
+- `redlease_server_active_connections` — число активных TCP-соединений.
 
 ## 4. Lease identity
 
@@ -755,18 +753,8 @@ ACTIVE
 REJOIN_DELAY > protocolMaxTTL + safetyMargin
 ```
 
-Для embedded-сценария `server.Config.SkipRestartQuarantine = true` явно передаёт
-ответственность за эту задержку прикладному ПО. Такой экземпляр сразу создаётся
-в состоянии `ACTIVE`, и library не создаёт quarantine timer. До этого приложение
-обязано самостоятельно гарантировать, что с момента потери предыдущего
-RAM-состояния прошло не меньше публичной константы
-`server.RestartQuarantineDuration`, либо что предыдущих leases заведомо не было.
-Сам факт успешного вызова `server.New` эту внешнюю гарантию не проверяет.
-
-Standalone launcher не предоставляет флаг отключения и всегда использует
-встроенный quarantine. Таким образом, server-side enforcement остаётся
-безопасным default, а его отключение является явным opt-in владельца embedded
-library.
+Restart quarantine нельзя отключить через API server library. Обычный server
+сам запускает полный countdown при создании.
 
 В `QUARANTINE` server отвечает на read-only
 `GetTTL`, но никогда не возвращает `OK` на lease-операции. Поэтому только что
@@ -776,12 +764,38 @@ library.
 После перехода в `ACTIVE` server может снова получить реплики активных leases
 через обычные Acquire, отправленные client-side background healing.
 
+### 8.1. Опциональная регистрация standalone server через etcd
+
+Этот режим относится только к `cmd/redlease-server` и не входит в API server
+library. Без `-etcd-endpoint` launcher сохраняет обычный независимый lifecycle.
+
+В etcd-режиме launcher сначала последовательно пытается занять одну из пяти
+фиксированных позиций `redlease-server-1` … `redlease-server-5`. Полный ключ имеет вид
+`<etcd-prefix>-redlease-server-N`. Захват выполняется etcd-транзакцией с
+условием отсутствия key; значение содержит опубликованный IP:port RedLease
+server, а key привязан к lease с TTL 3 секунды.
+
+Если все пять ключей заняты, launcher читает их согласованный snapshot и
+подписывается на удаления, начиная со следующей etcd revision. Это исключает
+потерю удаления между проверкой и созданием watch. После удаления попытки
+захвата снова выполняются последовательно.
+
+Полученный etcd lease обновляется раз в секунду. После успешного захвата позиции
+launcher создаёт TCP listener и новый экземпляр `server.Server`. Новый server
+проходит обычный полный server-side restart quarantine и только после него
+переходит в `ACTIVE`.
+
+Ошибка keepalive немедленно закрывает текущий `server.Server`: listener и все
+TCP-соединения закрываются, а RAM-only leases уничтожаются вместе с экземпляром.
+Пока launcher снова захватывает позицию, RedLease TCP endpoint недоступен.
+После нового захвата создаётся новый экземпляр server, который заново проходит
+полный restart quarantine. Etcd lifecycle поэтому полностью находится в
+standalone launcher и не расширяет lifecycle API server library.
+
 ## 9. Полный restart кластера
 
-При одновременном падении всех `N` серверов всё lock state теряется. При
-безопасной конфигурации каждый server независимо либо проходит встроенный
-quarantine, либо остаётся недоступным на тот же срок под управлением embedding
-application.
+При одновременном падении всех `N` серверов всё lock state теряется. Каждый
+server независимо проходит встроенный restart quarantine.
 
 Даже если процессы или операционные системы перезапустились быстрее пяти
 секунд, новый quorum не станет доступен раньше, чем истекут все leases,
@@ -790,16 +804,15 @@ application.
 ```text
 all RAM state lost
         |
-all servers enter QUARANTINE or remain externally unavailable
+all servers enter QUARANTINE
         |
 wait > protocolMaxTTL + safetyMargin
         |
 servers become ACTIVE
 ```
 
-При встроенном quarantine безопасность не зависит от длительности внешней
-процедуры restart. При `SkipRestartQuarantine` соблюдение этой гарантии является
-обязанностью embedding application.
+Безопасность не зависит от длительности внешней процедуры restart: каждый новый
+экземпляр server обязательно выдерживает полный restart quarantine.
 
 ## 10. Архитектурные инварианты
 

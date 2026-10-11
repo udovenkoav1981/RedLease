@@ -1,7 +1,8 @@
 [Unit]
 Description=RedLease lock server
 Documentation=https://github.com/udovenkoav1981/RedLease
-After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple

@@ -4,14 +4,13 @@ package server
 // Fields may have been observed at slightly different instants. State is one
 // of "quarantine", "active", "failed", "closed" or "unknown".
 type MetricsSnapshot struct {
-	State                    string
-	ResidentKeys             uint64
-	QueuedOperations         uint64
-	ActiveConnections        uint64
-	AcquiresTotal            uint64
-	RenewsTotal              uint64
-	ReleasesTotal            uint64
-	RestartQuarantineSkipped bool
+	State             string
+	ResidentKeys      uint64
+	QueuedOperations  uint64
+	ActiveConnections uint64
+	AcquiresTotal     uint64
+	RenewsTotal       uint64
+	ReleasesTotal     uint64
 }
 
 // MetricsSnapshot returns the current server metrics without locking lease
@@ -24,14 +23,13 @@ func (s *Server) MetricsSnapshot() MetricsSnapshot {
 	}
 
 	return MetricsSnapshot{
-		State:                    metricsState(serverPhase(s.phase.Load())),
-		ResidentKeys:             s.keys.Load(),
-		QueuedOperations:         queuedOperations,
-		ActiveConnections:        uint64(s.activeConnections.Load()),
-		AcquiresTotal:            s.operationTotals[operationAcquire].Load(),
-		RenewsTotal:              s.operationTotals[operationRenew].Load(),
-		ReleasesTotal:            s.operationTotals[operationRelease].Load(),
-		RestartQuarantineSkipped: s.config.SkipRestartQuarantine,
+		State:             metricsState(serverPhase(s.phase.Load())),
+		ResidentKeys:      s.keys.Load(),
+		QueuedOperations:  queuedOperations,
+		ActiveConnections: uint64(s.activeConnections.Load()),
+		AcquiresTotal:     s.operationTotals[operationAcquire].Load(),
+		RenewsTotal:       s.operationTotals[operationRenew].Load(),
+		ReleasesTotal:     s.operationTotals[operationRelease].Load(),
 	}
 }
 

@@ -125,11 +125,10 @@ func newIntegrationServer(t *testing.T) *integrationServer {
 		t.Fatalf("listen: %v", err)
 	}
 	leaseServer, err := redleaseserver.New(listener, redleaseserver.Config{
-		MaxTTL:                5000,
-		MaxKeys:               256,
-		Logger:                slog.New(slog.DiscardHandler),
-		SkipRestartQuarantine: true,
-		ShardCount:            8,
+		MaxTTL:     5000,
+		MaxKeys:    256,
+		Logger:     slog.New(slog.DiscardHandler),
+		ShardCount: 8,
 	})
 	if err != nil {
 		_ = listener.Close()
@@ -141,6 +140,13 @@ func newIntegrationServer(t *testing.T) *integrationServer {
 		lease:    leaseServer,
 	}
 	t.Cleanup(server.close)
+	deadline := time.Now().Add(redleaseserver.RestartQuarantineDuration + time.Second)
+	for leaseServer.MetricsSnapshot().State != "active" {
+		if time.Now().After(deadline) {
+			t.Fatal("server did not leave restart quarantine")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	return server
 }
 

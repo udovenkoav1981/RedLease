@@ -26,14 +26,13 @@ func TestNewCollectorRejectsNilServer(t *testing.T) {
 func TestCollectorExportsSnapshot(t *testing.T) {
 	t.Parallel()
 	collector := newCollector(fixedMetricsSource{snapshot: redleaseserver.MetricsSnapshot{
-		State:                    "active",
-		ResidentKeys:             7,
-		QueuedOperations:         3,
-		ActiveConnections:        2,
-		AcquiresTotal:            11,
-		RenewsTotal:              12,
-		ReleasesTotal:            13,
-		RestartQuarantineSkipped: true,
+		State:             "active",
+		ResidentKeys:      7,
+		QueuedOperations:  3,
+		ActiveConnections: 2,
+		AcquiresTotal:     11,
+		RenewsTotal:       12,
+		ReleasesTotal:     13,
 	}})
 	registry := clientprometheus.NewRegistry()
 	if err := registry.Register(collector); err != nil {
@@ -45,13 +44,12 @@ func TestCollectorExportsSnapshot(t *testing.T) {
 	}
 
 	wantValues := map[string]float64{
-		"redlease_server_resident_keys":              7,
-		"redlease_server_queued_operations":          3,
-		"redlease_server_active_connections":         2,
-		"redlease_server_restart_quarantine_skipped": 1,
-		"redlease_server_acquires_total":             11,
-		"redlease_server_renews_total":               12,
-		"redlease_server_releases_total":             13,
+		"redlease_server_resident_keys":      7,
+		"redlease_server_queued_operations":  3,
+		"redlease_server_active_connections": 2,
+		"redlease_server_acquires_total":     11,
+		"redlease_server_renews_total":       12,
+		"redlease_server_releases_total":     13,
 	}
 	states := make(map[string]float64)
 	for _, family := range families {

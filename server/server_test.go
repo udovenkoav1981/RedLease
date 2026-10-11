@@ -131,10 +131,9 @@ func TestListenerFailureFailsServer(t *testing.T) {
 	}
 
 	s, err := New(listener, Config{
-		MaxTTL:                1_000,
-		Logger:                testLogger,
-		SkipRestartQuarantine: true,
-		ShardCount:            1,
+		MaxTTL:     1_000,
+		Logger:     testLogger,
+		ShardCount: 1,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -158,15 +157,15 @@ func TestTemporaryListenerFailureIsRetried(t *testing.T) {
 		closed:  make(chan struct{}),
 	}
 	s, err := New(listener, Config{
-		MaxTTL:                1_000,
-		Logger:                testLogger,
-		SkipRestartQuarantine: true,
-		ShardCount:            1,
+		MaxTTL:     1_000,
+		Logger:     testLogger,
+		ShardCount: 1,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
+	activateServer(t, s)
 
 	select {
 	case <-listener.retried:
@@ -292,10 +291,7 @@ func TestMetricsSnapshot(t *testing.T) {
 		!secondOperations.TryEnqueue(operation{}) {
 		t.Fatal("enqueue metric test operations")
 	}
-	s := &Server{
-		config: Config{SkipRestartQuarantine: true},
-		shards: []*leaseShard{{operations: firstOperations}, {operations: secondOperations}},
-	}
+	s := &Server{shards: []*leaseShard{{operations: firstOperations}, {operations: secondOperations}}}
 	s.phase.Store(uint32(phaseFailed))
 	s.keys.Store(7)
 	s.activeConnections.Store(2)
@@ -305,7 +301,7 @@ func TestMetricsSnapshot(t *testing.T) {
 
 	got := s.MetricsSnapshot()
 	if got.State != "failed" || got.ResidentKeys != 7 || got.QueuedOperations != 3 || got.ActiveConnections != 2 ||
-		got.AcquiresTotal != 11 || got.RenewsTotal != 12 || got.ReleasesTotal != 13 || !got.RestartQuarantineSkipped {
+		got.AcquiresTotal != 11 || got.RenewsTotal != 12 || got.ReleasesTotal != 13 {
 		t.Fatalf("MetricsSnapshot() = %+v", got)
 	}
 }
@@ -325,34 +321,6 @@ func TestMetricsState(t *testing.T) {
 		if got := metricsState(test.phase); got != test.want {
 			t.Errorf("metricsState(%d) = %q, want %q", test.phase, got, test.want)
 		}
-	}
-}
-
-func TestSkipRestartQuarantineStartsActiveWithoutTimer(t *testing.T) {
-	s := newTestServerWithConfig(t, Config{
-		MaxTTL:                2_000,
-		Logger:                testLogger,
-		SkipRestartQuarantine: true,
-		ShardCount:            1,
-	})
-
-	if !s.active() {
-		t.Fatal("server with skipped restart quarantine is not active")
-	}
-	if s.timer != nil {
-		t.Fatal("server with skipped restart quarantine created a timer")
-	}
-
-	id := leaseID{clientID: 1, bootID: 2, leaseSeq: 3}
-	response := s.apply(s.shards[0], operation{
-		requestID:      1,
-		kind:           operationAcquire,
-		key:            1,
-		leaseID:        id,
-		requestedTTLMS: 1_000,
-	})
-	if got := response.Status; got != redleasev1.LeaseStatusOK {
-		t.Fatalf("immediate Acquire = %s, want OK", got)
 	}
 }
 
@@ -692,10 +660,9 @@ func TestMissingAndExpiredLeaseOperationsAreLogged(t *testing.T) {
 	var output bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	s := newTestServerWithConfig(t, Config{
-		MaxTTL:                1_000,
-		Logger:                logger,
-		SkipRestartQuarantine: true,
-		ShardCount:            1,
+		MaxTTL:     1_000,
+		Logger:     logger,
+		ShardCount: 1,
 	})
 	output.Reset() // Ignore the startup lifecycle record in this operation test.
 

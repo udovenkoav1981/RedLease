@@ -19,9 +19,7 @@ const (
 	// ProtocolMaxTTL is the maximum configured TTL allowed by the protocol.
 	ProtocolMaxTTL = time.Duration(protocol.MaxTTLMS) * time.Millisecond
 	// RestartQuarantineDuration is the minimum delay enforced by the built-in
-	// restart quarantine. An embedded owner which skips that quarantine assumes
-	// responsibility for enforcing the same delay when prior RAM state may have
-	// been lost.
+	// restart quarantine.
 	RestartQuarantineDuration = ProtocolMaxTTL + safetyMargin + time.Millisecond
 	// DefaultMaxKeys is the default maximum number of resident lease keys.
 	DefaultMaxKeys = 10_000
@@ -47,12 +45,6 @@ type Config struct {
 	// Logger receives structured operational events from the Server. It is
 	// required. The caller retains ownership of the logger and its handler.
 	Logger *slog.Logger
-
-	// SkipRestartQuarantine starts the Server in ACTIVE state without a
-	// quarantine timer. The embedding application then owns restart safety and
-	// must ensure that RestartQuarantineDuration has elapsed whenever prior
-	// in-memory lease state may have been lost.
-	SkipRestartQuarantine bool
 
 	ShardCount uint32
 }
@@ -111,7 +103,6 @@ type Server struct {
 
 	ctx    context.Context //nolint:containedctx // Server owns connections and workers lifecycle.
 	cancel context.CancelFunc
-	timer  *time.Timer
 	fatal  chan error
 
 	shards    []*leaseShard
@@ -130,9 +121,7 @@ type Server struct {
 
 // New constructs a lock-server and starts accepting connections from listener.
 // The Server owns listener after New succeeds and closes it during Close or a
-// fatal failure. By default the Server starts in restart quarantine;
-// SkipRestartQuarantine makes it immediately active under owner-managed restart
-// safety.
+// fatal failure. The Server starts in restart quarantine.
 func New(listener net.Listener, c Config) (*Server, error) {
 	if listener == nil {
 		return nil, errors.New("listener must not be nil")
@@ -153,11 +142,7 @@ func New(listener net.Listener, c Config) (*Server, error) {
 		listener:    listener,
 		connections: make(map[net.Conn]struct{}),
 	}
-	if config.SkipRestartQuarantine {
-		s.phase.Store(uint32(phaseActive))
-	} else {
-		s.phase.Store(uint32(phaseQuarantine))
-	}
+	s.phase.Store(uint32(phaseQuarantine))
 
 	for i := range s.shards {
 		shard := &leaseShard{
@@ -172,33 +157,20 @@ func New(listener net.Listener, c Config) (*Server, error) {
 	s.wg.Add(1)
 	go s.runExpiredLeaseCleanup()
 
-	if !config.SkipRestartQuarantine {
-		s.timer = time.NewTimer(RestartQuarantineDuration)
-		s.wg.Add(1)
-		go s.runQuarantine()
-	}
+	s.wg.Add(1)
+	go s.runQuarantine()
 
 	startAttrs := []slog.Attr{
 		slog.Uint64("max_ttl_ms", config.MaxTTL),
 		slog.Uint64("max_keys", config.MaxKeys),
 		slog.Uint64("shard_count", uint64(config.ShardCount)),
 	}
-	if config.SkipRestartQuarantine {
-		startAttrs = append(startAttrs, slog.String("state", "ACTIVE"))
-		s.logger.LogAttrs(
-			context.Background(),
-			slog.LevelWarn,
-			"server started with restart quarantine skipped",
-			startAttrs...,
-		)
-	} else {
-		startAttrs = append(
-			startAttrs,
-			slog.String("state", "QUARANTINE"),
-			slog.Uint64("restart_quarantine_ms", uint64(RestartQuarantineDuration/time.Millisecond)),
-		)
-		s.logger.LogAttrs(context.Background(), slog.LevelInfo, "server started", startAttrs...)
-	}
+	startAttrs = append(
+		startAttrs,
+		slog.String("state", "QUARANTINE"),
+		slog.Uint64("restart_quarantine_ms", uint64(RestartQuarantineDuration/time.Millisecond)),
+	)
+	s.logger.LogAttrs(context.Background(), slog.LevelInfo, "server started", startAttrs...)
 	s.wg.Add(1)
 	go s.runListener(listener)
 
@@ -261,10 +233,11 @@ func (s *Server) Close() error {
 
 func (s *Server) runQuarantine() {
 	defer s.wg.Done()
-	defer s.timer.Stop()
+	timer := time.NewTimer(RestartQuarantineDuration)
+	defer timer.Stop()
 
 	select {
-	case <-s.timer.C:
+	case <-timer.C:
 		if s.phase.CompareAndSwap(uint32(phaseQuarantine), uint32(phaseActive)) {
 			s.logger.Info("server entered active state", slog.String("state", "ACTIVE"))
 		}

@@ -1,2 +1,3 @@
 # Command-line options passed to redlease-server by the systemd unit.
-REDLEASE_SERVER_OPTIONS="-listen 0.0.0.0:17379 -metrics-listen 0.0.0.0:17380"
+# Change -etcd-advertise to the concrete IP:port used by RedLease clients.
+REDLEASE_SERVER_OPTIONS="-listen 0.0.0.0:17379 -metrics-listen 0.0.0.0:17380 -etcd-endpoint http://127.0.0.1:2379 -etcd-prefix default -etcd-advertise 127.0.0.1:17379"

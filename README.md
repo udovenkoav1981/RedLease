@@ -67,7 +67,10 @@ sudo apt install redlease-server
 Параметры запуска задаются в `/etc/sysconfig/redlease-server` для RPM и в
 `/etc/default/redlease-server` для DEB. По умолчанию RedLease слушает
 `0.0.0.0:17379`, а Prometheus exporter — `0.0.0.0:17380`. Ограничение доступа
-к обоим портам выполняется firewall или сетевой политикой:
+к обоим портам выполняется firewall или сетевой политикой. Установленный
+systemd unit по умолчанию также включает регистрацию через etcd на
+`http://127.0.0.1:2379` с префиксом `default`. Перед запуском замените
+`-etcd-advertise 127.0.0.1:17379` на конкретный IP:port, доступный клиентам:
 
 ```bash
 sudo systemctl enable --now redlease-server
@@ -96,14 +99,41 @@ Prometheus exporter после этого доступен на
 адресах и передать все адреса клиенту.
 
 После обычного старта сервер находится в restart quarantine примерно 5,1
-секунды и в это время отклоняет `Acquire`, `Renew` и `Release`. Встроенное
-приложение может пропустить встроенный таймер через `SkipRestartQuarantine`, но
-тогда именно оно обязано выдержать `server.RestartQuarantineDuration` после
-возможной потери прежнего состояния RAM.
+секунды и в это время отклоняет `Acquire`, `Renew` и `Release`. Отключить
+restart quarantine через API server library нельзя.
 
 Launcher создаёт отдельный Prometheus registry для каждого процесса. Для
 production-применения server можно встроить в приложение, которое отвечает за
 сетевую изоляцию, аутентификацию, lifecycle и способ публикации метрик.
+
+### Регистрация server через etcd
+
+Без etcd-флагов launcher работает как раньше. Режим регистрации включается
+явно:
+
+```bash
+redlease-server \
+  -listen 0.0.0.0:17379 \
+  -etcd-endpoint http://127.0.0.1:2379 \
+  -etcd-prefix production \
+  -etcd-advertise 192.0.2.10:17379
+```
+
+Launcher последовательно пытается занять один из пяти ключей
+`production-redlease-server-1` … `production-redlease-server-5`. Ключ создаётся
+атомарно только при его отсутствии, содержит переданный IP:port и привязан к
+etcd lease с TTL 3 секунды. Lease обновляется раз в секунду. Если все позиции
+заняты, процесс следит за удалением всех пяти ключей и повторяет попытку.
+
+RedLease TCP server создаётся только после получения позиции, затем выдерживает
+полный restart quarantine и переходит в `ACTIVE`. Потеря etcd lease закрывает
+TCP listener, все соединения и текущий экземпляр server вместе с его RAM-only
+leases. Процесс не завершается и запускает новый цикл захвата позиции. До нового
+захвата TCP endpoint недоступен; после захвата создаётся новый server и полный
+restart quarantine отсчитывается заново. Prometheus endpoint продолжает
+работать независимо от наличия текущего server. `-etcd-advertise` можно не
+указывать, если `-listen` уже содержит конкретный IP:port; для wildcard-address
+его следует задавать явно.
 
 ## Встроенный server и Prometheus exporter
 

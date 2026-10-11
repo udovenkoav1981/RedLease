@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	clientprometheus "github.com/prometheus/client_golang/prometheus"
+
 	"github.com/udovenkoav1981/RedLease/server"
 )
 
@@ -38,6 +40,9 @@ func TestParseFlagsDefaults(t *testing.T) {
 	if config.shardCount != 0 {
 		t.Errorf("shard count = %d, want 0", config.shardCount)
 	}
+	if config.etcdEndpoint != "" || config.etcdPrefix != "" || config.etcdAdvertiseAddress != "" {
+		t.Errorf("etcd mode is enabled by default: %+v", config)
+	}
 }
 
 func TestParseFlagsCustomValues(t *testing.T) {
@@ -47,6 +52,9 @@ func TestParseFlagsCustomValues(t *testing.T) {
 		"-configured-max-ttl-ms", "1234",
 		"-max-keys", "123",
 		"-shard-count", "8",
+		"-etcd-endpoint", "http://127.0.0.1:2379",
+		"-etcd-prefix", "test",
+		"-etcd-advertise", "192.0.2.10:17379",
 	}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("parseFlags: %v", err)
@@ -55,7 +63,10 @@ func TestParseFlagsCustomValues(t *testing.T) {
 		config.metricsListenAddress != "127.0.0.1:19090" ||
 		config.configuredMaxTTLMS != 1234 ||
 		config.maxKeys != 123 ||
-		config.shardCount != 8 {
+		config.shardCount != 8 ||
+		config.etcdEndpoint != "http://127.0.0.1:2379" ||
+		config.etcdPrefix != "test" ||
+		config.etcdAdvertiseAddress != "192.0.2.10:17379" {
 		t.Fatalf("unexpected config: %+v", config)
 	}
 }
@@ -71,6 +82,9 @@ func TestParseFlagsHelpDescribesLocalPlaintextLauncher(t *testing.T) {
 		"plaintext TCP",
 		"no TLS or authentication",
 		"metrics-listen",
+		"etcd-endpoint",
+		"etcd-prefix",
+		"etcd-advertise",
 	} {
 		if !strings.Contains(output.String(), fragment) {
 			t.Errorf("help does not contain %q:\n%s", fragment, output.String())
@@ -78,17 +92,110 @@ func TestParseFlagsHelpDescribesLocalPlaintextLauncher(t *testing.T) {
 	}
 }
 
+func TestLauncherEtcdConfig(t *testing.T) {
+	tests := []struct {
+		name          string
+		config        launcherConfig
+		wantEnabled   bool
+		wantAdvertise string
+		wantErr       string
+	}{
+		{
+			name:   "disabled",
+			config: launcherConfig{},
+		},
+		{
+			name: "listen address is advertised by default",
+			config: launcherConfig{
+				listenAddress: "192.0.2.10:17379",
+				etcdEndpoint:  "http://127.0.0.1:2379",
+				etcdPrefix:    "cluster-a",
+			},
+			wantEnabled:   true,
+			wantAdvertise: "192.0.2.10:17379",
+		},
+		{
+			name: "explicit advertise address",
+			config: launcherConfig{
+				listenAddress:        "0.0.0.0:17379",
+				etcdEndpoint:         "http://127.0.0.1:2379",
+				etcdPrefix:           "cluster-a",
+				etcdAdvertiseAddress: "192.0.2.11:17379",
+			},
+			wantEnabled:   true,
+			wantAdvertise: "192.0.2.11:17379",
+		},
+		{
+			name: "prefix without endpoint",
+			config: launcherConfig{
+				etcdPrefix: "cluster-a",
+			},
+			wantErr: "-etcd-endpoint is required",
+		},
+		{
+			name: "missing prefix",
+			config: launcherConfig{
+				listenAddress: "192.0.2.10:17379",
+				etcdEndpoint:  "http://127.0.0.1:2379",
+			},
+			wantErr: "-etcd-prefix is required",
+		},
+		{
+			name: "advertise hostname is rejected",
+			config: launcherConfig{
+				listenAddress: "redlease.example:17379",
+				etcdEndpoint:  "http://127.0.0.1:2379",
+				etcdPrefix:    "cluster-a",
+			},
+			wantErr: "is not an IP address",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config, err := test.config.etcdConfig()
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("etcdConfig error = %v, want containing %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("etcdConfig: %v", err)
+			}
+			if config.enabled() != test.wantEnabled {
+				t.Fatalf("etcdConfig enabled = %t, want %t", config.enabled(), test.wantEnabled)
+			}
+			if config.advertiseAddress != test.wantAdvertise {
+				t.Fatalf("etcdConfig = %+v, want advertise %q", config, test.wantAdvertise)
+			}
+		})
+	}
+}
+
+func TestEtcdSlotKeys(t *testing.T) {
+	want := [etcdServerSlotCount]string{
+		"cluster-a-redlease-server-1",
+		"cluster-a-redlease-server-2",
+		"cluster-a-redlease-server-3",
+		"cluster-a-redlease-server-4",
+		"cluster-a-redlease-server-5",
+	}
+	if got := etcdSlotKeys("cluster-a"); got != want {
+		t.Fatalf("etcd slot keys = %v, want %v", got, want)
+	}
+}
+
 func TestMetricsHandlerServesPrivateRegistry(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	leaseServer, err := server.New(listener, server.Config{
-		MaxTTL:                1000,
-		MaxKeys:               10,
-		Logger:                testLogger,
-		SkipRestartQuarantine: true,
-		ShardCount:            1,
+		MaxTTL:     1000,
+		MaxKeys:    10,
+		Logger:     testLogger,
+		ShardCount: 1,
 	})
 	if err != nil {
 		_ = listener.Close()
@@ -125,6 +232,63 @@ func TestMetricsHandlerServesPrivateRegistry(t *testing.T) {
 	}
 }
 
+func TestMetricsEndpointSwitchesServerCollector(t *testing.T) {
+	registry, err := newMetricsRegistry()
+	if err != nil {
+		t.Fatalf("newMetricsRegistry: %v", err)
+	}
+	endpoint := &metricsEndpoint{registry: registry}
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	leaseServer, err := server.New(listener, server.Config{
+		MaxTTL:     1000,
+		MaxKeys:    10,
+		Logger:     testLogger,
+		ShardCount: 1,
+	})
+	if err != nil {
+		_ = listener.Close()
+		t.Fatalf("server.New: %v", err)
+	}
+	t.Cleanup(func() { _ = leaseServer.Close() })
+
+	if err := endpoint.setServer(leaseServer); err != nil {
+		t.Fatalf("setServer: %v", err)
+	}
+	if !registryContainsMetric(t, registry, "redlease_server_state") {
+		t.Fatal("registry does not contain attached RedLease collector")
+	}
+	if err := endpoint.setServer(nil); err != nil {
+		t.Fatalf("detach server: %v", err)
+	}
+	if registryContainsMetric(t, registry, "redlease_server_state") {
+		t.Fatal("registry still contains detached RedLease collector")
+	}
+	if !registryContainsMetric(t, registry, "go_goroutines") {
+		t.Fatal("detaching RedLease collector removed standard collectors")
+	}
+}
+
+func registryContainsMetric(
+	t *testing.T,
+	registry *clientprometheus.Registry,
+	want string,
+) bool {
+	t.Helper()
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, family := range families {
+		if family.GetName() == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestServerConfigValidatesMaxTTL(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -141,7 +305,7 @@ func TestServerConfigValidatesMaxTTL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config, err := (launcherConfig{configuredMaxTTLMS: tt.ttlMS}).serverConfig(testLogger)
+			config, err := (&launcherConfig{configuredMaxTTLMS: tt.ttlMS}).serverConfig(testLogger)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("serverConfig error = %v, wantErr %t", err, tt.wantErr)
 			}
@@ -156,7 +320,7 @@ func TestServerConfigValidatesMaxTTL(t *testing.T) {
 }
 
 func TestServerConfigPassesImplementationTuning(t *testing.T) {
-	config, err := (launcherConfig{
+	config, err := (&launcherConfig{
 		configuredMaxTTLMS: 1000,
 		maxKeys:            123,
 		shardCount:         8,

@@ -21,14 +21,13 @@ type metricsSource interface {
 type Collector struct {
 	source metricsSource
 
-	state                    *clientprometheus.Desc
-	residentKeys             *clientprometheus.Desc
-	queuedOperations         *clientprometheus.Desc
-	activeConnections        *clientprometheus.Desc
-	restartQuarantineSkipped *clientprometheus.Desc
-	acquiresTotal            *clientprometheus.Desc
-	renewsTotal              *clientprometheus.Desc
-	releasesTotal            *clientprometheus.Desc
+	state             *clientprometheus.Desc
+	residentKeys      *clientprometheus.Desc
+	queuedOperations  *clientprometheus.Desc
+	activeConnections *clientprometheus.Desc
+	acquiresTotal     *clientprometheus.Desc
+	renewsTotal       *clientprometheus.Desc
+	releasesTotal     *clientprometheus.Desc
 }
 
 var _ clientprometheus.Collector = (*Collector)(nil)
@@ -69,12 +68,6 @@ func newCollector(source metricsSource) *Collector {
 			nil,
 			nil,
 		),
-		restartQuarantineSkipped: clientprometheus.NewDesc(
-			"redlease_server_restart_quarantine_skipped",
-			"Whether restart quarantine was explicitly delegated to the embedding application.",
-			nil,
-			nil,
-		),
 		acquiresTotal: clientprometheus.NewDesc(
 			"redlease_server_acquires_total",
 			"Total number of Acquire operations processed while the server was active.",
@@ -102,7 +95,6 @@ func (c *Collector) Describe(metrics chan<- *clientprometheus.Desc) {
 	metrics <- c.residentKeys
 	metrics <- c.queuedOperations
 	metrics <- c.activeConnections
-	metrics <- c.restartQuarantineSkipped
 	metrics <- c.acquiresTotal
 	metrics <- c.renewsTotal
 	metrics <- c.releasesTotal
@@ -122,11 +114,6 @@ func (c *Collector) Collect(metrics chan<- clientprometheus.Metric) {
 	emit(metrics, c.residentKeys, clientprometheus.GaugeValue, float64(snapshot.ResidentKeys))
 	emit(metrics, c.queuedOperations, clientprometheus.GaugeValue, float64(snapshot.QueuedOperations))
 	emit(metrics, c.activeConnections, clientprometheus.GaugeValue, float64(snapshot.ActiveConnections))
-	quarantineSkipped := 0.0
-	if snapshot.RestartQuarantineSkipped {
-		quarantineSkipped = 1
-	}
-	emit(metrics, c.restartQuarantineSkipped, clientprometheus.GaugeValue, quarantineSkipped)
 	emit(metrics, c.acquiresTotal, clientprometheus.CounterValue, float64(snapshot.AcquiresTotal))
 	emit(metrics, c.renewsTotal, clientprometheus.CounterValue, float64(snapshot.RenewsTotal))
 	emit(metrics, c.releasesTotal, clientprometheus.CounterValue, float64(snapshot.ReleasesTotal))
