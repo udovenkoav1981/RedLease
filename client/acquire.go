@@ -66,7 +66,7 @@ func (c *Client) Acquire(
 
 	for replica := range c.replicas {
 		request := c.newAcquireRequest(lease.key, sequence, ttlMS)
-		if err := responses.submit(lease.ctx, replica, request); err != nil {
+		if err := responses.submit(ctx, replica, request); err != nil {
 			received++
 			if firstFailure == nil {
 				firstFailure = err
@@ -76,7 +76,6 @@ func (c *Client) Acquire(
 
 	if err := c.acquireCancellationError(ctx); err != nil {
 		responses.abort(err)
-		lease.cancel()
 		c.releaseAll(lease.key, sequence)
 		return nil, &notAcquiredError{cause: err}
 	}
@@ -88,7 +87,7 @@ func (c *Client) Acquire(
 	)
 
 	for received < serverCount {
-		completed, event := responses.next(lease.ctx.Done(), ctx.Done())
+		completed, event := responses.next(nil, ctx.Done())
 		switch event {
 		case responseReceived:
 			received++
@@ -164,7 +163,6 @@ func (c *Client) Acquire(
 	}
 
 	responses.abort(context.Canceled)
-	lease.cancel()
 	c.releaseAll(lease.key, sequence)
 	if keyLimitSeen {
 		firstFailure = errors.Join(firstFailure, ErrKeyLimitReached)
@@ -192,7 +190,7 @@ func (c *Client) collectRemainingAcquireResults(
 		lease.startBackgroundHealing()
 	}()
 	for responses.remaining != 0 {
-		completed, event := responses.next(lease.ctx.Done(), nil)
+		completed, event := responses.next(lease.releaseDone, nil)
 		if event == lifecycleCanceled {
 			responses.abort(context.Canceled)
 			return

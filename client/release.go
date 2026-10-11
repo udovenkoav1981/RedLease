@@ -4,9 +4,8 @@ import (
 	"time"
 )
 
-// Release immediately makes the local lease invalid and asynchronously sends
-// an idempotent best-effort Release to all configured replicas. Repeated calls
-// do nothing.
+// Release immediately makes the local lease invalid and queues an idempotent
+// best-effort Release to all configured replicas. Repeated calls do nothing.
 func (l *Lease) Release() {
 	l.stateMu.Lock()
 	if l.lifecycle != leaseActive {
@@ -17,13 +16,10 @@ func (l *Lease) Release() {
 	l.validUntil = time.Time{}
 	clear(l.confirmedUntil)
 	l.stateMu.Unlock()
-	l.cancel()
 
-	go func() {
-		l.submitBatches.Wait()
-		l.client.releaseAll(l.key, l.sequence)
-		close(l.releaseDone)
-	}()
+	l.submitBatches.Wait()
+	l.client.releaseAll(l.key, l.sequence)
+	close(l.releaseDone)
 }
 
 // releaseAll makes one best-effort enqueue attempt on every replica. Release

@@ -22,7 +22,7 @@ func (l *Lease) backgroundHeal() {
 			return
 		}
 
-		if !backoff.Wait(l.ctx, retryBackoff.Duration(attempt)) {
+		if !l.waitForHealingRetry(retryBackoff.Duration(attempt)) {
 			return
 		}
 
@@ -63,7 +63,7 @@ func (l *Lease) finishBackgroundHealing() {
 }
 
 func (l *Lease) backgroundHealingNeededLocked(now time.Time) bool {
-	if l.lifecycle != leaseActive || l.ctx.Err() != nil || !now.Before(l.validUntil) {
+	if l.lifecycle != leaseActive || !now.Before(l.validUntil) {
 		return false
 	}
 	for _, confirmedUntil := range l.confirmedUntil {
@@ -109,14 +109,14 @@ func (l *Lease) healReplicas(replicas []int) int {
 
 	for _, replica := range replicas {
 		request := l.client.newAcquireRequest(l.key, l.sequence, l.requestedTTLMS)
-		_ = responses.submit(l.ctx, replica, request)
+		_ = responses.submit(l.client.ctx, replica, request)
 	}
 	l.endSubmitBatch()
 	batchActive = false
 
 	confirmed := 0
 	for responses.remaining != 0 {
-		completed, event := responses.next(l.ctx.Done(), nil)
+		completed, event := responses.next(l.releaseDone, nil)
 		if event == lifecycleCanceled {
 			responses.abort(context.Canceled)
 			return confirmed
@@ -138,4 +138,28 @@ func (l *Lease) healReplicas(replicas []int) int {
 		}
 	}
 	return confirmed
+}
+
+func (l *Lease) waitForHealingRetry(delay time.Duration) bool {
+	if delay <= 0 {
+		select {
+		case <-l.releaseDone:
+			return false
+		case <-l.client.ctx.Done():
+			return false
+		default:
+			return true
+		}
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-l.releaseDone:
+		return false
+	case <-l.client.ctx.Done():
+		return false
+	}
 }

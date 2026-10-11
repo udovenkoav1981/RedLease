@@ -68,7 +68,7 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 
 	for replica := range l.client.replicas {
 		request := l.client.newRenewRequest(l.key, l.sequence, ttlMS)
-		if err := responses.submit(l.ctx, replica, request); err != nil {
+		if err := responses.submit(ctx, replica, request); err != nil {
 			received++
 			l.clearConfirmed(replica)
 			if firstFailure == nil {
@@ -94,7 +94,7 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 
 	collecting := true
 	for received < serverCount && collecting {
-		completed, event := responses.next(l.ctx.Done(), ctx.Done())
+		completed, event := responses.next(l.releaseDone, ctx.Done())
 		switch event {
 		case responseReceived:
 			received++
@@ -184,7 +184,7 @@ func (l *Lease) collectRemainingRenewResults(
 		l.startBackgroundHealing()
 	}()
 	for responses.remaining != 0 {
-		completed, event := responses.next(l.ctx.Done(), nil)
+		completed, event := responses.next(l.releaseDone, nil)
 		if event == lifecycleCanceled {
 			responses.abort(context.Canceled)
 			return

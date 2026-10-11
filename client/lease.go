@@ -1,7 +1,6 @@
 package client
 
 import (
-	"context"
 	"sync"
 	"time"
 )
@@ -21,8 +20,6 @@ type Lease struct {
 	key            uint64
 	requestedTTLMS uint64
 	now            time.Time
-	ctx            context.Context //nolint:containedctx // Lease owns healing and cancellation lifecycle.
-	cancel         context.CancelFunc
 
 	stateMu        sync.RWMutex
 	lifecycle      leaseLifecycle
@@ -37,7 +34,6 @@ type Lease struct {
 }
 
 func newLease(client *Client, sequence, key, requestedTTLMS uint64) *Lease {
-	ctx, cancel := context.WithCancel(client.ctx)
 	return &Lease{
 		client:         client,
 		sequence:       sequence,
@@ -45,8 +41,6 @@ func newLease(client *Client, sequence, key, requestedTTLMS uint64) *Lease {
 		requestedTTLMS: requestedTTLMS,
 		now:            time.Now(),
 		confirmedUntil: make([]time.Time, len(client.replicas)),
-		ctx:            ctx,
-		cancel:         cancel,
 		lifecycle:      leaseActive,
 		releaseDone:    make(chan struct{}),
 	}
