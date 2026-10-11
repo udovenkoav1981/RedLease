@@ -58,6 +58,7 @@ func (c *Client) Acquire(
 	defer func() {
 		if responsesOwned {
 			responses.release()
+			lease.startBackgroundHealing()
 		}
 	}()
 	var firstFailure error
@@ -124,12 +125,14 @@ func (c *Client) Acquire(
 					}
 
 					lease.setAcquireValidity(validUntil)
-					responsesOwned = false
-					go c.collectRemainingAcquireResults(
-						lease,
-						operationStart,
-						responses,
-					)
+					if responses.remaining != 0 {
+						responsesOwned = false
+						go c.collectRemainingAcquireResults(
+							lease,
+							operationStart,
+							responses,
+						)
+					}
 					return lease, nil
 				}
 			} else {
@@ -184,11 +187,14 @@ func (c *Client) collectRemainingAcquireResults(
 	operationStart time.Time,
 	responses *replicaResponses,
 ) {
+	defer func() {
+		responses.release()
+		lease.startBackgroundHealing()
+	}()
 	for responses.remaining != 0 {
 		completed, event := responses.next(lease.ctx.Done(), nil)
 		if event == lifecycleCanceled {
 			responses.abort(context.Canceled)
-			responses.release()
 			return
 		}
 		result := completed.result
@@ -204,8 +210,6 @@ func (c *Client) collectRemainingAcquireResults(
 			}
 		}
 	}
-	responses.release()
-	lease.backgroundHeal()
 }
 
 func acquireQuorumStillPossible(

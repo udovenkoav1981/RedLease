@@ -64,6 +64,20 @@ func TestBackgroundHealingRetriesMissingReplicasToFiveOfFive(t *testing.T) {
 	}
 }
 
+func TestBackgroundHealingIsNotStartedForFullyConfirmedLease(t *testing.T) {
+	harness := newAcquireHarness(t)
+	lease := acquireFullyConfirmedLease(t, harness, 1, 2_000)
+
+	waitForNoPendingStreamCalls(t, harness.client)
+	time.Sleep(100 * time.Millisecond)
+	lease.stateMu.RLock()
+	healing := lease.healing
+	lease.stateMu.RUnlock()
+	if healing {
+		t.Fatal("background healing is active for a fully confirmed lease")
+	}
+}
+
 func TestBackgroundHealingReattachesReplicaAfterStaleRenew(t *testing.T) {
 	harness := newAcquireHarness(t)
 	lease := acquireFullyConfirmedLease(t, harness, 2, 2_000)

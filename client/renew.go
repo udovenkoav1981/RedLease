@@ -60,6 +60,7 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 	defer func() {
 		if responsesOwned {
 			responses.release()
+			l.startBackgroundHealing()
 		}
 	}()
 	var firstFailure error
@@ -178,7 +179,10 @@ func (l *Lease) collectRemainingRenewResults(
 	operationStart time.Time,
 	responses *replicaResponses,
 ) {
-	defer responses.release()
+	defer func() {
+		responses.release()
+		l.startBackgroundHealing()
+	}()
 	for responses.remaining != 0 {
 		completed, event := responses.next(l.ctx.Done(), nil)
 		if event == lifecycleCanceled {

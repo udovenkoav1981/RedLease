@@ -11,12 +11,14 @@ import (
 // backgroundHeal keeps trying to place this lease on every replica while the
 // locally confirmed lease remains valid. It never changes validUntil.
 func (l *Lease) backgroundHeal() {
+	defer l.finishBackgroundHealing()
+
 	retryBackoff := backoff.Default()
 	var attempt uint
 
 	for {
-		_, active := l.healingTargets()
-		if !active {
+		_, needed := l.healingTargets()
+		if !needed {
 			return
 		}
 
@@ -24,8 +26,8 @@ func (l *Lease) backgroundHeal() {
 			return
 		}
 
-		targets, active := l.healingTargets()
-		if !active {
+		targets, needed := l.healingTargets()
+		if !needed {
 			return
 		}
 		if len(targets) != 0 && l.healReplicas(targets) != 0 {
@@ -36,12 +38,48 @@ func (l *Lease) backgroundHeal() {
 	}
 }
 
+func (l *Lease) startBackgroundHealing() {
+	l.stateMu.Lock()
+	if l.healing || !l.backgroundHealingNeededLocked(time.Now()) {
+		l.stateMu.Unlock()
+		return
+	}
+	l.healing = true
+	l.stateMu.Unlock()
+	go l.backgroundHeal()
+}
+
+func (l *Lease) finishBackgroundHealing() {
+	l.stateMu.Lock()
+	l.healing = false
+	restart := l.backgroundHealingNeededLocked(time.Now())
+	if restart {
+		l.healing = true
+	}
+	l.stateMu.Unlock()
+	if restart {
+		go l.backgroundHeal()
+	}
+}
+
+func (l *Lease) backgroundHealingNeededLocked(now time.Time) bool {
+	if l.lifecycle != leaseActive || l.ctx.Err() != nil || !now.Before(l.validUntil) {
+		return false
+	}
+	for _, confirmedUntil := range l.confirmedUntil {
+		if confirmedUntil.Before(l.validUntil) {
+			return true
+		}
+	}
+	return false
+}
+
 func (l *Lease) healingTargets() ([]int, bool) {
 	l.stateMu.RLock()
 	defer l.stateMu.RUnlock()
 	now := time.Now()
 
-	if l.lifecycle != leaseActive || !now.Before(l.validUntil) {
+	if !l.backgroundHealingNeededLocked(now) {
 		return nil, false
 	}
 

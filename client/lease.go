@@ -28,6 +28,7 @@ type Lease struct {
 	lifecycle      leaseLifecycle
 	validUntil     time.Time
 	confirmedUntil []time.Time
+	healing        bool
 	submitBatches  sync.WaitGroup
 
 	renewMu sync.Mutex
