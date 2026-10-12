@@ -74,7 +74,7 @@ jobs:
           fi
           echo "RELEASE_VERSION=$RELEASE_VERSION" >> "$GITHUB_ENV"
 
-      - name: Build static redlease-server
+      - name: Build static binaries
         env:
           CGO_ENABLED: 0
           GOOS: linux
@@ -84,13 +84,21 @@ jobs:
           go build -trimpath -ldflags='-s -w' \
             -o dist/redlease-server-linux-amd64 \
             ./cmd/redlease-server
+          go build -trimpath -ldflags='-s -w' \
+            -o dist/redlease-load-linux-amd64 \
+            ./cmd/redlease-load
 
-      - name: Verify static binary
+      - name: Verify static binaries
         run: |
-          if readelf --program-headers dist/redlease-server-linux-amd64 | grep -q INTERP; then
-            echo 'redlease-server is dynamically linked' >&2
-            exit 1
-          fi
+          for binary in \
+            dist/redlease-server-linux-amd64 \
+            dist/redlease-load-linux-amd64
+          do
+            if readelf --program-headers "$binary" | grep -q INTERP; then
+              echo "$binary is dynamically linked" >&2
+              exit 1
+            fi
+          done
 
       - name: Install package repository tools
         run: |
@@ -103,6 +111,9 @@ jobs:
           install -Dpm 0755 \
             dist/redlease-server-linux-amd64 \
             rpmbuild/SOURCES/redlease-server
+          install -Dpm 0755 \
+            dist/redlease-load-linux-amd64 \
+            rpmbuild/SOURCES/redlease-load
           install -Dpm 0644 LICENSE rpmbuild/SOURCES/LICENSE
           install -Dpm 0644 \
             packaging/rpm/redlease-server.service \
@@ -137,6 +148,9 @@ jobs:
           install -m 0755 \
             dist/redlease-server-linux-amd64 \
             "$package_root/usr/bin/redlease-server"
+          install -m 0755 \
+            dist/redlease-load-linux-amd64 \
+            "$package_root/usr/bin/redlease-load"
           install -m 0644 \
             packaging/deb/redlease-server.service \
             "$package_root/usr/lib/systemd/system/redlease-server.service"
@@ -154,6 +168,7 @@ jobs:
         working-directory: dist
         run: |
           sha256sum redlease-server-linux-amd64 > redlease-server-linux-amd64.sha256
+          sha256sum redlease-load-linux-amd64 > redlease-load-linux-amd64.sha256
           sha256sum \
             "redlease-server-$RELEASE_VERSION-1.x86_64.rpm" \
             > "redlease-server-$RELEASE_VERSION-1.x86_64.rpm.sha256"

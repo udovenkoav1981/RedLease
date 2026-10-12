@@ -8,6 +8,7 @@ Source0:        redlease-server
 Source1:        LICENSE
 Source2:        redlease-server.service
 Source3:        redlease-server.sysconfig
+Source4:        redlease-load
 
 BuildArch:      x86_64
 AutoReqProv:    no
@@ -18,9 +19,10 @@ Requires(postun): shadow-utils
 Requires(postun): systemd
 
 %description
-Standalone plaintext RedLease lock server launcher. The package contains only
-the statically linked executable; service lifecycle and configuration remain
-the responsibility of the host application or system administrator.
+Standalone plaintext RedLease lock server launcher and load generator. The
+package contains statically linked executables; service lifecycle and
+configuration remain the responsibility of the host application or system
+administrator.
 
 %prep
 
@@ -28,6 +30,7 @@ the responsibility of the host application or system administrator.
 
 %install
 install -Dpm 0755 %{SOURCE0} %{buildroot}%{_bindir}/redlease-server
+install -Dpm 0755 %{SOURCE4} %{buildroot}%{_bindir}/redlease-load
 install -Dpm 0644 %{SOURCE1} %{buildroot}/usr/share/licenses/%{name}/LICENSE
 install -Dpm 0644 %{SOURCE2} %{buildroot}/usr/lib/systemd/system/redlease-server.service
 install -Dpm 0644 %{SOURCE3} %{buildroot}%{_sysconfdir}/sysconfig/redlease-server
@@ -76,4 +79,5 @@ fi
 %license /usr/share/licenses/%{name}/LICENSE
 %config(noreplace) %{_sysconfdir}/sysconfig/redlease-server
 %{_bindir}/redlease-server
+%{_bindir}/redlease-load
 /usr/lib/systemd/system/redlease-server.service

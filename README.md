@@ -62,8 +62,9 @@ sudo apt install redlease-server
 ```
 
 Репозитории пока не подписаны и публикуются в GitHub Pages при создании
-релизного тега. Оба пакета создают системного пользователя `redlease` и
-устанавливают `redlease-server.service`, но не запускают его автоматически.
+релизного тега. Оба пакета устанавливают статические `redlease-server` и
+`redlease-load`, создают системного пользователя `redlease` и устанавливают
+`redlease-server.service`, но не запускают его автоматически.
 Параметры запуска задаются в `/etc/sysconfig/redlease-server` для RPM и в
 `/etc/default/redlease-server` для DEB. По умолчанию RedLease слушает
 `0.0.0.0:17379`, а Prometheus exporter — `0.0.0.0:17380`. Ограничение доступа
