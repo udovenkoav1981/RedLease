@@ -35,6 +35,8 @@ type options struct {
 	clientKind      string
 	quorum          string
 	targets         []string
+	etcdEndpoint    string
+	etcdPrefix      string
 	clientCounts    []int
 	leaseCounts     []int
 	duration        time.Duration
@@ -69,6 +71,28 @@ func run(args []string, output, flagOutput io.Writer) error {
 	if err != nil {
 		return err
 	}
+	runContext, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+
+	clientLogger := slog.New(slog.DiscardHandler)
+	var discovery *etcdTargetDiscovery
+	if config.etcdEndpoint != "" {
+		discoveryLogger := slog.New(slog.NewTextHandler(flagOutput, nil))
+		discovery, err = startEtcdTargetDiscovery(
+			runContext,
+			config.etcdEndpoint,
+			config.etcdPrefix,
+			scenarios[0].serverCount,
+			discoveryLogger,
+		)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = discovery.Close() }()
+		if _, _, err := discovery.targets.waitReady(runContext); err != nil {
+			return fmt.Errorf("wait for etcd server targets: %w", err)
+		}
+	}
 
 	writer := csv.NewWriter(output)
 	if err := writer.Write([]string{
@@ -84,11 +108,18 @@ func run(args []string, output, flagOutput io.Writer) error {
 		return fmt.Errorf("flush CSV header: %w", err)
 	}
 
-	logger := slog.New(slog.DiscardHandler)
 	for _, clientCount := range config.clientCounts {
 		for _, leaseCount := range config.leaseCounts {
 			for _, selected := range scenarios {
-				result, caseErr := runCase(context.Background(), selected, clientCount, leaseCount, &config, logger)
+				result, caseErr := runCase(
+					runContext,
+					selected,
+					clientCount,
+					leaseCount,
+					&config,
+					clientLogger,
+					discovery,
+				)
 				if caseErr != nil {
 					return fmt.Errorf("%s %s with %d clients and %d leases/client: %w",
 						selected.name, config.quorum, clientCount, leaseCount, caseErr)
@@ -112,6 +143,8 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	clientKind := flags.String(clientName, "both", "client1of1, client, or both (both requires quorum 1/1)")
 	quorum := flags.String("quorum", quorum1of1, "quorum for the generic client: 1/1, 2/3, or 3/5")
 	targets := flags.String("targets", "", "comma-separated addresses of already running TCP lock-servers")
+	etcdEndpoint := flags.String("etcd-endpoint", "", "etcd endpoint used to discover RedLease servers")
+	etcdPrefix := flags.String("etcd-prefix", "", "prefix for the five etcd server-slot keys")
 	clients := flags.String("clients", defaultClients, "comma-separated client counts")
 	leases := flags.String("leases-per-client", defaultLeases, "comma-separated concurrent lease counts per client")
 	duration := flags.Duration("duration", 5*time.Second, "measurement time per matrix cell")
@@ -143,14 +176,16 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	if err != nil {
 		return options{}, fmt.Errorf("leases-per-client: %w", err)
 	}
-	serverTargets, err := parseTargets(*targets)
+	serverTargets, err := parseTargetOptions(*targets, *etcdEndpoint, *etcdPrefix)
 	if err != nil {
-		return options{}, fmt.Errorf("targets: %w", err)
+		return options{}, err
 	}
 	result := options{
 		clientKind:      *clientKind,
 		quorum:          *quorum,
 		targets:         serverTargets,
+		etcdEndpoint:    strings.TrimSpace(*etcdEndpoint),
+		etcdPrefix:      strings.TrimSpace(*etcdPrefix),
 		clientCounts:    clientCounts,
 		leaseCounts:     leaseCounts,
 		duration:        *duration,
@@ -187,12 +222,34 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 		return options{}, err
 	}
 	for _, selected := range scenarios {
-		if len(result.targets) != selected.serverCount {
+		if result.etcdEndpoint == "" && len(result.targets) != selected.serverCount {
 			return options{}, fmt.Errorf("%s quorum %s requires %d distinct targets, got %d",
 				selected.name, result.quorum, selected.serverCount, len(result.targets))
 		}
 	}
 	return result, nil
+}
+
+func parseTargetOptions(rawTargets, rawEtcdEndpoint, rawEtcdPrefix string) ([]string, error) {
+	targets := strings.TrimSpace(rawTargets)
+	endpoint := strings.TrimSpace(rawEtcdEndpoint)
+	prefix := strings.TrimSpace(rawEtcdPrefix)
+	switch {
+	case endpoint == "" && prefix != "":
+		return nil, errors.New("-etcd-endpoint is required with -etcd-prefix")
+	case endpoint != "" && prefix == "":
+		return nil, errors.New("-etcd-prefix is required with -etcd-endpoint")
+	case endpoint != "" && targets != "":
+		return nil, errors.New("-targets and -etcd-endpoint are mutually exclusive")
+	case endpoint != "":
+		return nil, nil
+	default:
+		parsed, err := parseTargets(targets)
+		if err != nil {
+			return nil, fmt.Errorf("targets: %w", err)
+		}
+		return parsed, nil
+	}
 }
 
 func parseTargets(raw string) ([]string, error) {

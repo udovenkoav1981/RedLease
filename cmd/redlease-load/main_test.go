@@ -41,6 +41,39 @@ func TestDefaultHold(t *testing.T) {
 	}
 }
 
+func TestParseOptionsWithEtcdDiscovery(t *testing.T) {
+	config, err := parseOptions([]string{
+		"-client=client",
+		"-quorum=3/5",
+		"-etcd-endpoint=http://127.0.0.1:2379",
+		"-etcd-prefix=/redlease/production",
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseOptions: %v", err)
+	}
+	if config.etcdEndpoint != "http://127.0.0.1:2379" ||
+		config.etcdPrefix != "/redlease/production" ||
+		len(config.targets) != 0 {
+		t.Fatalf("unexpected etcd target configuration: %+v", config)
+	}
+}
+
+func TestParseOptionsRejectsInvalidTargetSources(t *testing.T) {
+	for _, args := range [][]string{
+		{"-etcd-prefix=redlease"},
+		{"-etcd-endpoint=http://127.0.0.1:2379"},
+		{
+			"-targets=127.0.0.1:17379",
+			"-etcd-endpoint=http://127.0.0.1:2379",
+			"-etcd-prefix=redlease",
+		},
+	} {
+		if _, err := parseOptions(args, &bytes.Buffer{}); err == nil {
+			t.Errorf("parseOptions(%v) succeeded, want error", args)
+		}
+	}
+}
+
 func TestParseOptionsRejectsInvalidValues(t *testing.T) {
 	for _, args := range [][]string{
 		{"-targets=127.0.0.1:17379,127.0.0.1:17379"},

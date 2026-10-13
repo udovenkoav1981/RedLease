@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/udovenkoav1981/RedLease/client"
@@ -50,6 +51,156 @@ func (c quorumClient) Acquire(ctx context.Context, key, ttl uint64) (loadLease, 
 	return lease, nil
 }
 
+var errLoadTargetsUnavailable = errors.New("RedLease server targets are unavailable")
+
+type loadClientGeneration struct {
+	client loadClient
+}
+
+// reconfigurableLoadClient keeps endpoint changes off the load generator's hot
+// path: Acquire needs only one atomic load. Retired clients remain alive long
+// enough for leases issued by the previous generation to release or expire.
+type reconfigurableLoadClient struct {
+	selected scenario
+	clientID uint32
+	config   *options
+	logger   *slog.Logger
+
+	current atomic.Pointer[loadClientGeneration]
+
+	mu      sync.Mutex
+	closed  bool
+	retired []loadClient
+	timers  []*time.Timer
+}
+
+func newReconfigurableLoadClient(
+	selected scenario,
+	clientID uint32,
+	addresses []string,
+	config *options,
+	logger *slog.Logger,
+) (*reconfigurableLoadClient, error) {
+	instance, err := newLoadClient(selected, clientID, addresses, config, logger)
+	if err != nil {
+		return nil, err
+	}
+	result := &reconfigurableLoadClient{
+		selected: selected,
+		clientID: clientID,
+		config:   config,
+		logger:   logger,
+	}
+	result.current.Store(&loadClientGeneration{client: instance})
+	return result, nil
+}
+
+func (c *reconfigurableLoadClient) WaitReady(ctx context.Context) error {
+	generation := c.current.Load()
+	if generation == nil {
+		return errLoadTargetsUnavailable
+	}
+	return generation.client.WaitReady(ctx)
+}
+
+func (c *reconfigurableLoadClient) Acquire(ctx context.Context, key, ttl uint64) (loadLease, error) {
+	generation := c.current.Load()
+	if generation == nil {
+		return nil, errLoadTargetsUnavailable
+	}
+	return generation.client.Acquire(ctx, key, ttl)
+}
+
+func (c *reconfigurableLoadClient) reconfigure(addresses []string) error {
+	var replacement *loadClientGeneration
+	if len(addresses) != 0 {
+		instance, err := newLoadClient(c.selected, c.clientID, addresses, c.config, c.logger)
+		if err != nil {
+			return errors.Join(err, c.replace(nil))
+		}
+		replacement = &loadClientGeneration{client: instance}
+	}
+	return c.replace(replacement)
+}
+
+func (c *reconfigurableLoadClient) replace(replacement *loadClientGeneration) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		if replacement != nil {
+			return errors.Join(errLoadTargetsUnavailable, replacement.client.Close())
+		}
+		return errLoadTargetsUnavailable
+	}
+	previous := c.current.Swap(replacement)
+	if previous != nil {
+		c.retired = append(c.retired, previous.client)
+		c.timers = append(c.timers, time.AfterFunc(c.config.settleDuration(), func() {
+			_ = previous.client.Close()
+		}))
+	}
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *reconfigurableLoadClient) Close() error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	current := c.current.Swap(nil)
+	clients := c.retired
+	c.retired = nil
+	if current != nil {
+		clients = append(clients, current.client)
+	}
+	for _, timer := range c.timers {
+		timer.Stop()
+	}
+	c.timers = nil
+	c.mu.Unlock()
+	return closeLoadClients(clients)
+}
+
+func newLoadClient(
+	selected scenario,
+	clientID uint32,
+	addresses []string,
+	config *options,
+	logger *slog.Logger,
+) (loadClient, error) {
+	if selected.name == client1of1Name {
+		created, err := client1of1.New(client1of1.Config{
+			ClientID:        clientID,
+			Target:          addresses[0],
+			Logger:          logger,
+			ResponseTimeout: config.responseTimeout,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return oneClient{client: created}, nil
+	}
+
+	servers := make([]client.ServerConfig, len(addresses))
+	for replica, address := range addresses {
+		servers[replica] = client.ServerConfig{Target: address}
+	}
+	created, err := client.New(client.Config{
+		ClientID:        clientID,
+		Quorum:          selected.quorum,
+		Servers:         servers,
+		Logger:          logger,
+		ResponseTimeout: config.responseTimeout,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return quorumClient{client: created}, nil
+}
+
 func newLoadClients(
 	selected scenario,
 	count int,
@@ -59,39 +210,70 @@ func newLoadClients(
 ) ([]loadClient, error) {
 	clients := make([]loadClient, 0, count)
 	for index := range count {
-		clientID := uint32(index + 1)
-		var instance loadClient
-		if selected.name == client1of1Name {
-			created, err := client1of1.New(client1of1.Config{
-				ClientID:        clientID,
-				Target:          addresses[0],
-				Logger:          logger,
-				ResponseTimeout: config.responseTimeout,
-			})
-			if err != nil {
-				return clients, fmt.Errorf("create client %d: %w", index, err)
-			}
-			instance = oneClient{client: created}
-		} else {
-			servers := make([]client.ServerConfig, len(addresses))
-			for replica, address := range addresses {
-				servers[replica] = client.ServerConfig{Target: address}
-			}
-			created, err := client.New(client.Config{
-				ClientID:        clientID,
-				Quorum:          selected.quorum,
-				Servers:         servers,
-				Logger:          logger,
-				ResponseTimeout: config.responseTimeout,
-			})
-			if err != nil {
-				return clients, fmt.Errorf("create client %d: %w", index, err)
-			}
-			instance = quorumClient{client: created}
+		instance, err := newLoadClient(selected, uint32(index+1), addresses, config, logger)
+		if err != nil {
+			return clients, fmt.Errorf("create client %d: %w", index, err)
 		}
 		clients = append(clients, instance)
 	}
 	return clients, nil
+}
+
+func newReconfigurableLoadClients(
+	selected scenario,
+	count int,
+	addresses []string,
+	config *options,
+	logger *slog.Logger,
+) ([]loadClient, []*reconfigurableLoadClient, error) {
+	clients := make([]loadClient, 0, count)
+	reconfigurable := make([]*reconfigurableLoadClient, 0, count)
+	for index := range count {
+		instance, err := newReconfigurableLoadClient(
+			selected,
+			uint32(index+1),
+			addresses,
+			config,
+			logger,
+		)
+		if err != nil {
+			return clients, reconfigurable, fmt.Errorf("create client %d: %w", index, err)
+		}
+		clients = append(clients, instance)
+		reconfigurable = append(reconfigurable, instance)
+	}
+	return clients, reconfigurable, nil
+}
+
+func watchLoadTargets(
+	ctx context.Context,
+	state *targetState,
+	clients []*reconfigurableLoadClient,
+	initialVersion uint64,
+	logger *slog.Logger,
+) {
+	currentVersion := initialVersion
+	for {
+		targets, version, changed := state.snapshot()
+		if currentVersion != version {
+			for index, instance := range clients {
+				if err := instance.reconfigure(targets); err != nil {
+					logger.Error(
+						"cannot reconfigure RedLease load client",
+						slog.Int("client_index", index),
+						slog.Any("error", err),
+					)
+				}
+			}
+			currentVersion = version
+			logger.Info("RedLease load clients reconfigured", slog.Any("targets", targets))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-changed:
+		}
+	}
 }
 
 func closeLoadClients(clients []loadClient) error {
@@ -110,10 +292,53 @@ func runCase(
 	clientCount, leaseCount int,
 	config *options,
 	logger *slog.Logger,
+	discovery *etcdTargetDiscovery,
 ) (result caseResult, runErr error) {
-	//nolint:contextcheck // Client connection managers belong to the benchmark cell, not the caller context.
-	clients, err := newLoadClients(selected, clientCount, config.targets, config, logger)
-	defer func() { runErr = errors.Join(runErr, closeLoadClients(clients)) }()
+	var clients []loadClient
+	var stopTargetWatch func()
+	var err error
+	if discovery == nil {
+		//nolint:contextcheck // Client connection managers belong to the benchmark cell, not the caller context.
+		clients, err = newLoadClients(selected, clientCount, config.targets, config, logger)
+	} else {
+		var targets []string
+		var targetVersion uint64
+		targets, targetVersion, err = discovery.targets.waitReady(ctx)
+		if err == nil {
+			var reconfigurable []*reconfigurableLoadClient
+			//nolint:contextcheck // Client connection managers belong to the benchmark cell, not the caller context.
+			clients, reconfigurable, err = newReconfigurableLoadClients(
+				selected,
+				clientCount,
+				targets,
+				config,
+				logger,
+			)
+			if err == nil {
+				watchContext, cancelWatch := context.WithCancel(ctx)
+				var watchWorker sync.WaitGroup
+				watchWorker.Go(func() {
+					watchLoadTargets(
+						watchContext,
+						discovery.targets,
+						reconfigurable,
+						targetVersion,
+						discovery.logger,
+					)
+				})
+				stopTargetWatch = func() {
+					cancelWatch()
+					watchWorker.Wait()
+				}
+			}
+		}
+	}
+	defer func() {
+		if stopTargetWatch != nil {
+			stopTargetWatch()
+		}
+		runErr = errors.Join(runErr, closeLoadClients(clients))
+	}()
 	if err != nil {
 		return caseResult{}, err
 	}
