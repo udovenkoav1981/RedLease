@@ -99,7 +99,6 @@ type Server struct {
 
 	activeConnections atomic.Int64
 	operationTotals   [operationKindCount]atomic.Uint64
-	responsePool      sync.Pool
 
 	ctx    context.Context //nolint:containedctx // Server owns connections and workers lifecycle.
 	cancel context.CancelFunc

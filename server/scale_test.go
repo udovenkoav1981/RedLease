@@ -8,7 +8,6 @@ import (
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
-	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
 func TestServerHandlesTenThousandActiveLeases(t *testing.T) {
@@ -98,7 +97,7 @@ func newOperationTestSession(s *Server, capacity int) *connectionSession {
 	return &connectionSession{
 		server:    s,
 		ctx:       context.Background(),
-		respQueue: mpscring.NewNotifying[*outboundResponse](capacity),
+		respQueue: mpscring.NewNotifying[protocol.Response](capacity),
 	}
 }
 
@@ -114,20 +113,15 @@ func dispatchTestOperation(t testing.TB, s *Server, session *connectionSession, 
 
 func receiveTestOperationResponse(
 	t testing.TB,
-	s *Server,
+	_ *Server,
 	session *connectionSession,
 ) protocol.Response {
 	t.Helper()
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	for {
-		outbound, ok := session.respQueue.TryDequeue()
+		response, ok := session.respQueue.TryDequeue()
 		if ok {
-			response, err := transport.DecodeResponse(outbound.message.Table().Bytes)
-			s.recycleOutboundResponse(outbound)
-			if err != nil {
-				t.Fatalf("decode queued operation response: %v", err)
-			}
 			return response
 		}
 		select {

@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	flatbuffers "github.com/google/flatbuffers/go"
+
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
@@ -30,7 +32,7 @@ type connectionSession struct {
 	conn   net.Conn
 	ctx    context.Context //nolint:containedctx // Session owns this connection-scoped context.
 
-	respQueue     *mpscring.NotifyingRing[*outboundResponse]
+	respQueue     *mpscring.NotifyingRing[protocol.Response]
 	responsesDone chan struct{}
 	requestsDone  chan struct{}
 	recvDone      chan error
@@ -100,7 +102,7 @@ func (s *Server) runConnection(conn net.Conn) {
 		server:        s,
 		conn:          conn,
 		ctx:           ctx,
-		respQueue:     mpscring.NewNotifying[*outboundResponse](responseQueueCapacity),
+		respQueue:     mpscring.NewNotifying[protocol.Response](responseQueueCapacity),
 		responsesDone: make(chan struct{}),
 		requestsDone:  make(chan struct{}),
 		recvDone:      make(chan error, 1),
@@ -132,6 +134,7 @@ func (s *Server) closeConnections() {
 
 func (s *connectionSession) sendResponses(writer *transport.FrameWriter) error {
 	recvDone := s.recvDone
+	builder := flatbuffers.NewBuilder(transport.InitialBufferSize)
 
 	for {
 		response, ok := s.respQueue.TryDequeue()
@@ -156,7 +159,7 @@ func (s *connectionSession) sendResponses(writer *transport.FrameWriter) error {
 		}
 
 		for {
-			if err := s.bufferResponse(writer, response); err != nil {
+			if err := s.bufferResponse(writer, builder, response); err != nil {
 				return err
 			}
 			response, ok = s.respQueue.TryDequeue()
@@ -176,13 +179,19 @@ func (s *connectionSession) sendResponses(writer *transport.FrameWriter) error {
 
 func (s *connectionSession) bufferResponse(
 	writer *transport.FrameWriter,
-	response *outboundResponse,
+	builder *flatbuffers.Builder,
+	response protocol.Response,
 ) error {
-	defer s.server.recycleOutboundResponse(response)
 	if err := s.server.unavailableError(); err != nil {
 		return err
 	}
-	if err := writer.BufferFrame(response.message.Table().Bytes); err != nil {
+	frame, err := encodeResponse(builder, response)
+	if err != nil {
+		failure := fmt.Errorf("encode response: %w", err)
+		s.server.fail(failure)
+		return failure
+	}
+	if err := writer.BufferFrame(frame); err != nil {
 		return fmt.Errorf("buffer response: %w", err)
 	}
 	return nil
@@ -191,11 +200,10 @@ func (s *connectionSession) bufferResponse(
 func (s *connectionSession) discardResponses() {
 	<-s.responsesDone
 	for {
-		response, ok := s.respQueue.TryDequeue()
+		_, ok := s.respQueue.TryDequeue()
 		if !ok {
 			return
 		}
-		s.server.recycleOutboundResponse(response)
 	}
 }
 
@@ -231,15 +239,9 @@ func (s *connectionSession) receiveRequests() {
 }
 
 func (s *connectionSession) enqueueResponse(response protocol.Response) bool {
-	outbound, err := s.server.newOutboundResponse(response)
-	if err != nil {
-		s.server.fail(fmt.Errorf("encode response: %w", err))
-		return false
-	}
-	for !s.respQueue.TryEnqueue(outbound) {
+	for !s.respQueue.TryEnqueue(response) {
 		select {
 		case <-s.ctx.Done():
-			s.server.recycleOutboundResponse(outbound)
 			return false
 		default:
 			runtime.Gosched()

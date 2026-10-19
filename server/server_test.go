@@ -18,6 +18,7 @@ import (
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/mpscring"
+	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
@@ -1037,18 +1038,12 @@ func TestConnectionResponseWriterFlushesAvailableResponsesAsOneBatch(t *testing.
 		server:        s,
 		conn:          countingConn,
 		ctx:           t.Context(),
-		respQueue:     mpscring.NewNotifying[*outboundResponse](responseQueueCapacity),
+		respQueue:     mpscring.NewNotifying[protocol.Response](responseQueueCapacity),
 		responsesDone: make(chan struct{}),
 		recvDone:      make(chan error),
 	}
-	first, err := s.newOutboundResponse(acquireResponse(1, redleasev1.LeaseStatusOK, 1_000))
-	if err != nil {
-		t.Fatalf("encode Acquire response: %v", err)
-	}
-	second, err := s.newOutboundResponse(releaseResponse(2, redleasev1.LeaseStatusOK))
-	if err != nil {
-		t.Fatalf("encode Release response: %v", err)
-	}
+	first := acquireResponse(1, redleasev1.LeaseStatusOK, 1_000)
+	second := releaseResponse(2, redleasev1.LeaseStatusOK)
 	if !session.respQueue.TryEnqueue(first) || !session.respQueue.TryEnqueue(second) {
 		t.Fatal("enqueue response failed")
 	}

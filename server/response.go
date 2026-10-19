@@ -7,17 +7,11 @@ import (
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
-	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
-// outboundResponse owns its FlatBuffers backing bytes until the connection
-// writer has copied the complete frame into its write buffer.
-type outboundResponse struct {
-	message redleasev1.ServerResponse
-	builder *flatbuffers.Builder
-}
-
-func (s *Server) newOutboundResponse(response protocol.Response) (*outboundResponse, error) {
+// encodeResponse serializes one owned response into the connection writer's
+// reusable builder. The returned frame remains valid until the next Reset.
+func encodeResponse(builder *flatbuffers.Builder, response protocol.Response) ([]byte, error) {
 	if response.Status > redleasev1.LeaseStatusKEY_LIMIT_REACHED {
 		return nil, fmt.Errorf("unsupported lease status %d", response.Status)
 	}
@@ -25,17 +19,7 @@ func (s *Server) newOutboundResponse(response protocol.Response) (*outboundRespo
 		return nil, fmt.Errorf("unsupported response operation %d", response.Operation)
 	}
 
-	var outbound *outboundResponse
-	if pooled := s.responsePool.Get(); pooled != nil {
-		if reusable, ok := pooled.(*outboundResponse); ok {
-			outbound = reusable
-			outbound.builder.Reset()
-		}
-	}
-	if outbound == nil {
-		outbound = &outboundResponse{builder: flatbuffers.NewBuilder(transport.InitialBufferSize)}
-	}
-	builder := outbound.builder
+	builder.Reset()
 	redleasev1.ServerResponseStart(builder)
 	redleasev1.ServerResponseAddRequestId(builder, response.RequestID)
 	switch response.Operation {
@@ -60,19 +44,9 @@ func (s *Server) newOutboundResponse(response protocol.Response) (*outboundRespo
 			builder, response.TTLMS,
 		))
 	case redleasev1.ClientOperationNONE:
-		s.recycleOutboundResponse(outbound)
 		return nil, fmt.Errorf("unsupported response operation %d", response.Operation)
 	}
 	root := redleasev1.ServerResponseEnd(builder)
 	redleasev1.FinishSizePrefixedServerResponseBuffer(builder, root)
-	frame := builder.FinishedBytes()
-	rootOffset := flatbuffers.GetUOffsetT(frame[flatbuffers.SizeUint32:]) +
-		flatbuffers.UOffsetT(flatbuffers.SizeUint32)
-	outbound.message.Init(frame, rootOffset)
-	return outbound, nil
-}
-
-func (s *Server) recycleOutboundResponse(outbound *outboundResponse) {
-	outbound.message = redleasev1.ServerResponse{}
-	s.responsePool.Put(outbound)
+	return builder.FinishedBytes(), nil
 }

@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	flatbuffers "github.com/google/flatbuffers/go"
+
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
@@ -183,6 +185,7 @@ func BenchmarkServerAcquireReleaseQueue(b *testing.B) {
 	s.phase.Store(uint32(phaseActive))
 
 	session := newOperationTestSession(s, 2)
+	builder := flatbuffers.NewBuilder(transport.InitialBufferSize)
 	b.ReportAllocs()
 	b.ResetTimer()
 
@@ -195,12 +198,12 @@ func BenchmarkServerAcquireReleaseQueue(b *testing.B) {
 			leaseID:        id,
 			requestedTTLMS: uint64(ProtocolMaxTTL / time.Millisecond),
 		})
-		if status := receiveBenchmarkOperationResponse(b, s, session).Status; status != redleasev1.LeaseStatusOK {
+		if status := receiveBenchmarkOperationResponse(b, session, builder).Status; status != redleasev1.LeaseStatusOK {
 			b.Fatalf("Acquire status = %s", status)
 		}
 
 		dispatchTestOperation(b, s, session, operation{kind: operationRelease, key: key, leaseID: id})
-		if status := receiveBenchmarkOperationResponse(b, s, session).Status; status != redleasev1.LeaseStatusOK {
+		if status := receiveBenchmarkOperationResponse(b, session, builder).Status; status != redleasev1.LeaseStatusOK {
 			b.Fatalf("Release status = %s", status)
 		}
 	}
@@ -208,18 +211,21 @@ func BenchmarkServerAcquireReleaseQueue(b *testing.B) {
 
 func receiveBenchmarkOperationResponse(
 	b *testing.B,
-	s *Server,
 	session *connectionSession,
+	builder *flatbuffers.Builder,
 ) protocol.Response {
 	b.Helper()
 	for {
-		outbound, ok := session.respQueue.TryDequeue()
+		queued, ok := session.respQueue.TryDequeue()
 		if !ok {
 			<-session.respQueue.Ready()
 			continue
 		}
-		response, err := transport.DecodeResponse(outbound.message.Table().Bytes)
-		s.recycleOutboundResponse(outbound)
+		frame, err := encodeResponse(builder, queued)
+		if err != nil {
+			b.Fatalf("encode queued operation response: %v", err)
+		}
+		response, err := transport.DecodeResponse(frame)
 		if err != nil {
 			b.Fatalf("decode queued operation response: %v", err)
 		}

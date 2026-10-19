@@ -2,9 +2,12 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
+
+	flatbuffers "github.com/google/flatbuffers/go"
 
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/mpscring"
@@ -12,8 +15,8 @@ import (
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
 
-func TestOutboundResponseRoundTrip(t *testing.T) {
-	s := newTestServer(t, 1_000, 1)
+func TestEncodeResponseRoundTrip(t *testing.T) {
+	builder := flatbuffers.NewBuilder(transport.InitialBufferSize)
 	tests := []protocol.Response{
 		{RequestID: 1, Operation: redleasev1.ClientOperationACQUIRE, Status: redleasev1.LeaseStatusALREADY_OWNED, TTLMS: 700},
 		{RequestID: 2, Operation: redleasev1.ClientOperationRENEW, Status: redleasev1.LeaseStatusSTALE, TTLMS: 500},
@@ -21,12 +24,11 @@ func TestOutboundResponseRoundTrip(t *testing.T) {
 		{RequestID: 4, Operation: redleasev1.ClientOperationGET_TTL, Status: redleasev1.LeaseStatusOK, TTLMS: 1_000},
 	}
 	for _, want := range tests {
-		outbound, err := s.newOutboundResponse(want)
+		frame, err := encodeResponse(builder, want)
 		if err != nil {
 			t.Fatalf("encode %+v: %v", want, err)
 		}
-		got, err := transport.DecodeResponse(outbound.message.Table().Bytes)
-		s.recycleOutboundResponse(outbound)
+		got, err := transport.DecodeResponse(frame)
 		if err != nil {
 			t.Fatalf("decode %+v: %v", want, err)
 		}
@@ -36,20 +38,47 @@ func TestOutboundResponseRoundTrip(t *testing.T) {
 	}
 }
 
-func TestOutboundResponseRejectsInvalidValues(t *testing.T) {
-	s := newTestServer(t, 1_000, 1)
+func TestEncodeResponseRejectsInvalidValues(t *testing.T) {
+	builder := flatbuffers.NewBuilder(transport.InitialBufferSize)
 	for _, response := range []protocol.Response{
 		{Operation: redleasev1.ClientOperationACQUIRE, Status: redleasev1.LeaseStatusKEY_LIMIT_REACHED + 1},
 		{Operation: redleasev1.ClientOperationGET_TTL + 1, Status: redleasev1.LeaseStatusOK},
 	} {
-		if outbound, err := s.newOutboundResponse(response); err == nil {
-			s.recycleOutboundResponse(outbound)
+		if _, err := encodeResponse(builder, response); err == nil {
 			t.Fatalf("accepted invalid response %+v", response)
 		}
 	}
 }
 
-func TestOutboundResponseIsCopiedBeforeRecycling(t *testing.T) {
+func TestInvalidQueuedResponseFailsServer(t *testing.T) {
+	s := newTestServer(t, 1_000, 1)
+	activateServer(t, s)
+	serverConn, clientConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = serverConn.Close()
+		_ = clientConn.Close()
+	})
+	session := &connectionSession{server: s, ctx: t.Context()}
+	builder := flatbuffers.NewBuilder(transport.InitialBufferSize)
+	err := session.bufferResponse(
+		transport.NewFrameWriter(serverConn),
+		builder,
+		protocol.Response{Operation: redleasev1.ClientOperationNONE},
+	)
+	if err == nil {
+		t.Fatal("invalid queued response was accepted")
+	}
+	select {
+	case fatalErr := <-s.Fatal():
+		if !errors.Is(fatalErr, ErrServerFailed) {
+			t.Fatalf("fatal error = %v, want ErrServerFailed", fatalErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("invalid queued response did not fail server")
+	}
+}
+
+func TestEncodedResponseIsCopiedBeforeBuilderReuse(t *testing.T) {
 	s := newTestServer(t, 1_000, 1)
 	activateServer(t, s)
 	serverConn, clientConn := net.Pipe()
@@ -62,15 +91,12 @@ func TestOutboundResponseIsCopiedBeforeRecycling(t *testing.T) {
 		ctx:    context.Background(),
 	}
 	writer := transport.NewFrameWriter(serverConn)
+	builder := flatbuffers.NewBuilder(transport.InitialBufferSize)
 	for _, want := range []protocol.Response{
 		{RequestID: 10, Operation: redleasev1.ClientOperationACQUIRE, Status: redleasev1.LeaseStatusOK, TTLMS: 500},
 		{RequestID: 11, Operation: redleasev1.ClientOperationRELEASE, Status: redleasev1.LeaseStatusOK},
 	} {
-		outbound, err := s.newOutboundResponse(want)
-		if err != nil {
-			t.Fatalf("encode response: %v", err)
-		}
-		if err := session.bufferResponse(writer, outbound); err != nil {
+		if err := session.bufferResponse(writer, builder, want); err != nil {
 			t.Fatalf("buffer response: %v", err)
 		}
 	}
@@ -103,7 +129,7 @@ func TestEnqueueResponseWaitsForQueueSpace(t *testing.T) {
 	session := &connectionSession{
 		server:    s,
 		ctx:       t.Context(),
-		respQueue: mpscring.NewNotifying[*outboundResponse](2),
+		respQueue: mpscring.NewNotifying[protocol.Response](2),
 	}
 	for requestID := uint64(1); requestID <= 2; requestID++ {
 		if !session.enqueueResponse(releaseResponse(requestID, redleasev1.LeaseStatusOK)) {
@@ -121,11 +147,10 @@ func TestEnqueueResponseWaitsForQueueSpace(t *testing.T) {
 	case <-time.After(10 * time.Millisecond):
 	}
 
-	first, ok := session.respQueue.TryDequeue()
+	_, ok := session.respQueue.TryDequeue()
 	if !ok {
 		t.Fatal("dequeue first response")
 	}
-	s.recycleOutboundResponse(first)
 	select {
 	case enqueued := <-done:
 		if !enqueued {
@@ -136,11 +161,10 @@ func TestEnqueueResponseWaitsForQueueSpace(t *testing.T) {
 	}
 
 	for {
-		response, ok := session.respQueue.TryDequeue()
+		_, ok := session.respQueue.TryDequeue()
 		if !ok {
 			break
 		}
-		s.recycleOutboundResponse(response)
 	}
 }
 
@@ -148,19 +172,16 @@ func TestDiscardResponsesDrainsQueue(t *testing.T) {
 	s := newTestServer(t, 1_000, 1)
 	session := &connectionSession{
 		server:        s,
-		respQueue:     mpscring.NewNotifying[*outboundResponse](responseQueueCapacity),
+		respQueue:     mpscring.NewNotifying[protocol.Response](responseQueueCapacity),
 		responsesDone: make(chan struct{}),
 	}
 	for requestID := uint64(1); requestID <= 2; requestID++ {
-		outbound, err := s.newOutboundResponse(protocol.Response{
+		response := protocol.Response{
 			RequestID: requestID,
 			Operation: redleasev1.ClientOperationRELEASE,
 			Status:    redleasev1.LeaseStatusOK,
-		})
-		if err != nil {
-			t.Fatalf("encode response: %v", err)
 		}
-		if !session.respQueue.TryEnqueue(outbound) {
+		if !session.respQueue.TryEnqueue(response) {
 			t.Fatal("enqueue response failed")
 		}
 	}
