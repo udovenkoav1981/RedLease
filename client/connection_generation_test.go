@@ -425,9 +425,9 @@ type testPendingRequest struct {
 func submitTestRequest(
 	replica *replicaConn,
 	ctx context.Context,
-	request *outboundConnectionRequest,
+	request outboundConnectionRequest,
 ) (*testPendingRequest, error) {
-	requestID := request.request.RequestId()
+	requestID := request.requestID
 	result := make(chan replicaResponse, 1)
 	if err := replica.submitForOperation(ctx, request, result); err != nil {
 		return nil, err
@@ -453,7 +453,7 @@ func (f *testPendingRequest) await(ctx context.Context) (protocol.Response, erro
 func callTestRequest(
 	replica *replicaConn,
 	ctx context.Context,
-	request *outboundConnectionRequest,
+	request outboundConnectionRequest,
 ) (protocol.Response, error) {
 	pending, err := submitTestRequest(replica, ctx, request)
 	if err != nil {
@@ -662,7 +662,7 @@ func newTestStreamGenerationWithOptions(
 		index:    0,
 		ctx:      replicaContext,
 		cancel:   cancelReplica,
-		reqQueue: mpscring.NewNotifying[*outboundConnectionRequest](reqQueueCapacity),
+		reqQueue: mpscring.NewNotifying[outboundConnectionRequest](reqQueueCapacity),
 		pending:  newPendingShards(),
 	}
 	for _, shard := range replica.pending {
@@ -683,7 +683,7 @@ func newTestStreamGenerationWithOptions(
 
 func startStreamCall(
 	generation *connectionGeneration,
-	request *outboundConnectionRequest,
+	request outboundConnectionRequest,
 ) <-chan connectionCallResult {
 	return startStreamCallWithContext(generation, context.Background(), request)
 }
@@ -691,7 +691,7 @@ func startStreamCall(
 func startStreamCallWithContext(
 	generation *connectionGeneration,
 	ctx context.Context,
-	request *outboundConnectionRequest,
+	request outboundConnectionRequest,
 ) <-chan connectionCallResult {
 	result := make(chan connectionCallResult, 1)
 	go func() {
@@ -704,7 +704,7 @@ func startStreamCallWithContext(
 func startStreamSubmit(
 	generation *connectionGeneration,
 	ctx context.Context,
-	request *outboundConnectionRequest,
+	request outboundConnectionRequest,
 ) <-chan streamSubmitResult {
 	result := make(chan streamSubmitResult, 1)
 	go func() {
@@ -759,7 +759,7 @@ func assertTransportCause(t *testing.T, err, cause error) {
 
 var testRequestClient Client
 
-func acquireStreamRequest(key uint64) *outboundConnectionRequest {
+func acquireStreamRequest(key uint64) outboundConnectionRequest {
 	return testRequestClient.newAcquireRequest(key, 0, 0)
 }
 

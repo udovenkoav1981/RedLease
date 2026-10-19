@@ -75,35 +75,58 @@ type replicaResponse struct {
 	result    connectionCallResult
 }
 
+// outboundConnectionRequest is an owned, unencoded request. The connection
+// writer encodes it into its single reusable builder, so callers never hold
+// FlatBuffers backing memory.
 type outboundConnectionRequest struct {
-	request redleasev1.ClientRequest
-	builder *flatbuffers.Builder
+	requestID uint64
+	key       uint64
+	sequence  uint64
+	ttlMS     uint64
+	clientID  uint32
+	bootID    uint32
+	operation redleasev1.ClientOperation
 }
 
-func (c *Client) newOutboundRequest() *outboundConnectionRequest {
-	if pooled := c.requestPool.Get(); pooled != nil {
-		if outbound, ok := pooled.(*outboundConnectionRequest); ok {
-			outbound.builder.Reset()
-			return outbound
-		}
+// encodeRequest serializes one request into the connection writer's reusable
+// builder. The returned frame remains valid until the next Reset.
+func encodeRequest(builder *flatbuffers.Builder, request *outboundConnectionRequest) []byte {
+	builder.Reset()
+	redleasev1.ClientRequestStart(builder)
+	redleasev1.ClientRequestAddRequestId(builder, request.requestID)
+	redleasev1.ClientRequestAddOperation(builder, request.operation)
+	switch request.operation {
+	case redleasev1.ClientOperationACQUIRE:
+		redleasev1.ClientRequestAddAcquire(builder, redleasev1.CreateAcquireRequest(
+			builder,
+			request.key,
+			request.clientID,
+			request.bootID,
+			request.sequence,
+			request.ttlMS,
+		))
+	case redleasev1.ClientOperationRENEW:
+		redleasev1.ClientRequestAddRenew(builder, redleasev1.CreateRenewRequest(
+			builder,
+			request.key,
+			request.clientID,
+			request.bootID,
+			request.sequence,
+			request.ttlMS,
+		))
+	case redleasev1.ClientOperationRELEASE:
+		redleasev1.ClientRequestAddRelease(builder, redleasev1.CreateReleaseRequest(
+			builder,
+			request.key,
+			request.clientID,
+			request.bootID,
+			request.sequence,
+		))
+	case redleasev1.ClientOperationNONE, redleasev1.ClientOperationGET_TTL:
 	}
-	return &outboundConnectionRequest{
-		builder: flatbuffers.NewBuilder(transport.InitialBufferSize),
-	}
-}
-
-func (*Client) finishOutboundRequest(outbound *outboundConnectionRequest) {
-	root := redleasev1.ClientRequestEnd(outbound.builder)
-	redleasev1.FinishSizePrefixedClientRequestBuffer(outbound.builder, root)
-	frame := outbound.builder.FinishedBytes()
-	rootOffset := flatbuffers.GetUOffsetT(frame[flatbuffers.SizeUint32:]) +
-		flatbuffers.UOffsetT(flatbuffers.SizeUint32)
-	outbound.request.Init(frame, rootOffset)
-}
-
-func (c *Client) recycleOutboundRequest(outbound *outboundConnectionRequest) {
-	outbound.request = redleasev1.ClientRequest{}
-	c.requestPool.Put(outbound)
+	root := redleasev1.ClientRequestEnd(builder)
+	redleasev1.FinishSizePrefixedClientRequestBuffer(builder, root)
+	return builder.FinishedBytes()
 }
 
 type connectionGeneration struct {
@@ -175,6 +198,7 @@ func (c *replicaConn) completeResponses(shard *pendingShard) {
 }
 
 func (g *connectionGeneration) sendRequests() {
+	builder := flatbuffers.NewBuilder(transport.InitialBufferSize)
 	for {
 		select {
 		case <-g.done:
@@ -193,13 +217,10 @@ func (g *connectionGeneration) sendRequests() {
 		for {
 			select {
 			case <-g.done:
-				g.replica.client.recycleOutboundRequest(outbound)
 				return
 			default:
 			}
-			err := g.connection.Writer.BufferFrame(outbound.request.Table().Bytes)
-			g.replica.client.recycleOutboundRequest(outbound)
-			if err != nil {
+			if err := g.connection.Writer.BufferFrame(encodeRequest(builder, &outbound)); err != nil {
 				g.terminate(fmt.Errorf("send: %w", err))
 				return
 			}
@@ -257,11 +278,9 @@ func (g *connectionGeneration) terminate(cause error) {
 
 func (c *replicaConn) discardQueuedRequests() {
 	for {
-		outbound, ok := c.reqQueue.TryDequeue()
-		if !ok {
+		if _, ok := c.reqQueue.TryDequeue(); !ok {
 			return
 		}
-		c.client.recycleOutboundRequest(outbound)
 	}
 }
 
