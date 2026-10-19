@@ -225,20 +225,14 @@ func (l *Lease) renewCancellationError(callerContext context.Context) error {
 	return nil
 }
 
-func (c *Client) newRenewRequest(key, sequence, ttlMS uint64) *outboundConnectionRequest {
-	outbound := c.newOutboundRequest()
-	builder := outbound.builder
-	redleasev1.ClientRequestStart(builder)
-	redleasev1.ClientRequestAddRequestId(builder, c.nextRequestID.Add(1))
-	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationRENEW)
-	redleasev1.ClientRequestAddRenew(builder, redleasev1.CreateRenewRequest(
-		builder,
-		key,
-		c.clientID,
-		c.bootID,
-		sequence,
-		ttlMS,
-	))
-	c.finishOutboundRequest(outbound)
-	return outbound
+func (c *Client) newRenewRequest(key, sequence, ttlMS uint64) outboundConnectionRequest {
+	return outboundConnectionRequest{
+		requestID: c.nextRequestID.Add(1),
+		key:       key,
+		sequence:  sequence,
+		ttlMS:     ttlMS,
+		clientID:  c.clientID,
+		bootID:    c.bootID,
+		operation: redleasev1.ClientOperationRENEW,
+	}
 }

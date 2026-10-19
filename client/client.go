@@ -38,7 +38,6 @@ type Client struct {
 	closeOnce sync.Once
 	closeErr  error
 
-	requestPool          sync.Pool
 	replicaResponsesPool sync.Pool
 	responseTimerPool    sync.Pool
 }

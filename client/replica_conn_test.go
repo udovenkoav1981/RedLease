@@ -333,7 +333,7 @@ func newReplicaFakeStream() *fakeLeaseClientStream {
 
 func startReplicaCall(
 	connection *replicaConn,
-	request *outboundConnectionRequest,
+	request outboundConnectionRequest,
 ) <-chan connectionCallResult {
 	result := make(chan connectionCallResult, 1)
 	go func() {

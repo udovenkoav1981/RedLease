@@ -64,7 +64,7 @@ type replicaConn struct {
 	closed     bool
 	changed    chan struct{}
 
-	reqQueue *mpscring.NotifyingRing[*outboundConnectionRequest]
+	reqQueue *mpscring.NotifyingRing[outboundConnectionRequest]
 	pending  [pendingShardCount]*pendingShard
 
 	manager           sync.WaitGroup
@@ -90,7 +90,7 @@ func newReplicaConn(
 		ctx:      ctx,
 		cancel:   cancel,
 		changed:  make(chan struct{}),
-		reqQueue: mpscring.NewNotifying[*outboundConnectionRequest](reqQueueCapacity),
+		reqQueue: mpscring.NewNotifying[outboundConnectionRequest](reqQueueCapacity),
 		pending:  newPendingShards(),
 	}
 
@@ -104,13 +104,12 @@ func newReplicaConn(
 	return connection
 }
 
-func (c *replicaConn) submitNoResponse(request *outboundConnectionRequest) error {
-	requestID := request.request.RequestId()
+func (c *replicaConn) submitNoResponse(request outboundConnectionRequest) error {
+	requestID := request.requestID
 	shard := c.pending[pendingShardIndex(requestID)]
 	shard.mu.Lock()
 	if c.ctx.Err() != nil {
 		shard.mu.Unlock()
-		c.client.recycleOutboundRequest(request)
 		return &replicaUnavailableError{cause: errReplicaClosed}
 	}
 	if c.reqQueue.TryEnqueue(request) {
@@ -118,26 +117,23 @@ func (c *replicaConn) submitNoResponse(request *outboundConnectionRequest) error
 		return nil
 	}
 	shard.mu.Unlock()
-	c.client.recycleOutboundRequest(request)
 	return ErrSendQueueFull
 }
 
 func (c *replicaConn) submitForOperation(
 	ctx context.Context,
-	request *outboundConnectionRequest,
+	request outboundConnectionRequest,
 	operation chan<- replicaResponse,
 ) error {
 	if err := ctx.Err(); err != nil {
-		c.client.recycleOutboundRequest(request)
 		return err
 	}
 
-	requestID := request.request.RequestId()
+	requestID := request.requestID
 	shard := c.pending[pendingShardIndex(requestID)]
 	shard.mu.Lock()
 	if c.ctx.Err() != nil {
 		shard.mu.Unlock()
-		c.client.recycleOutboundRequest(request)
 		return &replicaUnavailableError{cause: errReplicaClosed}
 	}
 	shard.pending[requestID] = operation
@@ -147,7 +143,6 @@ func (c *replicaConn) submitForOperation(
 	}
 	delete(shard.pending, requestID)
 	shard.mu.Unlock()
-	c.client.recycleOutboundRequest(request)
 	return ErrSendQueueFull
 }
 

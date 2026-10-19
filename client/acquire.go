@@ -245,37 +245,25 @@ func bestAcquireQuorum(
 	return validities[len(validities)-quorumSize], true
 }
 
-func (c *Client) newAcquireRequest(key, sequence, ttlMS uint64) *outboundConnectionRequest {
-	outbound := c.newOutboundRequest()
-	builder := outbound.builder
-	redleasev1.ClientRequestStart(builder)
-	redleasev1.ClientRequestAddRequestId(builder, c.nextRequestID.Add(1))
-	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationACQUIRE)
-	redleasev1.ClientRequestAddAcquire(builder, redleasev1.CreateAcquireRequest(
-		builder,
-		key,
-		c.clientID,
-		c.bootID,
-		sequence,
-		ttlMS,
-	))
-	c.finishOutboundRequest(outbound)
-	return outbound
+func (c *Client) newAcquireRequest(key, sequence, ttlMS uint64) outboundConnectionRequest {
+	return outboundConnectionRequest{
+		requestID: c.nextRequestID.Add(1),
+		key:       key,
+		sequence:  sequence,
+		ttlMS:     ttlMS,
+		clientID:  c.clientID,
+		bootID:    c.bootID,
+		operation: redleasev1.ClientOperationACQUIRE,
+	}
 }
 
-func (c *Client) newReleaseRequest(key, sequence uint64) *outboundConnectionRequest {
-	outbound := c.newOutboundRequest()
-	builder := outbound.builder
-	redleasev1.ClientRequestStart(builder)
-	redleasev1.ClientRequestAddRequestId(builder, c.nextRequestID.Add(1))
-	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationRELEASE)
-	redleasev1.ClientRequestAddRelease(builder, redleasev1.CreateReleaseRequest(
-		builder,
-		key,
-		c.clientID,
-		c.bootID,
-		sequence,
-	))
-	c.finishOutboundRequest(outbound)
-	return outbound
+func (c *Client) newReleaseRequest(key, sequence uint64) outboundConnectionRequest {
+	return outboundConnectionRequest{
+		requestID: c.nextRequestID.Add(1),
+		key:       key,
+		sequence:  sequence,
+		clientID:  c.clientID,
+		bootID:    c.bootID,
+		operation: redleasev1.ClientOperationRELEASE,
+	}
 }
