@@ -220,11 +220,12 @@ func candidateValidUntil(operationStart time.Time, ttlMS uint64) time.Time {
 	return operationStart.Add(time.Duration(ttlMS-safetyMarginMS) * time.Millisecond)
 }
 
-func (c *Client) newAcquireRequest(key, sequence, ttlMS uint64) *outboundConnectionRequest {
+func (c *Client) newAcquireRequest(key, sequence, ttlMS uint64) (uint64, *outboundConnectionRequest) {
+	requestID := c.nextRequestID.Add(1)
 	outbound := c.newOutboundRequest()
 	builder := outbound.builder
 	redleasev1.ClientRequestStart(builder)
-	redleasev1.ClientRequestAddRequestId(builder, c.nextRequestID.Add(1))
+	redleasev1.ClientRequestAddRequestId(builder, requestID)
 	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationACQUIRE)
 	redleasev1.ClientRequestAddAcquire(builder, redleasev1.CreateAcquireRequest(
 		builder,
@@ -235,14 +236,15 @@ func (c *Client) newAcquireRequest(key, sequence, ttlMS uint64) *outboundConnect
 		ttlMS,
 	))
 	c.finishOutboundRequest(outbound)
-	return outbound
+	return requestID, outbound
 }
 
-func (c *Client) newRenewRequest(key, sequence, ttlMS uint64) *outboundConnectionRequest {
+func (c *Client) newRenewRequest(key, sequence, ttlMS uint64) (uint64, *outboundConnectionRequest) {
+	requestID := c.nextRequestID.Add(1)
 	outbound := c.newOutboundRequest()
 	builder := outbound.builder
 	redleasev1.ClientRequestStart(builder)
-	redleasev1.ClientRequestAddRequestId(builder, c.nextRequestID.Add(1))
+	redleasev1.ClientRequestAddRequestId(builder, requestID)
 	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationRENEW)
 	redleasev1.ClientRequestAddRenew(builder, redleasev1.CreateRenewRequest(
 		builder,
@@ -253,14 +255,15 @@ func (c *Client) newRenewRequest(key, sequence, ttlMS uint64) *outboundConnectio
 		ttlMS,
 	))
 	c.finishOutboundRequest(outbound)
-	return outbound
+	return requestID, outbound
 }
 
-func (c *Client) newReleaseRequest(key, sequence uint64) *outboundConnectionRequest {
+func (c *Client) newReleaseRequest(key, sequence uint64) (uint64, *outboundConnectionRequest) {
+	requestID := c.nextRequestID.Add(1)
 	outbound := c.newOutboundRequest()
 	builder := outbound.builder
 	redleasev1.ClientRequestStart(builder)
-	redleasev1.ClientRequestAddRequestId(builder, c.nextRequestID.Add(1))
+	redleasev1.ClientRequestAddRequestId(builder, requestID)
 	redleasev1.ClientRequestAddOperation(builder, redleasev1.ClientOperationRELEASE)
 	redleasev1.ClientRequestAddRelease(builder, redleasev1.CreateReleaseRequest(
 		builder,
@@ -270,7 +273,7 @@ func (c *Client) newReleaseRequest(key, sequence uint64) *outboundConnectionRequ
 		sequence,
 	))
 	c.finishOutboundRequest(outbound)
-	return outbound
+	return requestID, outbound
 }
 
 func (c *Client) newOutboundRequest() *outboundConnectionRequest {
@@ -288,8 +291,4 @@ func (c *Client) newOutboundRequest() *outboundConnectionRequest {
 func (*Client) finishOutboundRequest(outbound *outboundConnectionRequest) {
 	root := redleasev1.ClientRequestEnd(outbound.builder)
 	redleasev1.FinishSizePrefixedClientRequestBuffer(outbound.builder, root)
-	frame := outbound.builder.FinishedBytes()
-	rootOffset := flatbuffers.GetUOffsetT(frame[flatbuffers.SizeUint32:]) +
-		flatbuffers.UOffsetT(flatbuffers.SizeUint32)
-	outbound.request.Init(frame, rootOffset)
 }

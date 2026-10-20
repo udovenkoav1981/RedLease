@@ -10,7 +10,6 @@ import (
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
-	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/protocol"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
@@ -60,7 +59,6 @@ type connectionFuture struct {
 }
 
 type outboundConnectionRequest struct {
-	request redleasev1.ClientRequest
 	builder *flatbuffers.Builder
 }
 
@@ -100,9 +98,12 @@ func (c *Client) awaitResponse(ctx context.Context, future *connectionFuture) (p
 
 // submit registers the waiter before putting the request into the persistent
 // FIFO. The queue insertion is the ordering barrier for a cleanup Release.
-func (c *Client) submit(request *outboundConnectionRequest) (*connectionFuture, error) {
-	future := c.acquireFuture(request.request.RequestId())
-	if err := c.enqueue(request, future.result); err != nil {
+func (c *Client) submit(
+	requestID uint64,
+	request *outboundConnectionRequest,
+) (*connectionFuture, error) {
+	future := c.acquireFuture(requestID)
+	if err := c.enqueue(requestID, request, future.result); err != nil {
 		c.releaseFuture(future)
 		return nil, err
 	}
@@ -130,12 +131,15 @@ func (c *Client) releaseFuture(future *connectionFuture) {
 	c.futurePool.Put(future)
 }
 
-func (c *Client) submitNoResponse(request *outboundConnectionRequest) error {
-	return c.enqueue(request, nil)
+func (c *Client) submitNoResponse(requestID uint64, request *outboundConnectionRequest) error {
+	return c.enqueue(requestID, request, nil)
 }
 
-func (c *Client) enqueue(request *outboundConnectionRequest, result chan connectionResult) error {
-	requestID := request.request.RequestId()
+func (c *Client) enqueue(
+	requestID uint64,
+	request *outboundConnectionRequest,
+	result chan connectionResult,
+) error {
 	shard := c.pending[pendingShardIndex(requestID)]
 	shard.mu.Lock()
 	if c.ctx.Err() != nil {
@@ -242,7 +246,7 @@ func (c *Client) sendRequests(writer *transport.FrameWriter, stop <-chan struct{
 				return nil
 			default:
 			}
-			err := writer.BufferFrame(outbound.request.Table().Bytes)
+			err := writer.BufferFrame(outbound.builder.FinishedBytes())
 			c.recycleOutboundRequest(outbound)
 			if err != nil {
 				return fmt.Errorf("send: %w", err)
@@ -290,6 +294,5 @@ func (c *Client) discardQueuedRequests() {
 }
 
 func (c *Client) recycleOutboundRequest(request *outboundConnectionRequest) {
-	request.request = redleasev1.ClientRequest{}
 	c.requestPool.Put(request)
 }
