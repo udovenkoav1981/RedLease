@@ -57,9 +57,9 @@ func (r *replicaResponses) release() {
 func (r *replicaResponses) submit(
 	ctx context.Context,
 	replica int,
-	request *outboundConnectionRequest,
+	request outboundConnectionRequest,
 ) error {
-	requestID := request.request.RequestId()
+	requestID := request.requestID
 	now := time.Now()
 	if r.timeBase.IsZero() {
 		r.timeBase = now
