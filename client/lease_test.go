@@ -8,7 +8,7 @@ import (
 
 func TestLeaseValidityUsesMonotonicTimeBoundary(t *testing.T) {
 	client := testLeaseClient()
-	lease := newLease(client, 0, uint64(1), 1_000)
+	lease := newLease(client, 0, uint64(1), 1_000, time.Now())
 	lease.setAcquireValidity(time.Now().Add(time.Second))
 
 	if lease.RemainingTTLms() == 0 {
@@ -26,7 +26,7 @@ func TestLeaseValidityUsesMonotonicTimeBoundary(t *testing.T) {
 
 func TestLeaseConfirmationCannotBeShortenedByOlderResponse(t *testing.T) {
 	client := testLeaseClient()
-	lease := newLease(client, 0, uint64(1), 1_000)
+	lease := newLease(client, 0, uint64(1), 1_000, time.Now())
 	now := time.Now()
 	later := now.Add(2 * time.Second)
 
@@ -41,7 +41,7 @@ func TestLeaseConfirmationCannotBeShortenedByOlderResponse(t *testing.T) {
 func TestLeaseGetterAndConcurrentState(t *testing.T) {
 	client := testLeaseClient()
 	key := uint64(1)
-	lease := newLease(client, 3, key, 1_000)
+	lease := newLease(client, 3, key, 1_000, time.Now())
 	lease.setAcquireValidity(time.Now().Add(time.Second))
 
 	const iterations = 1_000

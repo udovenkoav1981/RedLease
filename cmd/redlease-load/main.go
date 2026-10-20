@@ -37,6 +37,7 @@ type options struct {
 	targets         []string
 	etcdEndpoint    string
 	etcdPrefix      string
+	metricsListen   string
 	clientCounts    []int
 	leaseCounts     []int
 	duration        time.Duration
@@ -62,7 +63,7 @@ func main() {
 	}
 }
 
-func run(args []string, output, flagOutput io.Writer) error {
+func run(args []string, output, flagOutput io.Writer) (runErr error) {
 	config, err := parseOptions(args, flagOutput)
 	if err != nil {
 		return err
@@ -75,6 +76,22 @@ func run(args []string, output, flagOutput io.Writer) error {
 	defer cancelRun()
 
 	clientLogger := slog.New(slog.DiscardHandler)
+	metricsSource := &loadMetricsSource{}
+	if config.metricsListen != "" {
+		metricsLogger := slog.New(slog.NewTextHandler(flagOutput, nil))
+		metrics, metricsErr := startLoadMetricsEndpoint(
+			config.metricsListen,
+			metricsSource,
+			metricsLogger,
+		)
+		if metricsErr != nil {
+			return metricsErr
+		}
+		defer func() {
+			runErr = errors.Join(runErr, metrics.Close())
+		}()
+	}
+
 	var discovery *etcdTargetDiscovery
 	if config.etcdEndpoint != "" {
 		discoveryLogger := slog.New(slog.NewTextHandler(flagOutput, nil))
@@ -119,6 +136,7 @@ func run(args []string, output, flagOutput io.Writer) error {
 					&config,
 					clientLogger,
 					discovery,
+					metricsSource,
 				)
 				if caseErr != nil {
 					return fmt.Errorf("%s %s with %d clients and %d leases/client: %w",
@@ -145,6 +163,11 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	targets := flags.String("targets", "", "comma-separated addresses of already running TCP lock-servers")
 	etcdEndpoint := flags.String("etcd-endpoint", "", "etcd endpoint used to discover RedLease servers")
 	etcdPrefix := flags.String("etcd-prefix", "", "prefix for the five etcd server-slot keys")
+	metricsListen := flags.String(
+		"metrics-listen",
+		"",
+		"Prometheus HTTP listen address; empty disables the exporter",
+	)
 	clients := flags.String("clients", defaultClients, "comma-separated client counts")
 	leases := flags.String("leases-per-client", defaultLeases, "comma-separated concurrent lease counts per client")
 	duration := flags.Duration("duration", 5*time.Second, "measurement time per matrix cell")
@@ -186,6 +209,7 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 		targets:         serverTargets,
 		etcdEndpoint:    strings.TrimSpace(*etcdEndpoint),
 		etcdPrefix:      strings.TrimSpace(*etcdPrefix),
+		metricsListen:   strings.TrimSpace(*metricsListen),
 		clientCounts:    clientCounts,
 		leaseCounts:     leaseCounts,
 		duration:        *duration,

@@ -725,6 +725,26 @@ Client не логирует успешные `Acquire` и `Renew`, а такж�
 healing attempts также не логируются, чтобы штатные retry не создавали поток
 повторяющихся записей.
 
+### 7.2. Метрики client library
+
+Оба client package измеряют полную latency каждого публичного `Acquire`: от
+входа в метод до возврата результата приложению, включая синхронный cleanup,
+выполняемый перед возвратом. Результаты разделены на две фиксированные группы:
+`acquired` и `not_acquired`; прикладные ключи, адреса server и другие
+высококардинальные значения в labels не попадают.
+
+Hot path использует общий шардированный recorder из `internal/clientmetrics`.
+Sequence операции выбирает один из 64 shards; завершение `Acquire` выполняет
+два atomic increment: один для latency bucket и один для суммы microseconds.
+Mutex и heap allocations не используются. Snapshot суммирует shards только по
+запросу и доступен через `Client.MetricsSnapshot()`.
+
+Общий optional package `clientmetrics/prometheus` принимает как универсальный
+`client.Client`, так и `client1of1.Client`. Он экспортирует histogram
+`redlease_client_acquire_duration_seconds` с label
+`result="acquired|not_acquired"`, не использует global registry и не запускает
+HTTP endpoint.
+
 ## 8. Restart quarantine
 
 После crash/restart server теряет все RAM-only leases. Чтобы пустой server не

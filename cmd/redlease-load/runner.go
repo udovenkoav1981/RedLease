@@ -13,6 +13,7 @@ import (
 
 	"github.com/udovenkoav1981/RedLease/client"
 	"github.com/udovenkoav1981/RedLease/client1of1"
+	"github.com/udovenkoav1981/RedLease/clientmetrics"
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
 )
 
@@ -24,6 +25,7 @@ type loadLease interface {
 type loadClient interface {
 	WaitReady(ctx context.Context) error
 	Acquire(ctx context.Context, key, ttl uint64) (loadLease, error)
+	MetricsSnapshot() clientmetrics.Snapshot
 	Close() error
 }
 
@@ -31,6 +33,10 @@ type oneClient struct{ client *client1of1.Client }
 
 func (c oneClient) WaitReady(ctx context.Context) error { return c.client.WaitReady(ctx) }
 func (c oneClient) Close() error                        { return c.client.Close() }
+func (c oneClient) MetricsSnapshot() clientmetrics.Snapshot {
+	return c.client.MetricsSnapshot()
+}
+
 func (c oneClient) Acquire(ctx context.Context, key, ttl uint64) (loadLease, error) {
 	lease, err := c.client.Acquire(ctx, key, ttl)
 	if err != nil {
@@ -43,6 +49,10 @@ type quorumClient struct{ client *client.Client }
 
 func (c quorumClient) WaitReady(ctx context.Context) error { return c.client.WaitReady(ctx) }
 func (c quorumClient) Close() error                        { return c.client.Close() }
+func (c quorumClient) MetricsSnapshot() clientmetrics.Snapshot {
+	return c.client.MetricsSnapshot()
+}
+
 func (c quorumClient) Acquire(ctx context.Context, key, ttl uint64) (loadLease, error) {
 	lease, err := c.client.Acquire(ctx, key, ttl)
 	if err != nil {
@@ -109,6 +119,17 @@ func (c *reconfigurableLoadClient) Acquire(ctx context.Context, key, ttl uint64)
 		return nil, errLoadTargetsUnavailable
 	}
 	return generation.client.Acquire(ctx, key, ttl)
+}
+
+func (c *reconfigurableLoadClient) MetricsSnapshot() clientmetrics.Snapshot {
+	c.mu.Lock()
+	clients := make([]loadClient, 0, len(c.retired)+1)
+	clients = append(clients, c.retired...)
+	if current := c.current.Load(); current != nil {
+		clients = append(clients, current.client)
+	}
+	c.mu.Unlock()
+	return aggregateLoadClientMetrics(clients)
 }
 
 func (c *reconfigurableLoadClient) reconfigure(addresses []string) error {
@@ -293,6 +314,7 @@ func runCase(
 	config *options,
 	logger *slog.Logger,
 	discovery *etcdTargetDiscovery,
+	metricsSource *loadMetricsSource,
 ) (result caseResult, runErr error) {
 	var clients []loadClient
 	var stopTargetWatch func()
@@ -342,6 +364,7 @@ func runCase(
 	if err != nil {
 		return caseResult{}, err
 	}
+	metricsSource.setClients(clients)
 	var nonce [8]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return caseResult{}, fmt.Errorf("generate key prefix: %w", err)

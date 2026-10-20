@@ -44,12 +44,18 @@ func (c *Client) Acquire(
 	key uint64,
 	ttlMS uint64,
 ) (*Lease, error) {
+	operationStart := time.Now()
+	var sequence uint64
+	acquired := false
+	defer func() {
+		c.metrics.ObserveAcquire(sequence, time.Since(operationStart), acquired)
+	}()
+
 	if err := c.acquireCancellationError(ctx); err != nil {
 		return nil, &notAcquiredError{cause: err}
 	}
-	sequence := c.nextSequence.Add(1)
-	lease := newLease(c, sequence, key, ttlMS)
-	operationStart := lease.now
+	sequence = c.nextSequence.Add(1)
+	lease := newLease(c, sequence, key, ttlMS, operationStart)
 	serverCount := len(c.replicas)
 	quorumSize := c.quorum.size()
 
@@ -124,6 +130,7 @@ func (c *Client) Acquire(
 					}
 
 					lease.setAcquireValidity(validUntil)
+					acquired = true
 					if responses.remaining != 0 {
 						responsesOwned = false
 						go c.collectRemainingAcquireResults(

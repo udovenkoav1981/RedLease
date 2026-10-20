@@ -74,16 +74,23 @@ func (c *Client) Acquire(
 	key uint64,
 	ttlMS uint64,
 ) (*Lease, error) {
+	operationStart := time.Now()
+	var sequence uint64
+	acquired := false
+	defer func() {
+		c.metrics.ObserveAcquire(sequence, time.Since(operationStart), acquired)
+	}()
+
 	if err := c.cancellationError(ctx); err != nil {
 		return nil, &operationError{kind: ErrNotAcquired, cause: err}
 	}
-	sequence := c.nextSequence.Add(1)
+	sequence = c.nextSequence.Add(1)
 
 	lease := Lease{
 		client:    c,
 		sequence:  sequence,
 		key:       key,
-		now:       time.Now(),
+		now:       operationStart,
 		lifecycle: leaseActive,
 	}
 
@@ -97,6 +104,7 @@ func (c *Client) Acquire(
 		}
 	}
 	if err == nil && accepted {
+		acquired = true
 		return &lease, nil
 	}
 

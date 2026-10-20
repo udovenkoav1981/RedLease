@@ -39,6 +39,12 @@ func TestClientAndServerEndToEnd(t *testing.T) {
 	if conflictingLease != nil {
 		t.Fatal("conflicting Acquire returned a lease")
 	}
+	if got := firstClient.MetricsSnapshot().AcquireLatency.Acquired.Count; got != 1 {
+		t.Fatalf("successful Acquire metric = %d, want 1", got)
+	}
+	if got := secondClient.MetricsSnapshot().AcquireLatency.NotAcquired.Count; got != 1 {
+		t.Fatalf("failed Acquire metric = %d, want 1", got)
+	}
 
 	ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
 	err = firstLease.Renew(ctx, 1000)

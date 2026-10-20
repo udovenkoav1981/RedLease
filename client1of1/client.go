@@ -10,6 +10,7 @@ import (
 
 	"github.com/udovenkoav1981/RedLease/internal/backoff"
 	"github.com/udovenkoav1981/RedLease/internal/bootid"
+	internalmetrics "github.com/udovenkoav1981/RedLease/internal/clientmetrics"
 	"github.com/udovenkoav1981/RedLease/internal/mpscring"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
@@ -48,6 +49,7 @@ type Client struct {
 
 	requestPool       sync.Pool
 	responseTimerPool sync.Pool
+	metrics           internalmetrics.Recorder
 }
 
 // New creates a client and starts connecting to its lock-server. It does not

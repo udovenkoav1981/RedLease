@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/udovenkoav1981/RedLease/clientmetrics"
 )
 
 func TestParseOptions(t *testing.T) {
@@ -14,6 +16,7 @@ func TestParseOptions(t *testing.T) {
 	config, err := parseOptions([]string{
 		"-client=client", "-quorum=3/5", "-clients=2, 4", "-leases-per-client=16,32",
 		"-duration=200ms", "-hold=5ms", "-ttl-ms=500",
+		"-metrics-listen=127.0.0.1:17390",
 		"-targets=127.0.0.1:17379,127.0.0.1:17380,127.0.0.1:17381,127.0.0.1:17382,127.0.0.1:17383",
 	}, &output)
 	if err != nil {
@@ -22,7 +25,8 @@ func TestParseOptions(t *testing.T) {
 	if config.clientKind != "client" || config.quorum != "3/5" ||
 		len(config.clientCounts) != 2 || config.clientCounts[0] != 2 || config.clientCounts[1] != 4 ||
 		len(config.leaseCounts) != 2 || config.leaseCounts[0] != 16 || config.leaseCounts[1] != 32 ||
-		len(config.targets) != 5 || config.settleDuration() != 1600*time.Millisecond {
+		len(config.targets) != 5 || config.metricsListen != "127.0.0.1:17390" ||
+		config.settleDuration() != 1600*time.Millisecond {
 		t.Fatalf("unexpected config: %+v", config)
 	}
 	scenarios, err := config.scenarios()
@@ -150,6 +154,10 @@ type fakeLoadClient struct{ releases *atomic.Uint64 }
 
 func (c fakeLoadClient) WaitReady(context.Context) error { return nil }
 func (c fakeLoadClient) Close() error                    { return nil }
+func (c fakeLoadClient) MetricsSnapshot() clientmetrics.Snapshot {
+	return clientmetrics.Snapshot{}
+}
+
 func (c fakeLoadClient) Acquire(context.Context, uint64, uint64) (loadLease, error) {
 	return fakeLoadLease(c), nil
 }

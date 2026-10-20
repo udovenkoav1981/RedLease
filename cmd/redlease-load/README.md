@@ -52,6 +52,25 @@ go run ./cmd/redlease-load -targets=127.0.0.1:17379 \
   -clients=2,4 -leases-per-client=16,32 -duration=2s
 ```
 
+Чтобы во время прогона собирать клиентскую latency через Prometheus, включите
+отдельный HTTP endpoint:
+
+```sh
+go run ./cmd/redlease-load -targets=127.0.0.1:17379 \
+  -clients=1 -leases-per-client=2048 -duration=10s \
+  -metrics-listen=127.0.0.1:17390
+```
+
+Метрики доступны по `http://127.0.0.1:17390/metrics`. Если
+`-metrics-listen` не задан, endpoint не запускается. Histogram
+`redlease_client_acquire_duration_seconds` агрегирует все клиенты текущей
+точки матрицы и разделяет результаты label `result="acquired"` и
+`result="not_acquired"`. При переходе к следующей точке создаётся новый набор
+клиентов, поэтому histogram начинается заново; Prometheus рассматривает это
+как counter reset. При etcd-reconfigure статистика поколений суммируется до
+конца текущей точки. Endpoint также экспортирует стандартные `go_*` и
+`process_*` metrics.
+
 Матрица по умолчанию: 2/4/8/16/32 клиента × 16/32/64/128/256 одновременных
 lease на клиента, обе реализации в топологии 1/1. Каждый worker циклически
 захватывает новый уникальный key, держит lease в течение `-hold` (10 мс) и

@@ -217,6 +217,23 @@ if lease.RemainingTTLms() > 0 {
 операции вызывайте `Lease.Renew` до истечения текущего quorum и контролируйте
 `Lease.RemainingTTLms()` в обоих клиентах.
 
+Оба client package собирают histogram полной latency вызова `Acquire`, отдельно
+для успешных и неуспешных результатов. Snapshot доступен напрямую через
+`client.MetricsSnapshot()`. Один общий Prometheus collector работает с обеими
+реализациями клиента:
+
+```go
+collector, err := clientmetricsprometheus.NewCollector(client)
+registry.MustRegister(collector)
+```
+
+Collector экспортирует
+`redlease_client_acquire_duration_seconds{result="acquired|not_acquired"}` и,
+как server collector, самостоятельно не регистрируется и не запускает HTTP
+endpoint. Утилита `redlease-load` может опубликовать агрегированную histogram
+всех клиентов текущей точки матрицы через флаг
+`-metrics-listen=127.0.0.1:17390`.
+
 `Lease.Release()` немедленно делает локальный lease невалидным и выполняет
 сетевое освобождение асинхронно. `client1of1` однократно пытается поставить
 `Release` в send queue. Оставшийся в очереди запрос будет отправлен после

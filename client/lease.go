@@ -33,13 +33,19 @@ type Lease struct {
 	releaseDone chan struct{}
 }
 
-func newLease(client *Client, sequence, key, requestedTTLMS uint64) *Lease {
+func newLease(
+	client *Client,
+	sequence uint64,
+	key uint64,
+	requestedTTLMS uint64,
+	now time.Time,
+) *Lease {
 	return &Lease{
 		client:         client,
 		sequence:       sequence,
 		key:            key,
 		requestedTTLMS: requestedTTLMS,
-		now:            time.Now(),
+		now:            now,
 		confirmedUntil: make([]time.Time, len(client.replicas)),
 		lifecycle:      leaseActive,
 		releaseDone:    make(chan struct{}),

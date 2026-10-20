@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/udovenkoav1981/RedLease/internal/bootid"
+	internalmetrics "github.com/udovenkoav1981/RedLease/internal/clientmetrics"
 )
 
 const defaultResponseTimeout = time.Second
@@ -41,6 +42,7 @@ type Client struct {
 	requestPool          sync.Pool
 	replicaResponsesPool sync.Pool
 	responseTimerPool    sync.Pool
+	metrics              internalmetrics.Recorder
 }
 
 // New creates a client and starts connecting to all configured servers. It
