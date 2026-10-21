@@ -122,3 +122,61 @@ func TestBestAcquireQuorumUsesEverySupportedThreshold(t *testing.T) {
 		}
 	}
 }
+
+func TestBestAcquireQuorumSelectsNthLatestValidity(t *testing.T) {
+	base := time.Unix(1_000, 0)
+	candidates := []time.Time{
+		base.Add(5 * time.Second),
+		base.Add(1 * time.Second),
+		base.Add(4 * time.Second),
+		base.Add(2 * time.Second),
+		base.Add(3 * time.Second),
+	}
+	tests := []struct {
+		name       string
+		successful []bool
+		quorumSize int
+		want       time.Time
+	}{
+		{
+			name:       "one of one",
+			successful: []bool{true},
+			quorumSize: 1,
+			want:       candidates[0],
+		},
+		{
+			name:       "two of three",
+			successful: []bool{true, true, true},
+			quorumSize: 2,
+			want:       candidates[2],
+		},
+		{
+			name:       "three of five",
+			successful: []bool{true, true, true, true, true},
+			quorumSize: 3,
+			want:       candidates[4],
+		},
+		{
+			name:       "unsuccessful latest candidate",
+			successful: []bool{false, true, true, true, true},
+			quorumSize: 3,
+			want:       candidates[3],
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := bestAcquireQuorum(
+				candidates[:len(test.successful)],
+				test.successful,
+				test.quorumSize,
+			)
+			if !ok {
+				t.Fatal("bestAcquireQuorum did not find a quorum")
+			}
+			if !got.Equal(test.want) {
+				t.Fatalf("validUntil = %v, want %v", got, test.want)
+			}
+		})
+	}
+}

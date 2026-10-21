@@ -238,18 +238,21 @@ func bestAcquireQuorum(
 	successful []bool,
 	quorumSize int,
 ) (time.Time, bool) {
-	validities := make([]time.Time, 0, len(candidates))
+	var best [maxServerCount]time.Time
+	successfulCount := 0
 	for replica, success := range successful {
-		if success {
-			validities = append(validities, candidates[replica])
+		if !success {
+			continue
 		}
+		best[successfulCount] = candidates[replica]
+		successfulCount++
 	}
-	if len(validities) < quorumSize {
+	if successfulCount < quorumSize {
 		return time.Time{}, false
 	}
 
-	slices.SortFunc(validities, time.Time.Compare)
-	return validities[len(validities)-quorumSize], true
+	slices.SortFunc(best[:successfulCount], time.Time.Compare)
+	return best[successfulCount-quorumSize], true
 }
 
 func (c *Client) newAcquireRequest(key, sequence, ttlMS uint64) outboundConnectionRequest {
