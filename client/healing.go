@@ -93,14 +93,19 @@ func (l *Lease) healingTargets() ([]int, bool) {
 }
 
 func (l *Lease) healReplicas(replicas []int) int {
-	operationStart, started := l.beginHealingBatch()
-	if !started {
+	l.stateMu.Lock()
+	if l.lifecycle != leaseActive || !time.Now().Before(l.validUntil) {
+		l.stateMu.Unlock()
 		return 0
 	}
+	l.healingBatches.Add(1)
+	operationStart := l.now
+	l.stateMu.Unlock()
+
 	batchActive := true
 	defer func() {
 		if batchActive {
-			l.endHealingBatch()
+			l.healingBatches.Done()
 		}
 	}()
 
@@ -111,7 +116,7 @@ func (l *Lease) healReplicas(replicas []int) int {
 		request := l.client.newAcquireRequest(l.key, l.sequence, l.requestedTTLMS)
 		_ = responses.submit(l.client.ctx, replica, request)
 	}
-	l.endHealingBatch()
+	l.healingBatches.Done()
 	batchActive = false
 
 	confirmed := 0

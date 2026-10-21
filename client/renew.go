@@ -39,10 +39,15 @@ func (e *notRenewedError) Is(target error) bool {
 // Renew attempts to extend this lease on a configured quorum. Failure leaves
 // the previously confirmed validUntil unchanged.
 func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
-	operationStart, started := l.beginRenew()
-	if !started {
+	l.stateMu.Lock()
+	if l.lifecycle != leaseActive {
+		l.stateMu.Unlock()
 		return &notRenewedError{cause: ErrLeaseReleased}
 	}
+	l.now = time.Now()
+	operationStart := l.now
+	l.stateMu.Unlock()
+
 	serverCount := len(l.client.replicas)
 	quorumSize := l.client.quorum.size()
 

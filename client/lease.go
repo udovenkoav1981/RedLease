@@ -105,30 +105,6 @@ func (l *Lease) clearConfirmed(replica int) {
 	l.stateMu.Unlock()
 }
 
-func (l *Lease) beginRenew() (time.Time, bool) {
-	l.stateMu.Lock()
-	defer l.stateMu.Unlock()
-	if l.lifecycle != leaseActive {
-		return time.Time{}, false
-	}
-	l.now = time.Now()
-	return l.now, true
-}
-
-func (l *Lease) beginHealingBatch() (time.Time, bool) {
-	l.stateMu.Lock()
-	defer l.stateMu.Unlock()
-	if l.lifecycle != leaseActive || !time.Now().Before(l.validUntil) {
-		return time.Time{}, false
-	}
-	l.healingBatches.Add(1)
-	return l.now, true
-}
-
-func (l *Lease) endHealingBatch() {
-	l.healingBatches.Done()
-}
-
 func (l *Lease) extendValidity(validUntil time.Time) {
 	l.stateMu.Lock()
 	defer l.stateMu.Unlock()
