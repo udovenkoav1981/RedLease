@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -419,6 +420,8 @@ func measure(ctx context.Context, clients []loadClient, leaseCount int, config *
 	ready.Wait()
 	timer := time.NewTimer(config.duration)
 	defer timer.Stop()
+	var memoryBefore runtime.MemStats
+	runtime.ReadMemStats(&memoryBefore)
 	started := time.Now()
 	close(startSignal)
 	select {
@@ -430,7 +433,11 @@ func measure(ctx context.Context, clients []loadClient, leaseCount int, config *
 		cancelWorker()
 	}
 	workers.Wait()
-	return summarize(stats, len(clients), leaseCount, elapsed)
+	var memoryAfter runtime.MemStats
+	runtime.ReadMemStats(&memoryAfter)
+	result := summarize(stats, len(clients), leaseCount, elapsed)
+	result.allocations = memoryAfter.Mallocs - memoryBefore.Mallocs
+	return result
 }
 
 func work(

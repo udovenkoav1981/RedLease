@@ -70,6 +70,7 @@ type caseResult struct {
 	totalLatency time.Duration
 	latencies    latencyHistogram
 	perClient    []uint64
+	allocations  uint64
 }
 
 func summarize(stats []workerStats, clientCount, leaseCount int, elapsed time.Duration) caseResult {
@@ -97,12 +98,13 @@ func (r *caseResult) csvRecord(selected scenario, quorum string, clients, leases
 		minClient = min(minClient, count)
 		maxClient = max(maxClient, count)
 	}
-	var fairness, average float64
+	var fairness, average, allocationsPerOperation float64
 	if maxClient > 0 {
 		fairness = float64(minClient) / float64(maxClient)
 	}
 	if r.succeeded > 0 {
 		average = float64(r.totalLatency) / float64(r.succeeded) / float64(time.Millisecond)
+		allocationsPerOperation = float64(r.allocations) / float64(r.succeeded)
 	}
 	return []string{
 		selected.name,
@@ -122,6 +124,7 @@ func (r *caseResult) csvRecord(selected scenario, quorum string, clients, leases
 		formatFloat(float64(r.latencies.percentile(r.succeeded, 50)) / float64(time.Millisecond)),
 		formatFloat(float64(r.latencies.percentile(r.succeeded, 95)) / float64(time.Millisecond)),
 		formatFloat(float64(r.latencies.percentile(r.succeeded, 99)) / float64(time.Millisecond)),
+		formatFloat(allocationsPerOperation),
 	}
 }
 

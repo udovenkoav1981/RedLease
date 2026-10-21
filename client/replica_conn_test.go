@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	flatbuffers "github.com/google/flatbuffers/go"
+
 	redleasev1 "github.com/udovenkoav1981/RedLease/fbs/redlease/v1"
 	"github.com/udovenkoav1981/RedLease/internal/transport"
 )
@@ -324,10 +326,11 @@ func newTestReplicaConnWithoutCleanup(factory connectionFactory) *replicaConn {
 
 func newReplicaFakeStream() *fakeLeaseClientStream {
 	return &fakeLeaseClientStream{
-		sent:        make(chan observedRequest),
-		receive:     make(chan fakeReceive, 256),
-		sendAttempt: make(chan struct{}),
-		closed:      make(chan struct{}),
+		responseBuilder: flatbuffers.NewBuilder(transport.InitialBufferSize),
+		sent:            make(chan observedRequest),
+		receive:         make(chan fakeReceive, 256),
+		sendAttempt:     make(chan struct{}),
+		closed:          make(chan struct{}),
 	}
 }
 

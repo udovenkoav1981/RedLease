@@ -117,6 +117,7 @@ func run(args []string, output, flagOutput io.Writer) (runErr error) {
 		"acquire_ok", "acquire_failed", "key_limit_failed", "expired_before_release",
 		"acquires_per_s", "client_min_per_s", "client_max_per_s", "client_min_max_ratio",
 		"acquire_avg_ms", "acquire_p50_ms", "acquire_p95_ms", "acquire_p99_ms",
+		"allocs_per_op",
 	}); err != nil {
 		return fmt.Errorf("write CSV header: %w", err)
 	}

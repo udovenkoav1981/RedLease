@@ -520,8 +520,9 @@ func observeClientRequest(request *redleasev1.ClientRequest) (observedRequest, e
 }
 
 type fakeLeaseClientStream struct {
-	readBuffer []byte
-	ctx        context.Context //nolint:containedctx // Test stream owns this context.
+	readBuffer      []byte
+	responseBuilder *flatbuffers.Builder
+	ctx             context.Context //nolint:containedctx // Test stream owns this context.
 
 	sent        chan observedRequest
 	receive     chan fakeReceive
@@ -573,7 +574,7 @@ func (s *fakeLeaseClientStream) Read(buffer []byte) (int, error) {
 			if result.err != nil {
 				return 0, result.err
 			}
-			s.readBuffer = encodeFakeResponse(result.response)
+			s.readBuffer = encodeFakeResponse(s.responseBuilder, result.response)
 		case <-s.closed:
 			return 0, errConnectionClosed
 		case <-s.ctx.Done():
@@ -602,8 +603,8 @@ type fakeAddr string
 func (a fakeAddr) Network() string { return "test" }
 func (a fakeAddr) String() string  { return string(a) }
 
-func encodeFakeResponse(response protocol.Response) []byte {
-	builder := flatbuffers.NewBuilder(transport.InitialBufferSize)
+func encodeFakeResponse(builder *flatbuffers.Builder, response protocol.Response) []byte {
+	builder.Reset()
 	redleasev1.ServerResponseStart(builder)
 	redleasev1.ServerResponseAddRequestId(builder, response.RequestID)
 	switch response.Operation {
@@ -649,13 +650,14 @@ func newTestStreamGenerationWithOptions(
 
 	replicaContext, cancelReplica := context.WithCancel(context.Background())
 	stream := &fakeLeaseClientStream{
-		ctx:         replicaContext,
-		sent:        make(chan observedRequest),
-		receive:     make(chan fakeReceive, 256),
-		sendAttempt: make(chan struct{}),
-		closed:      make(chan struct{}),
-		sendErr:     options.sendErr,
-		closeErr:    options.closeErr,
+		ctx:             replicaContext,
+		responseBuilder: flatbuffers.NewBuilder(transport.InitialBufferSize),
+		sent:            make(chan observedRequest),
+		receive:         make(chan fakeReceive, 256),
+		sendAttempt:     make(chan struct{}),
+		closed:          make(chan struct{}),
+		sendErr:         options.sendErr,
+		closeErr:        options.closeErr,
 	}
 	replica := &replicaConn{
 		client:   &Client{},

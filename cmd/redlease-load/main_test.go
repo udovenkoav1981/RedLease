@@ -170,7 +170,7 @@ func TestMeasureWithoutServer(t *testing.T) {
 	if result.succeeded == 0 || result.succeeded != releases.Load() || result.failed != 0 {
 		t.Fatalf("measure = %+v, releases = %d", result, releases.Load())
 	}
-	if len(result.csvRecord(scenario{name: clientName}, quorum1of1, 2, 2)) != 17 {
+	if len(result.csvRecord(scenario{name: clientName}, quorum1of1, 2, 2)) != 18 {
 		t.Fatal("CSV record has an unexpected number of columns")
 	}
 }
