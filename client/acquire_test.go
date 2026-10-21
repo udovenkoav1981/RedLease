@@ -532,14 +532,29 @@ func waitForConfirmedReplicas(t *testing.T, lease *Lease, want [testServerCount]
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for {
-		if got := lease.confirmedReplicas(); slices.Equal(got, want[:]) {
+		if got := confirmedReplicas(lease); slices.Equal(got, want[:]) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("confirmed replicas = %v, want %v", lease.confirmedReplicas(), want)
+			t.Fatalf("confirmed replicas = %v, want %v", confirmedReplicas(lease), want)
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+func confirmedReplicas(lease *Lease) []bool {
+	lease.stateMu.RLock()
+	defer lease.stateMu.RUnlock()
+	now := time.Now()
+
+	confirmed := make([]bool, len(lease.confirmedUntil))
+	if lease.lifecycle != leaseActive {
+		return confirmed
+	}
+	for replica, validUntil := range lease.confirmedUntil {
+		confirmed[replica] = now.Before(validUntil)
+	}
+	return confirmed
 }
 
 func leaseNow(lease *Lease) time.Time {

@@ -128,7 +128,11 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 						collecting = false
 						break
 					}
-					l.extendValidity(quorumValidUntil)
+					l.stateMu.Lock()
+					if quorumValidUntil.After(l.validUntil) {
+						l.validUntil = quorumValidUntil
+					}
+					l.stateMu.Unlock()
 
 					if responses.remaining != 0 {
 						responsesOwned = false

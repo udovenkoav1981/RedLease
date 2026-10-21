@@ -264,7 +264,7 @@ func TestConfirmedReplicaExpiresIndependently(t *testing.T) {
 	acquired.lease.confirmedUntil[3] = time.Now()
 	acquired.lease.stateMu.Unlock()
 	want := [testServerCount]bool{true, true, true, false, true}
-	if got := acquired.lease.confirmedReplicas(); !slices.Equal(got, want[:]) {
+	if got := confirmedReplicas(acquired.lease); !slices.Equal(got, want[:]) {
 		t.Fatalf("confirmed replicas after expiry = %v, want %v", got, want)
 	}
 	if acquired.lease.RemainingTTLms() == 0 {

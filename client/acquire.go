@@ -129,7 +129,7 @@ func (c *Client) Acquire(
 						break
 					}
 
-					lease.setAcquireValidity(validUntil)
+					lease.validUntil = validUntil
 					acquired = true
 					if responses.remaining != 0 {
 						responsesOwned = false

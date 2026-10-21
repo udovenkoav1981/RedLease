@@ -68,10 +68,6 @@ func (l *Lease) RemainingTTLms() uint64 {
 	return uint64(remaining)
 }
 
-func (l *Lease) setAcquireValidity(validUntil time.Time) {
-	l.validUntil = validUntil
-}
-
 func (l *Lease) markConfirmed(replica int, confirmedUntil time.Time) {
 	l.stateMu.Lock()
 	if l.lifecycle == leaseActive &&
@@ -82,33 +78,10 @@ func (l *Lease) markConfirmed(replica int, confirmedUntil time.Time) {
 	l.stateMu.Unlock()
 }
 
-func (l *Lease) confirmedReplicas() []bool {
-	l.stateMu.RLock()
-	defer l.stateMu.RUnlock()
-	now := time.Now()
-
-	confirmed := make([]bool, len(l.confirmedUntil))
-	if l.lifecycle != leaseActive {
-		return confirmed
-	}
-	for replica, validUntil := range l.confirmedUntil {
-		confirmed[replica] = now.Before(validUntil)
-	}
-	return confirmed
-}
-
 func (l *Lease) clearConfirmed(replica int) {
 	l.stateMu.Lock()
 	if l.lifecycle == leaseActive {
 		l.confirmedUntil[replica] = time.Time{}
 	}
 	l.stateMu.Unlock()
-}
-
-func (l *Lease) extendValidity(validUntil time.Time) {
-	l.stateMu.Lock()
-	defer l.stateMu.Unlock()
-	if validUntil.After(l.validUntil) {
-		l.validUntil = validUntil
-	}
 }

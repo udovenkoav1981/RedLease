@@ -9,7 +9,7 @@ import (
 func TestLeaseValidityUsesMonotonicTimeBoundary(t *testing.T) {
 	client := testLeaseClient()
 	lease := newLease(client, 0, uint64(1), 1_000, time.Now())
-	lease.setAcquireValidity(time.Now().Add(time.Second))
+	lease.validUntil = time.Now().Add(time.Second)
 
 	if lease.RemainingTTLms() == 0 {
 		t.Fatal("lease is not valid before validUntil")
@@ -18,7 +18,7 @@ func TestLeaseValidityUsesMonotonicTimeBoundary(t *testing.T) {
 	if remaining == 0 || remaining > 1_000 {
 		t.Fatalf("remaining TTL = %d, want 1..1000", remaining)
 	}
-	lease.setAcquireValidity(time.Now())
+	lease.validUntil = time.Now()
 	if lease.RemainingTTLms() != 0 {
 		t.Fatal("lease is valid at validUntil boundary")
 	}
@@ -42,7 +42,7 @@ func TestLeaseGetterAndConcurrentState(t *testing.T) {
 	client := testLeaseClient()
 	key := uint64(1)
 	lease := newLease(client, 3, key, 1_000, time.Now())
-	lease.setAcquireValidity(time.Now().Add(time.Second))
+	lease.validUntil = time.Now().Add(time.Second)
 
 	const iterations = 1_000
 	done := make(chan struct{})
