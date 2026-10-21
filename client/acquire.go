@@ -87,8 +87,8 @@ func (c *Client) Acquire(
 	}
 
 	var (
-		candidates   = make([]time.Time, serverCount)
-		successful   = make([]bool, serverCount)
+		candidates   [maxServerCount]time.Time
+		successful   [maxServerCount]bool
 		keyLimitSeen bool
 	)
 
@@ -118,8 +118,8 @@ func (c *Client) Acquire(
 				}
 
 				validUntil, hasQuorum := bestAcquireQuorum(
-					candidates,
-					successful,
+					candidates[:serverCount],
+					successful[:serverCount],
 					quorumSize,
 				)
 				if hasQuorum && now.Before(validUntil) {
@@ -151,8 +151,8 @@ func (c *Client) Acquire(
 			}
 
 			if !acquireQuorumStillPossible(
-				candidates,
-				successful,
+				candidates[:serverCount],
+				successful[:serverCount],
 				serverCount-received,
 				time.Now(),
 				quorumSize,

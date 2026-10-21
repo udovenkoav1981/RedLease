@@ -88,8 +88,8 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 	}
 
 	var (
-		candidates = make([]time.Time, serverCount)
-		successful = make([]bool, serverCount)
+		candidates [maxServerCount]time.Time
+		successful [maxServerCount]bool
 	)
 
 	collecting := true
@@ -125,8 +125,8 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 				}
 
 				quorumValidUntil, hasQuorum := bestAcquireQuorum(
-					candidates,
-					successful,
+					candidates[:serverCount],
+					successful[:serverCount],
 					quorumSize,
 				)
 				if hasQuorum && now.Before(quorumValidUntil) {
@@ -149,8 +149,8 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 			}
 
 			if !acquireQuorumStillPossible(
-				candidates,
-				successful,
+				candidates[:serverCount],
+				successful[:serverCount],
 				serverCount-received,
 				time.Now(),
 				quorumSize,
