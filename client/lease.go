@@ -25,7 +25,7 @@ type Lease struct {
 	stateMu        sync.RWMutex
 	lifecycle      leaseLifecycle
 	validUntil     time.Time
-	confirmedUntil []time.Time
+	confirmedUntil [maxServerCount]time.Time
 	healing        bool
 	healingBatches sync.WaitGroup
 
@@ -45,7 +45,6 @@ func newLease(
 		key:            key,
 		requestedTTLMS: requestedTTLMS,
 		now:            now,
-		confirmedUntil: make([]time.Time, len(client.replicas)),
 		lifecycle:      leaseActive,
 		releaseDone:    make(chan struct{}),
 	}

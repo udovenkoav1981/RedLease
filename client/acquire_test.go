@@ -547,11 +547,11 @@ func confirmedReplicas(lease *Lease) []bool {
 	defer lease.stateMu.RUnlock()
 	now := time.Now()
 
-	confirmed := make([]bool, len(lease.confirmedUntil))
+	confirmed := make([]bool, len(lease.client.replicas))
 	if lease.lifecycle != leaseActive {
 		return confirmed
 	}
-	for replica, validUntil := range lease.confirmedUntil {
+	for replica, validUntil := range lease.confirmedUntil[:len(lease.client.replicas)] {
 		confirmed[replica] = now.Before(validUntil)
 	}
 	return confirmed

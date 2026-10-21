@@ -66,7 +66,7 @@ func (l *Lease) backgroundHealingNeededLocked(now time.Time) bool {
 	if l.lifecycle != leaseActive || !now.Before(l.validUntil) {
 		return false
 	}
-	for _, confirmedUntil := range l.confirmedUntil {
+	for _, confirmedUntil := range l.confirmedUntil[:len(l.client.replicas)] {
 		if confirmedUntil.Before(l.validUntil) {
 			return true
 		}
@@ -83,8 +83,8 @@ func (l *Lease) healingTargets() ([]int, bool) {
 		return nil, false
 	}
 
-	targets := make([]int, 0, len(l.confirmedUntil))
-	for replica, confirmedUntil := range l.confirmedUntil {
+	targets := make([]int, 0, len(l.client.replicas))
+	for replica, confirmedUntil := range l.confirmedUntil[:len(l.client.replicas)] {
 		if !now.Before(confirmedUntil) {
 			targets = append(targets, replica)
 		}

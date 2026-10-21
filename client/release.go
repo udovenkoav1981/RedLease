@@ -14,7 +14,7 @@ func (l *Lease) Release() {
 	}
 	l.lifecycle = leaseReleased
 	l.validUntil = time.Time{}
-	clear(l.confirmedUntil)
+	clear(l.confirmedUntil[:])
 	l.stateMu.Unlock()
 
 	l.healingBatches.Wait()
