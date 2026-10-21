@@ -100,7 +100,7 @@ func (l *Lease) healReplicas(replicas []int) int {
 	batchActive := true
 	defer func() {
 		if batchActive {
-			l.endSubmitBatch()
+			l.endHealingBatch()
 		}
 	}()
 
@@ -111,7 +111,7 @@ func (l *Lease) healReplicas(replicas []int) int {
 		request := l.client.newAcquireRequest(l.key, l.sequence, l.requestedTTLMS)
 		_ = responses.submit(l.client.ctx, replica, request)
 	}
-	l.endSubmitBatch()
+	l.endHealingBatch()
 	batchActive = false
 
 	confirmed := 0

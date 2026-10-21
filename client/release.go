@@ -17,7 +17,7 @@ func (l *Lease) Release() {
 	clear(l.confirmedUntil)
 	l.stateMu.Unlock()
 
-	l.submitBatches.Wait()
+	l.healingBatches.Wait()
 	l.client.releaseAll(l.key, l.sequence)
 	close(l.releaseDone)
 }

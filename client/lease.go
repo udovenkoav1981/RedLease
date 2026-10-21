@@ -14,6 +14,7 @@ const (
 
 // Lease is a locally confirmed distributed lease. Its validity is based only
 // on the quorum selected by Acquire; later replica responses never extend it.
+// Its public methods must not be called concurrently on the same Lease.
 type Lease struct {
 	client         *Client
 	sequence       uint64
@@ -26,9 +27,7 @@ type Lease struct {
 	validUntil     time.Time
 	confirmedUntil []time.Time
 	healing        bool
-	submitBatches  sync.WaitGroup
-
-	renewMu sync.Mutex
+	healingBatches sync.WaitGroup
 
 	releaseDone chan struct{}
 }
@@ -59,14 +58,10 @@ func (l *Lease) Key() uint64 {
 
 // RemainingTTLms returns the remaining local validity in milliseconds.
 func (l *Lease) RemainingTTLms() uint64 {
-	l.stateMu.RLock()
-	validUntil := l.validUntil
-	active := l.lifecycle == leaseActive
-	l.stateMu.RUnlock()
-	if !active {
+	if l.lifecycle != leaseActive {
 		return 0
 	}
-	remaining := time.Until(validUntil).Milliseconds()
+	remaining := time.Until(l.validUntil).Milliseconds()
 	if remaining <= 0 {
 		return 0
 	}
@@ -74,11 +69,7 @@ func (l *Lease) RemainingTTLms() uint64 {
 }
 
 func (l *Lease) setAcquireValidity(validUntil time.Time) {
-	l.stateMu.Lock()
-	if l.lifecycle == leaseActive {
-		l.validUntil = validUntil
-	}
-	l.stateMu.Unlock()
+	l.validUntil = validUntil
 }
 
 func (l *Lease) markConfirmed(replica int, confirmedUntil time.Time) {
@@ -114,14 +105,13 @@ func (l *Lease) clearConfirmed(replica int) {
 	l.stateMu.Unlock()
 }
 
-func (l *Lease) beginRenewBatch() (time.Time, bool) {
+func (l *Lease) beginRenew() (time.Time, bool) {
 	l.stateMu.Lock()
 	defer l.stateMu.Unlock()
 	if l.lifecycle != leaseActive {
 		return time.Time{}, false
 	}
 	l.now = time.Now()
-	l.submitBatches.Add(1)
 	return l.now, true
 }
 
@@ -131,22 +121,18 @@ func (l *Lease) beginHealingBatch() (time.Time, bool) {
 	if l.lifecycle != leaseActive || !time.Now().Before(l.validUntil) {
 		return time.Time{}, false
 	}
-	l.submitBatches.Add(1)
+	l.healingBatches.Add(1)
 	return l.now, true
 }
 
-func (l *Lease) endSubmitBatch() {
-	l.submitBatches.Done()
+func (l *Lease) endHealingBatch() {
+	l.healingBatches.Done()
 }
 
-func (l *Lease) applyRenewValidity(validUntil time.Time) bool {
+func (l *Lease) extendValidity(validUntil time.Time) {
 	l.stateMu.Lock()
 	defer l.stateMu.Unlock()
-	if l.lifecycle != leaseActive {
-		return false
-	}
 	if validUntil.After(l.validUntil) {
 		l.validUntil = validUntil
 	}
-	return true
 }

@@ -13,7 +13,7 @@ var (
 	// quorum. The previously confirmed validity is not revoked.
 	ErrNotRenewed = errors.New("RedLease lease not renewed")
 
-	// ErrLeaseReleased is returned when Renew races with or follows Release.
+	// ErrLeaseReleased is returned when Renew follows Release.
 	ErrLeaseReleased = errors.New("RedLease lease released")
 )
 
@@ -39,21 +39,12 @@ func (e *notRenewedError) Is(target error) bool {
 // Renew attempts to extend this lease on a configured quorum. Failure leaves
 // the previously confirmed validUntil unchanged.
 func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
-	l.renewMu.Lock()
-	defer l.renewMu.Unlock()
-
-	operationStart, started := l.beginRenewBatch()
+	operationStart, started := l.beginRenew()
 	if !started {
 		return &notRenewedError{cause: ErrLeaseReleased}
 	}
 	serverCount := len(l.client.replicas)
 	quorumSize := l.client.quorum.size()
-	batchActive := true
-	defer func() {
-		if batchActive {
-			l.endSubmitBatch()
-		}
-	}()
 
 	responses := l.client.acquireReplicaResponses()
 	responsesOwned := true
@@ -76,9 +67,6 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 			}
 		}
 	}
-	l.endSubmitBatch()
-	batchActive = false
-
 	if err := l.renewCancellationError(ctx); err != nil {
 		if responses.remaining != 0 {
 			responsesOwned = false
@@ -94,7 +82,7 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 
 	collecting := true
 	for received < serverCount && collecting {
-		completed, event := responses.next(l.releaseDone, ctx.Done())
+		completed, event := responses.next(nil, ctx.Done())
 		switch event {
 		case responseReceived:
 			received++
@@ -135,10 +123,7 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 						collecting = false
 						break
 					}
-					if !l.applyRenewValidity(quorumValidUntil) {
-						responses.abort(context.Canceled)
-						return &notRenewedError{cause: ErrLeaseReleased}
-					}
+					l.extendValidity(quorumValidUntil)
 
 					if responses.remaining != 0 {
 						responsesOwned = false
@@ -162,8 +147,9 @@ func (l *Lease) Renew(ctx context.Context, ttlMS uint64) error {
 			firstFailure = ctx.Err()
 			collecting = false
 		case lifecycleCanceled:
-			firstFailure = l.renewCancellationError(ctx)
-			responses.abort(context.Canceled)
+			// Renew passes no lifecycle channel because public operations on one
+			// Lease must be sequential.
+			firstFailure = ErrLeaseReleased
 			collecting = false
 		}
 	}
@@ -212,12 +198,6 @@ func (l *Lease) collectRemainingRenewResults(
 func (l *Lease) renewCancellationError(callerContext context.Context) error {
 	if err := callerContext.Err(); err != nil {
 		return err
-	}
-	l.stateMu.RLock()
-	active := l.lifecycle == leaseActive
-	l.stateMu.RUnlock()
-	if !active {
-		return ErrLeaseReleased
 	}
 	if l.client.ctx.Err() != nil {
 		return ErrClientClosed

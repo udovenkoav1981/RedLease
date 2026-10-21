@@ -181,45 +181,6 @@ func TestLeaseRenewCanUseQuorumAfterUnacceptedSubmitTimesOut(t *testing.T) {
 	}
 }
 
-func TestLeaseConcurrentRenewAndReleasePreservesWireOrderAndNoResurrection(t *testing.T) {
-	harness := newAcquireHarness(t)
-	lease := acquireFullyConfirmedLease(t, harness, 1, 2_000)
-
-	renewResult := startLeaseRenew(lease, context.Background(), 4_000)
-	renewRequests := harness.receiveRenewRequests(t)
-
-	lease.Release()
-	if lease.RemainingTTLms() != 0 {
-		t.Fatal("Release did not invalidate lease immediately")
-	}
-
-	// These responses arrive after Release has transitioned the lease out of
-	// ACTIVE. They must neither restore validity nor confirmations.
-	for replica, request := range renewRequests {
-		harness.respondRenew(replica, request, redleasev1.LeaseStatusOK, 4_000)
-	}
-	err := receiveRenewResult(t, renewResult)
-	if !errors.Is(err, ErrNotRenewed) || !errors.Is(err, ErrLeaseReleased) {
-		t.Fatalf("Renew error = %v, want ErrNotRenewed and ErrLeaseReleased", err)
-	}
-
-	releases := harness.receiveReleaseRequests(t)
-	for replica, release := range releases {
-		if !sameLeaseID(release, renewRequests[replica]) {
-			t.Fatalf("replica %d Release used a different lease ID", replica)
-		}
-		harness.respondRelease(replica, release)
-	}
-	waitForLeaseReleased(t, lease)
-
-	if lease.RemainingTTLms() != 0 {
-		t.Fatal("late Renew resurrected released lease")
-	}
-	if got := lease.confirmedReplicas(); !slices.Equal(got, make([]bool, testServerCount)) {
-		t.Fatalf("late Renew restored confirmations: %v", got)
-	}
-}
-
 func TestLeaseReleaseIsImmediateIdempotentAndFansOut(t *testing.T) {
 	harness := newAcquireHarness(t)
 	lease := acquireFullyConfirmedLease(t, harness, 1, 2_000)
